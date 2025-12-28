@@ -39,4 +39,25 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_macos_build_settings(target)
   end
+
+  # Copy native QUIC library into the app bundle
+  installer.pods_project.targets.each do |target|
+    if target.name == 'Runner' then
+      target.build_configurations.each do |config|
+        # Add a copy build phase to copy libmoq_quic.dylib
+        copy_phase = target.new_shell_script_build_phase('Copy Native QUIC Library')
+        copy_phase.shell_script = <<-EOS
+          if [ -f "../../../native/moq_quic/target/release/libmoq_quic.dylib" ]; then
+            echo "Copying libmoq_quic.dylib to app bundle"
+            cp "../../../native/moq_quic/target/release/libmoq_quic.dylib" "${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}"
+            install_name_tool -id "@rpath/libmoq_quic.dylib" "${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}/libmoq_quic.dylib"
+          else
+            echo "Warning: libmoq_quic.dylib not found, QUIC transport will not be available"
+          fi
+        EOS
+        # Add to the end of build phases (after embedding frameworks)
+        target.build_phases << copy_phase
+      end
+    end
+  end
 end

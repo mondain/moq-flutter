@@ -102,9 +102,43 @@ class QuicTransport extends MoQTransport {
     } else if (Platform.isIOS) {
       return DynamicLibrary.process();
     } else if (Platform.isMacOS) {
-      return DynamicLibrary.open('libmoq_quic.dylib');
+      // Try multiple paths for the native library on macOS
+      final paths = [
+        'libmoq_quic.dylib',
+        '../native/moq_quic/target/release/libmoq_quic.dylib',
+        'native/moq_quic/target/release/libmoq_quic.dylib',
+        '../Frameworks/libmoq_quic.dylib',
+        '@rpath/libmoq_quic.dylib',
+      ];
+
+      for (final path in paths) {
+        try {
+          _logger.d('Trying to load library from: $path');
+          return DynamicLibrary.open(path);
+        } catch (e) {
+          _logger.d('Failed to load from $path: $e');
+        }
+      }
+
+      throw Exception('Could not find libmoq_quic.dylib in any of the expected paths');
     } else if (Platform.isWindows) {
-      return DynamicLibrary.open('moq_quic.dll');
+      // Try multiple paths for the native library on Windows
+      final paths = [
+        'moq_quic.dll',
+        '../native/moq_quic/target/release/moq_quic.dll',
+        'native/moq_quic/target/release/moq_quic.dll',
+      ];
+
+      for (final path in paths) {
+        try {
+          _logger.d('Trying to load library from: $path');
+          return DynamicLibrary.open(path);
+        } catch (e) {
+          _logger.d('Failed to load from $path: $e');
+        }
+      }
+
+      throw Exception('Could not find moq_quic.dll in any of the expected paths');
     } else {
       throw UnsupportedError('Platform not supported: ${Platform.operatingSystem}');
     }

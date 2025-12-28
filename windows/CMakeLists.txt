@@ -87,6 +87,14 @@ if(PLUGIN_BUNDLED_LIBRARIES)
     COMPONENT Runtime)
 endif()
 
+# Install native QUIC library (Windows)
+set(MOQ_QUIC_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../native/moq_quic/target/release/moq_quic.dll")
+if(EXISTS "${MOQ_QUIC_LIB}")
+  install(FILES "${MOQ_QUIC_LIB}"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+endif()
+
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"
