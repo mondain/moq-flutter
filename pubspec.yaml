@@ -37,11 +37,11 @@ dependencies:
 
   # MoQ Dependencies
   # State management
-  flutter_riverpod: ^2.6.1
+  flutter_riverpod: ^3.1.0
 
   # Networking
   http: ^1.2.2
-  web_socket_channel: ^2.4.5
+  web_socket_channel: ^3.0.3
 
   # Async and concurrency
   async: ^2.11.0
@@ -55,11 +55,11 @@ dependencies:
 
   # Video/Audio handling
   media_kit: ^1.1.11
-  media_kit_video: ^1.0.5
+  media_kit_video: ^2.0.1
   media_kit_libs_video: ^1.0.5
 
   # Permissions
-  permission_handler: ^11.3.1
+  permission_handler: ^12.0.1
 
   # Utils
   uuid: ^4.5.1
@@ -75,7 +75,7 @@ dev_dependencies:
   # activated in the `analysis_options.yaml` file located at the root of your
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
-  flutter_lints: ^5.0.0
+  flutter_lints: ^6.0.0
 
   # Testing
   mocktail: ^1.0.4

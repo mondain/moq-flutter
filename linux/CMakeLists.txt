@@ -106,6 +106,14 @@ foreach(bundled_library ${PLUGIN_BUNDLED_LIBRARIES})
     COMPONENT Runtime)
 endforeach(bundled_library)
 
+# Install native QUIC library
+set(MOQ_QUIC_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../native/moq_quic/target/release/libmoq_quic.so")
+if(EXISTS "${MOQ_QUIC_LIB}")
+  install(FILES "${MOQ_QUIC_LIB}"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+endif()
+
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/linux/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"

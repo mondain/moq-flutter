@@ -17,6 +17,7 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
   final _namespaceController = TextEditingController(text: 'demo');
   final _trackNameController = TextEditingController(text: 'video');
   bool _isLoading = false;
+  bool _insecureMode = false;
 
   @override
   void dispose() {
@@ -35,7 +36,7 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
       final host = _hostController.text;
       final port = int.tryParse(_portController.text) ?? 4443;
 
-      await client.connect(host, port);
+      await client.connect(host, port, options: {'insecure': _insecureMode.toString()});
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -191,6 +192,20 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
               ),
               keyboardType: TextInputType.number,
               enabled: !isConnected && !_isLoading,
+            ),
+            const SizedBox(height: 16),
+            CheckboxListTile(
+              title: const Text('Skip Certificate Verification'),
+              subtitle: const Text(
+                'DANGER: Disable certificate verification for self-signed certificates',
+                style: TextStyle(fontSize: 12, color: Colors.orange),
+              ),
+              value: _insecureMode,
+              onChanged: (isConnected || _isLoading)
+                  ? null
+                  : (value) => setState(() => _insecureMode = value ?? false),
+              controlAffinity: ListTileControlAffinity.leading,
+              contentPadding: EdgeInsets.zero,
             ),
             const SizedBox(height: 16),
             FilledButton(

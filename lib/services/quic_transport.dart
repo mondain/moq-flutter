@@ -30,14 +30,15 @@ class QuicTransport extends MoQTransport {
     packetsReceived: 0,
   );
 
-  // Native function signatures
-  late final _InitFunc _moqQuicInit;
-  late final _ConnectFunc _moqQuicConnect;
-  late final _SendFunc _moqQuicSend;
-  late final _CloseFunc _moqQuicClose;
-  late final _CleanupFunc _moqQuicCleanup;
+  // Native function signatures (nullable to support stub mode)
+  _InitFunc? _moqQuicInit;
+  _ConnectFunc? _moqQuicConnect;
+  _SendFunc? _moqQuicSend;
+  _CloseFunc? _moqQuicClose;
+  _CleanupFunc? _moqQuicCleanup;
 
   Timer? _pollTimer;
+  bool _nativeLibraryLoaded = false;
 
   QuicTransport({Logger? logger}) : _logger = logger ?? Logger() {
     _loadNativeLibrary();
@@ -52,7 +53,7 @@ class QuicTransport extends MoQTransport {
           .lookup<NativeFunction<Void Function()>>('moq_quic_init')
           .asFunction();
       _moqQuicConnect = _nativeLib!
-          .lookup<NativeFunction<NativeInt32 Function(Pointer<Int8>, NativeUint16, Pointer<NativeUint64>)>>(
+          .lookup<NativeFunction<NativeInt32 Function(Pointer<Int8>, NativeUint16, Uint8, Pointer<NativeUint64>)>>(
               'moq_quic_connect')
           .asFunction();
       _moqQuicSend = _nativeLib!
@@ -67,18 +68,37 @@ class QuicTransport extends MoQTransport {
           .asFunction();
 
       // Initialize the native library
-      _moqQuicInit();
+      _moqQuicInit!();
 
+      _nativeLibraryLoaded = true;
       _logger.i('Native QUIC library loaded successfully');
     } catch (e) {
       _logger.e('Failed to load native QUIC library: $e');
       _logger.w('QUIC transport will not be available - running in stub mode');
+      _nativeLibraryLoaded = false;
     }
   }
 
   DynamicLibrary _openNativeLibrary() {
     if (Platform.isLinux || Platform.isAndroid) {
-      return DynamicLibrary.open('libmoq_quic.so');
+      // Try multiple paths for the native library
+      final paths = [
+        'libmoq_quic.so',
+        '../native/moq_quic/target/release/libmoq_quic.so',
+        'native/moq_quic/target/release/libmoq_quic.so',
+        '/usr/local/lib/libmoq_quic.so',
+      ];
+
+      for (final path in paths) {
+        try {
+          _logger.d('Trying to load library from: $path');
+          return DynamicLibrary.open(path);
+        } catch (e) {
+          _logger.d('Failed to load from $path: $e');
+        }
+      }
+
+      throw Exception('Could not find libmoq_quic.so in any of the expected paths');
     } else if (Platform.isIOS) {
       return DynamicLibrary.process();
     } else if (Platform.isMacOS) {
@@ -103,14 +123,30 @@ class QuicTransport extends MoQTransport {
       return;
     }
 
+    if (!_nativeLibraryLoaded) {
+      _logger.e('Cannot connect: Native QUIC library is not available');
+      _logger.w('Please build the native Rust library first:');
+      _logger.w('  cd native/moq_quic && cargo build --release');
+      _connectionStateController.add(false);
+      throw StateError('Native QUIC library not available');
+    }
+
     try {
       _logger.i('Connecting to $host:$port via Quinn QUIC');
+
+      // Check for insecure flag in options (for self-signed certificates)
+      final insecureValue = options?['insecure'];
+      final insecure = (insecureValue == 'true' || insecureValue?.toString() == 'true') ? 1 : 0;
+      if (insecure != 0) {
+        _logger.w('Certificate verification DISABLED (insecure mode)');
+      }
 
       // Convert host to native string
       final hostPtr = host.toNativeUtf8();
       final connectionIdPtr = calloc<Uint64>();
 
-      final result = _moqQuicConnect(hostPtr.cast<Int8>(), port.toUnsigned(16), connectionIdPtr);
+      final result = _moqQuicConnect!(
+          hostPtr.cast<Int8>(), port.toUnsigned(16), insecure, connectionIdPtr);
 
       calloc.free(hostPtr);
 
@@ -143,8 +179,8 @@ class QuicTransport extends MoQTransport {
 
     _stopReceiving();
 
-    if (_connectionId >= 0 && _nativeLib != null) {
-      _moqQuicClose(_connectionId);
+    if (_connectionId >= 0 && _nativeLibraryLoaded && _moqQuicClose != null) {
+      _moqQuicClose!(_connectionId);
       _connectionId = -1;
     }
 
@@ -159,13 +195,18 @@ class QuicTransport extends MoQTransport {
       throw StateError('Not connected');
     }
 
+    if (!_nativeLibraryLoaded || _moqQuicSend == null) {
+      _logger.e('Cannot send: Native QUIC library is not available');
+      throw StateError('Native QUIC library not available');
+    }
+
     try {
       // Allocate native buffer
       final dataPtr = calloc<Uint8>(data.length);
       final nativeData = dataPtr.asTypedList(data.length);
       nativeData.setAll(0, data);
 
-      final sent = _moqQuicSend(_connectionId, dataPtr, data.length);
+      final sent = _moqQuicSend!(_connectionId, dataPtr, data.length);
 
       calloc.free(dataPtr);
 
@@ -248,8 +289,8 @@ class QuicTransport extends MoQTransport {
   @override
   void dispose() {
     disconnect();
-    if (_nativeLib != null) {
-      _moqQuicCleanup();
+    if (_nativeLibraryLoaded && _moqQuicCleanup != null) {
+      _moqQuicCleanup!();
     }
     _connectionStateController.close();
     _incomingDataController.close();
@@ -259,7 +300,7 @@ class QuicTransport extends MoQTransport {
 // FFI function signatures
 typedef _InitFunc = void Function();
 typedef _ConnectFunc = int Function(
-    Pointer<Int8> host, int port, Pointer<Uint64> outConnectionId);
+    Pointer<Int8> host, int port, int insecure, Pointer<Uint64> outConnectionId);
 typedef _SendFunc = int Function(
     int connectionId, Pointer<Uint8> data, int len);
 typedef _CloseFunc = int Function(int connectionId);

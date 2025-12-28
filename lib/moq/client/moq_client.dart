@@ -118,7 +118,9 @@ class MoQClient {
     }
 
     // Send CLIENT_SETUP message
-    final versions = supportedVersions ?? [0x00000001]; // Version 1
+    // Draft versions use format 0xff00000X where X is draft number
+    // Draft-14 = 0xff00000e, Draft-15 = 0xff00000f
+    final versions = supportedVersions ?? [0xff00000e]; // Draft-14
     final setupMessage = ClientSetupMessage(
       supportedVersions: versions,
       // TODO: Add setup parameters
