@@ -144,6 +144,29 @@ This implementation follows [draft-ietf-moq-transport-14](https://datatracker.ie
 - Rust toolchain (for native QUIC library compilation)
 - Android/iOS/Desktop build tools
 
+#### Linux Dependencies
+
+For video playback support on Linux, install the mpv library:
+
+```bash
+# Ubuntu/Debian
+sudo apt update && sudo apt install libmpv-dev mpv
+
+# Fedora
+sudo dnf install mpv-devel
+
+# Arch Linux
+sudo pacman -S mpv
+```
+
+#### macOS Dependencies
+
+No additional dependencies required for video playback.
+
+#### Windows Dependencies
+
+The media_kit package includes bundled native libraries. No additional dependencies required.
+
 ### Install Dependencies
 
 ```bash
