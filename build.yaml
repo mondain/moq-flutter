@@ -1,0 +1,14 @@
+targets:
+  $default:
+    builders:
+      # Run the Rust library build hook
+      rust_build_hook:
+        enabled: true
+
+builders:
+  rust_build_hook:
+    import: "tool/build_rust.dart"
+    builder_factories: ["main"]
+    build_extensions: { ".dart": [".rust_build"] }
+    auto_apply: dependents
+    build_to: cache
