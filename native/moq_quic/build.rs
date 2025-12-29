@@ -59,7 +59,21 @@ fn main() {
     writeln!(header, "#endif // MOQ_QUIC_H").unwrap();
 
     // Tell cargo where to find the native libraries
-    println!("cargo:rustc-link-lib=stdc++");
+    //if !cfg!(target_os = "windows") {
+    //    println!("cargo:rustc-link-lib=stdc++");
+    //}
+    let target = std::env::var("TARGET").unwrap();
+    if target.contains("apple") {
+        // macOS uses libc++
+        println!("cargo:rustc-link-lib=c++");
+    } else if target.contains("linux") {
+        // Linux uses libstdc++
+        println!("cargo:rustc-link-lib=stdc++");
+    } else if target.contains("windows") {
+        // Windows (MSVC) doesn't need a manual stdc++ link; 
+        // it uses default libs like msvcrt
+    }
+    
     println!("cargo:rerun-if-changed=src/lib.rs");
 
     // Copy header to include directory for easier access
