@@ -9,9 +9,9 @@ name = "moq_quic"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-tokio"] }
-tokio = { version = "1.41", features = ["rt-multi-thread", "net", "time"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+quinn = { version = "0.11.9", default-features = false, features = ["rustls", "runtime-tokio"] }
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "net", "time"] }
+rustls = { version = "0.23.35", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2.2"
 log = "0.4"
 futures = "0.3"
@@ -26,4 +26,4 @@ macos = ["ring"]
 linux = ["aws-lc-rs"]
 
 [build-dependencies]
-cbindgen = "0.27"
+cbindgen = "0.29.2"
