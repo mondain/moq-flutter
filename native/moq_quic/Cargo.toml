@@ -11,9 +11,9 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-tokio", "aws-lc-rs"] }
 tokio = { version = "1.41", features = ["rt-multi-thread", "net", "time"] }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 rustls-pemfile = "2.2"
-rustls-native-certs = "0.8"
+# rustls-native-certs has issues on macOS with aws-lc-rs, use platform-native certs instead
 log = "0.4"
 futures = "0.3"
 

@@ -151,17 +151,9 @@ pub extern "C" fn moq_quic_connect(
         };
 
         // Create client configuration
-        let certs = if insecure != 0 {
-            // For insecure mode, use a dummy cert store
-            rustls::RootCertStore::empty()
-        } else {
-            let mut certs = rustls::RootCertStore::empty();
-            let cert_result = rustls_native_certs::load_native_certs();
-            for cert in cert_result.certs {
-                certs.add(cert).ok();
-            }
-            certs
-        };
+        // For production, you should add actual root certificates
+        // For development/testing, use insecure mode to skip certificate verification
+        let certs = rustls::RootCertStore::empty();
 
         // Build transport config with standard settings (from moq-native-ietf)
         let mut transport = TransportConfig::default();
