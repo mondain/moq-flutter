@@ -87,7 +87,6 @@ fn get_runtime() -> &'static Runtime {
 #[no_mangle]
 pub extern "C" fn moq_quic_init() {
     // Install default CryptoProvider for rustls (required for rustls 0.23+)
-    // Use aws-lc-rs provider for better cross-platform support (especially macOS)
     #[cfg(feature = "aws-lc-rs")]
     let provider = rustls::crypto::aws_lc_rs::default_provider();
     #[cfg(not(feature = "aws-lc-rs"))]

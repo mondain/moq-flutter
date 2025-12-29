@@ -9,18 +9,21 @@ name = "moq_quic"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-tokio", "aws-lc-rs"] }
+quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-tokio"] }
 tokio = { version = "1.41", features = ["rt-multi-thread", "net", "time"] }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2.2"
-# rustls-native-certs has issues on macOS with aws-lc-rs, use platform-native certs instead
 log = "0.4"
 futures = "0.3"
 
 [features]
-default = ["aws-lc-rs"]
+default = ["ring"]
 ring = ["rustls/ring", "quinn/ring"]
 aws-lc-rs = ["rustls/aws-lc-rs", "quinn/aws-lc-rs"]
+
+# Platform-specific features
+macos = ["ring"]
+linux = ["aws-lc-rs"]
 
 [build-dependencies]
 cbindgen = "0.27"
