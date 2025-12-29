@@ -106,13 +106,24 @@ foreach(bundled_library ${PLUGIN_BUNDLED_LIBRARIES})
     COMPONENT Runtime)
 endforeach(bundled_library)
 
+# Build native QUIC library (Linux)
+set(MOQ_QUIC_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../native/moq_quic")
+set(MOQ_QUIC_LIB "${MOQ_QUIC_SRC_DIR}/target/release/libmoq_quic.so")
+
+add_custom_command(
+  OUTPUT "${MOQ_QUIC_LIB}"
+  COMMAND cargo build --release --manifest-path "${MOQ_QUIC_SRC_DIR}/Cargo.toml"
+  WORKING_DIRECTORY "${MOQ_QUIC_SRC_DIR}"
+  COMMENT "Building native QUIC library..."
+  VERBATIM
+)
+
+add_custom_target(moq_quic_lib ALL DEPENDS "${MOQ_QUIC_LIB}")
+
 # Install native QUIC library
-set(MOQ_QUIC_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../native/moq_quic/target/release/libmoq_quic.so")
-if(EXISTS "${MOQ_QUIC_LIB}")
-  install(FILES "${MOQ_QUIC_LIB}"
-    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
-    COMPONENT Runtime)
-endif()
+install(FILES "${MOQ_QUIC_LIB}"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  COMPONENT Runtime)
 
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/linux/")

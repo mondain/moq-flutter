@@ -83,7 +83,7 @@ dev_dependencies:
     sdk: flutter
 
   # Code generation
-  build_runner: ^2.4.13
+  build_runner: ^2.9.0
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

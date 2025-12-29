@@ -108,6 +108,8 @@ Future<void> _compileMacOS(String rustDir, bool isDebug) async {
     }
   }
 
+  final buildType = isDebug ? 'debug' : 'release';
+
   // Build for each target
   for (final target in targets) {
     final args = [
@@ -133,21 +135,24 @@ Future<void> _compileMacOS(String rustDir, bool isDebug) async {
     }
   }
 
-  // Create universal binary
-  final buildType = isDebug ? 'debug' : 'release';
-  final arm64Lib = '$rustDir/target/aarch64-apple-darwin/$buildType/libmoq_quic.a';
-  final x64Lib = '$rustDir/target/x86_64-apple-darwin/$buildType/libmoq_quic.a';
-  final universalLib = '$rustDir/target/universal-apple-darwin/$buildType/libmoq_quic.a';
+  // Create universal dylib at the expected location for Podfile
+  final arm64Lib = '$rustDir/target/aarch64-apple-darwin/$buildType/libmoq_quic.dylib';
+  final x64Lib = '$rustDir/target/x86_64-apple-darwin/$buildType/libmoq_quic.dylib';
+  final universalLib = '$rustDir/target/release/libmoq_quic.dylib';
 
-  Directory('$rustDir/target/universal-apple-darwin/$buildType')
-      .createSync(recursive: true);
+  Directory('$rustDir/target/release').createSync(recursive: true);
 
-  await Process.run(
+  final result = await Process.run(
     'lipo',
     ['-create', '-output', universalLib, arm64Lib, x64Lib],
   );
 
-  print('Universal binary created: $universalLib');
+  if (result.exitCode != 0) {
+    print('Lipo failed:\n${result.stderr}');
+    throw BuildException('Failed to create universal binary for macOS');
+  }
+
+  print('Universal dylib created: $universalLib');
 }
 
 Future<void> _compileWindows(String rustDir, bool isDebug) async {

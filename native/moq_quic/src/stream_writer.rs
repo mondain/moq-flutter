@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{self, Sender};
 
 /// Command for stream writer operations
+#[allow(dead_code)]
 pub enum StreamCommand {
     Write(Vec<u8>),
     Finish,
@@ -14,6 +15,7 @@ pub enum StreamCommand {
 /// Stream writer that handles async writes via a channel
 /// This allows FFI calls to queue writes without blocking
 pub struct StreamWriter {
+    #[allow(dead_code)]
     tx: Sender<StreamCommand>,
 }
 
@@ -59,16 +61,19 @@ impl StreamWriter {
 
     /// Try to write data without blocking
     /// Returns error if channel is full or closed
+    #[allow(dead_code)]
     pub fn try_write(&self, data: Vec<u8>) -> Result<(), mpsc::error::TrySendError<StreamCommand>> {
         self.tx.try_send(StreamCommand::Write(data))
     }
 
     /// Try to finish the stream
+    #[allow(dead_code)]
     pub fn try_finish(&self) -> Result<(), mpsc::error::TrySendError<StreamCommand>> {
         self.tx.try_send(StreamCommand::Finish)
     }
 
     /// Finish the stream asynchronously (awaits completion)
+    #[allow(dead_code)]
     pub async fn finish(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.tx.send(StreamCommand::Finish)
             .await
@@ -78,11 +83,13 @@ impl StreamWriter {
 }
 
 /// Callback for receiving stream data
+#[allow(dead_code)]
 pub trait StreamDataCallback: Send + Sync {
     fn on_stream_data(&self, session_id: u64, stream_id: u64, data: &[u8]);
 }
 
 /// Handle a unidirectional stream with incremental reading
+#[allow(dead_code)]
 pub async fn handle_unidirectional_stream(
     session_id: u64,
     stream_id: u64,
@@ -110,6 +117,7 @@ pub async fn handle_unidirectional_stream(
 }
 
 /// Handle a bidirectional stream with incremental reading
+#[allow(dead_code)]
 pub async fn handle_bidirectional_stream(
     session_id: u64,
     stream_id: u64,
