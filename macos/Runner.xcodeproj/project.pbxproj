@@ -241,6 +241,7 @@
 				33CC110E2044A8840003C045 /* Bundle Framework */,
 				3399D490228B24CF009A79C7 /* ShellScript */,
 				BCA54351A565A77FF63C5182 /* [CP] Embed Pods Frameworks */,
+				MOQ12345678901234567890AB /* Copy Native QUIC Library */,
 			);
 			buildRules = (
 			);
@@ -421,6 +422,25 @@
 			shellPath = /bin/sh;
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
+		};
+		MOQ12345678901234567890AB /* Copy Native QUIC Library */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Copy Native QUIC Library";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\n\n# Navigate to project root (PROJECT_DIR is macos/, so parent is project root)\ncd \"$PROJECT_DIR/..\"\n\nLIBRARY_PATH=\"native/moq_quic/target/release/libmoq_quic.dylib\"\nFRAMEWORKS_DIR=\"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\n\n# Build the library if it doesn't exist\nif [ ! -f \"$LIBRARY_PATH\" ]; then\n    echo \"Building native QUIC library for macOS...\"\n    \n    # Check if cargo is available\n    if ! command -v cargo &> /dev/null; then\n        echo \"error: cargo not found. Please install Rust toolchain.\"\n        exit 1\n    fi\n    \n    # Build for both architectures\n    rustup target add x86_64-apple-darwin aarch64-apple-darwin 2>/dev/null || true\n    cargo build --release --target x86_64-apple-darwin --manifest-path native/moq_quic/Cargo.toml\n    cargo build --release --target aarch64-apple-darwin --manifest-path native/moq_quic/Cargo.toml\n    \n    # Create universal binary\n    mkdir -p native/moq_quic/target/release\n    lipo -create \\\n        native/moq_quic/target/x86_64-apple-darwin/release/libmoq_quic.dylib \\\n        native/moq_quic/target/aarch64-apple-darwin/release/libmoq_quic.dylib \\\n        -output \"$LIBRARY_PATH\"\nfi\n\n# Ensure Frameworks directory exists\nmkdir -p \"$FRAMEWORKS_DIR\"\n\n# Copy the library\necho \"Copying libmoq_quic.dylib to $FRAMEWORKS_DIR\"\ncp \"$LIBRARY_PATH\" \"$FRAMEWORKS_DIR/\"\n\n# Fix the install name\ninstall_name_tool -id \"@rpath/libmoq_quic.dylib\" \"$FRAMEWORKS_DIR/libmoq_quic.dylib\"\n\n# Code sign the library\necho \"Signing libmoq_quic.dylib\"\ncodesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --timestamp=none --preserve-metadata=identifier,entitlements \"$FRAMEWORKS_DIR/libmoq_quic.dylib\" || codesign --force --sign - \"$FRAMEWORKS_DIR/libmoq_quic.dylib\"\n\necho \"Native QUIC library copied and signed successfully\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

@@ -39,48 +39,4 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_macos_build_settings(target)
   end
-
-  # Copy native QUIC library into the app bundle
-  installer.pods_project.targets.each do |target|
-    if target.name == 'Runner' then
-      target.build_configurations.each do |config|
-        # Add build phase to build native QUIC library
-        build_phase = target.new_shell_script_build_phase('Build Native QUIC Library')
-        build_phase.shell_script = <<-EOS
-          set -e
-          cd "../../.."
-          if [ -f "native/moq_quic/target/release/libmoq_quic.dylib" ]; then
-            echo "Native QUIC library already built, skipping..."
-          else
-            echo "Building native QUIC library for macOS..."
-            rustup target add x86_64-apple-darwin aarch64-apple-darwin 2>/dev/null || true
-          fi
-        EOS
-        # Insert before compile sources
-        target.build_phases.insert(target.build_phases.index(target.source_build_phase), build_phase)
-
-        # Add a copy build phase to copy libmoq_quic.dylib
-        copy_phase = target.new_shell_script_build_phase('Copy Native QUIC Library')
-        copy_phase.shell_script = <<-EOS
-          set -e
-          cd "../../.."
-          if [ ! -f "native/moq_quic/target/release/libmoq_quic.dylib" ]; then
-            echo "Building native QUIC library for macOS..."
-            cargo build --release --target x86_64-apple-darwin --manifest-path native/moq_quic/Cargo.toml
-            cargo build --release --target aarch64-apple-darwin --manifest-path native/moq_quic/Cargo.toml
-            mkdir -p native/moq_quic/target/release
-            lipo -create \
-              native/moq_quic/target/x86_64-apple-darwin/release/libmoq_quic.dylib \
-              native/moq_quic/target/aarch64-apple-darwin/release/libmoq_quic.dylib \
-              -output native/moq_quic/target/release/libmoq_quic.dylib
-          fi
-          echo "Copying libmoq_quic.dylib to app bundle"
-          cp "native/moq_quic/target/release/libmoq_quic.dylib" "${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}/"
-          install_name_tool -id "@rpath/libmoq_quic.dylib" "${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}/libmoq_quic.dylib"
-        EOS
-        # Add to the end of build phases (after embedding frameworks)
-        target.build_phases << copy_phase
-      end
-    end
-  end
 end
