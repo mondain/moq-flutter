@@ -28,6 +28,9 @@ class MoQClient {
   // Active namespace subscriptions (for discovery)
   final _namespaceSubscriptions = <Int64, MoQNamespaceSubscription>{};
 
+  // Active fetches
+  final _activeFetches = <Int64, MoQFetch>{};
+
   // Incoming publish requests (server mode)
   final _incomingPublishController = StreamController<MoQPublishRequest>.broadcast();
   final _pendingPublishRequests = <Int64, MoQPublishRequest>{};
@@ -460,6 +463,180 @@ class MoQClient {
     });
   }
 
+  /// Fetch past objects from a track (standalone fetch)
+  ///
+  /// Retrieves objects from [startLocation] to [endLocation] (inclusive).
+  /// Use this when you need objects that were already published.
+  ///
+  /// Per draft-14 Section 9.16, FETCH is for retrieving past objects,
+  /// while SUBSCRIBE is for receiving new objects.
+  Future<FetchResult> fetch(
+    List<Uint8List> trackNamespace,
+    Uint8List trackName, {
+    required Location startLocation,
+    required Location endLocation,
+    int subscriberPriority = 128,
+    GroupOrder groupOrder = GroupOrder.none,
+    List<KeyValuePair>? parameters,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    final requestId = _getNextRequestId();
+
+    _logger.i('Fetching from track: ${String.fromCharCodes(trackName)} '
+        'range ${startLocation.group}:${startLocation.object} to '
+        '${endLocation.group}:${endLocation.object}');
+
+    final message = FetchMessage.standalone(
+      requestId: requestId,
+      trackNamespace: trackNamespace,
+      trackName: trackName,
+      startLocation: startLocation,
+      endLocation: endLocation,
+      subscriberPriority: subscriberPriority,
+      groupOrder: groupOrder,
+      parameters: parameters ?? [],
+    );
+
+    await _transport.send(message.serialize());
+
+    // Create fetch object (will be completed when FETCH_OK arrives)
+    final fetch = MoQFetch(
+      client: this,
+      requestId: requestId,
+      fetchType: FetchType.standalone,
+      trackNamespace: trackNamespace,
+      trackName: trackName,
+      startLocation: startLocation,
+      requestedEndLocation: endLocation,
+    );
+
+    _activeFetches[requestId] = fetch;
+
+    // Wait for FETCH_OK or FETCH_ERROR
+    return await fetch.waitForResponse();
+  }
+
+  /// Fetch past objects relative to an active subscription (relative joining fetch)
+  ///
+  /// Retrieves [groupCount] groups back from the subscription's current position.
+  /// The fetch range will be contiguous with the subscription.
+  ///
+  /// For example, if the subscription is at group 100 and groupCount is 5,
+  /// the fetch will retrieve groups 95-99.
+  Future<FetchResult> joiningFetchRelative(
+    Int64 subscriptionRequestId, {
+    required int groupCount,
+    int subscriberPriority = 128,
+    GroupOrder groupOrder = GroupOrder.none,
+    List<KeyValuePair>? parameters,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    final requestId = _getNextRequestId();
+
+    _logger.i('Joining fetch (relative): subscription ${subscriptionRequestId}, '
+        '$groupCount groups back');
+
+    final message = FetchMessage.relativeJoining(
+      requestId: requestId,
+      joiningRequestId: subscriptionRequestId,
+      joiningStart: Int64(groupCount),
+      subscriberPriority: subscriberPriority,
+      groupOrder: groupOrder,
+      parameters: parameters ?? [],
+    );
+
+    await _transport.send(message.serialize());
+
+    final fetch = MoQFetch(
+      client: this,
+      requestId: requestId,
+      fetchType: FetchType.relativeJoining,
+      joiningRequestId: subscriptionRequestId,
+      joiningStart: Int64(groupCount),
+    );
+
+    _activeFetches[requestId] = fetch;
+
+    return await fetch.waitForResponse();
+  }
+
+  /// Fetch past objects with absolute start location (absolute joining fetch)
+  ///
+  /// Retrieves objects from [startLocation] to the subscription's current position.
+  /// The fetch range will be contiguous with the subscription.
+  Future<FetchResult> joiningFetchAbsolute(
+    Int64 subscriptionRequestId, {
+    required Location startLocation,
+    int subscriberPriority = 128,
+    GroupOrder groupOrder = GroupOrder.none,
+    List<KeyValuePair>? parameters,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    final requestId = _getNextRequestId();
+
+    // Encode start location as a single Int64 for the message
+    // This is the raw group value; the spec uses it differently
+    final joiningStart = startLocation.group;
+
+    _logger.i('Joining fetch (absolute): subscription ${subscriptionRequestId}, '
+        'from group ${startLocation.group}');
+
+    final message = FetchMessage.absoluteJoining(
+      requestId: requestId,
+      joiningRequestId: subscriptionRequestId,
+      joiningStart: joiningStart,
+      subscriberPriority: subscriberPriority,
+      groupOrder: groupOrder,
+      parameters: parameters ?? [],
+    );
+
+    await _transport.send(message.serialize());
+
+    final fetch = MoQFetch(
+      client: this,
+      requestId: requestId,
+      fetchType: FetchType.absoluteJoining,
+      joiningRequestId: subscriptionRequestId,
+      joiningStart: joiningStart,
+      startLocation: startLocation,
+    );
+
+    _activeFetches[requestId] = fetch;
+
+    return await fetch.waitForResponse();
+  }
+
+  /// Cancel an active fetch
+  ///
+  /// Sends FETCH_CANCEL to stop receiving objects from the specified fetch.
+  Future<void> cancelFetch(Int64 requestId) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    final fetch = _activeFetches.remove(requestId);
+    if (fetch == null) {
+      _logger.w('No active fetch found for request: $requestId');
+      return;
+    }
+
+    _logger.i('Canceling fetch: $requestId');
+
+    final message = FetchCancelMessage(requestId: requestId);
+    await _transport.send(message.serialize());
+
+    fetch.cancel();
+  }
+
   /// Open a data stream for publishing objects
   ///
   /// Returns a stream ID that can be used with streamWrite and streamFinish.
@@ -685,6 +862,12 @@ class MoQClient {
       case MoQMessageType.unsubscribe:
         _handleUnsubscribeRequest(message as UnsubscribeMessage);
         break;
+      case MoQMessageType.fetchOk:
+        _handleFetchOk(message as FetchOkMessage);
+        break;
+      case MoQMessageType.fetchError:
+        _handleFetchError(message as FetchErrorMessage);
+        break;
       default:
         _logger.w('Unhandled message type: ${message.type}');
     }
@@ -828,6 +1011,35 @@ class MoQClient {
       _logger.i('Namespace subscription successful: ${subscription.namespacePrefixPath}');
     } else {
       _logger.w('Received SUBSCRIBE_NAMESPACE_OK for unknown request: ${message.requestId}');
+    }
+  }
+
+  void _handleFetchOk(FetchOkMessage message) {
+    final fetch = _activeFetches[message.requestId];
+    if (fetch != null) {
+      fetch.complete(
+        groupOrder: message.groupOrder,
+        endOfTrack: message.isEndOfTrack,
+        endLocation: message.endLocation,
+        parameters: message.parameters,
+      );
+      _logger.i('Fetch successful: ${message.requestId}');
+    } else {
+      _logger.w('Received FETCH_OK for unknown request: ${message.requestId}');
+    }
+  }
+
+  void _handleFetchError(FetchErrorMessage message) {
+    final fetch = _activeFetches[message.requestId];
+    if (fetch != null) {
+      fetch.fail(
+        errorCode: message.errorCode,
+        reason: message.errorReason.reason,
+      );
+      _activeFetches.remove(message.requestId);
+      _logger.e('Fetch failed: ${message.errorCode} - ${message.errorReason.reason}');
+    } else {
+      _logger.w('Received FETCH_ERROR for unknown request: ${message.requestId}');
     }
   }
 
@@ -1515,5 +1727,139 @@ class SubgroupHeaderMessage {
     buffer[offset] = publisherPriority & 0xFF;
 
     return buffer;
+  }
+}
+
+/// Result of a successful fetch
+class FetchResult {
+  final GroupOrder groupOrder;
+  final bool endOfTrack;
+  final Location endLocation;
+  final List<KeyValuePair> parameters;
+
+  const FetchResult({
+    required this.groupOrder,
+    required this.endOfTrack,
+    required this.endLocation,
+    this.parameters = const [],
+  });
+}
+
+/// Active fetch request
+///
+/// Tracks a FETCH request and provides a stream of objects.
+class MoQFetch {
+  final MoQClient client;
+  final Int64 requestId;
+  final FetchType fetchType;
+
+  // Standalone fetch fields
+  final List<Uint8List>? trackNamespace;
+  final Uint8List? trackName;
+  final Location? startLocation;
+  final Location? requestedEndLocation;
+
+  // Joining fetch fields
+  final Int64? joiningRequestId;
+  final Int64? joiningStart;
+
+  // Response data
+  GroupOrder? _groupOrder;
+  bool? _endOfTrack;
+  Location? _endLocation;
+  List<KeyValuePair>? _parameters;
+
+  final Completer<FetchResult> _responseCompleter = Completer<FetchResult>();
+  final _objectController = StreamController<MoQObject>.broadcast();
+  bool _isCanceled = false;
+  bool _isComplete = false;
+
+  MoQFetch({
+    required this.client,
+    required this.requestId,
+    required this.fetchType,
+    this.trackNamespace,
+    this.trackName,
+    this.startLocation,
+    this.requestedEndLocation,
+    this.joiningRequestId,
+    this.joiningStart,
+  });
+
+  /// Get track namespace as path string (for standalone fetch)
+  String get namespacePath {
+    if (trackNamespace == null) return '';
+    return trackNamespace!.map((e) => String.fromCharCodes(e)).join('/');
+  }
+
+  /// Get track name as string (for standalone fetch)
+  String get trackNameString {
+    if (trackName == null) return '';
+    return String.fromCharCodes(trackName!);
+  }
+
+  /// Wait for FETCH_OK response
+  Future<FetchResult> waitForResponse() => _responseCompleter.future;
+
+  /// Stream of objects for this fetch
+  Stream<MoQObject> get objectStream => _objectController.stream;
+
+  /// Actual end location from FETCH_OK
+  Location? get endLocation => _endLocation;
+
+  /// Actual group order from FETCH_OK
+  GroupOrder? get groupOrder => _groupOrder;
+
+  /// Whether this fetch covers the end of the track
+  bool get isEndOfTrack => _endOfTrack ?? false;
+
+  /// Whether fetch is active
+  bool get isActive => !_isCanceled && !_isComplete;
+
+  /// Complete the fetch with successful response
+  void complete({
+    required GroupOrder groupOrder,
+    required bool endOfTrack,
+    required Location endLocation,
+    List<KeyValuePair>? parameters,
+  }) {
+    if (_responseCompleter.isCompleted) return;
+
+    _groupOrder = groupOrder;
+    _endOfTrack = endOfTrack;
+    _endLocation = endLocation;
+    _parameters = parameters;
+
+    _responseCompleter.complete(FetchResult(
+      groupOrder: groupOrder,
+      endOfTrack: endOfTrack,
+      endLocation: endLocation,
+      parameters: parameters ?? [],
+    ));
+  }
+
+  /// Fail the fetch
+  void fail({required int errorCode, required String reason}) {
+    if (_responseCompleter.isCompleted) return;
+
+    _responseCompleter.completeError(
+      MoQException(errorCode: errorCode, reason: reason),
+    );
+  }
+
+  /// Cancel the fetch
+  void cancel() {
+    _isCanceled = true;
+    _objectController.close();
+  }
+
+  /// Mark fetch as complete (all objects received)
+  void markComplete() {
+    _isComplete = true;
+    _objectController.close();
+  }
+
+  void dispose() {
+    _objectController.close();
   }
 }

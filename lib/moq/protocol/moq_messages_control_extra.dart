@@ -3,46 +3,132 @@ part of 'moq_messages.dart';
 // NOTE: This file contains the remaining control messages for MoQ draft-14
 // These are appended to moq_messages_control.dart
 
-/// FETCH message (0x16)
+/// Fetch type enum per draft-ietf-moq-transport-14 Section 9.16
+enum FetchType {
+  standalone(0x1),
+  relativeJoining(0x2),
+  absoluteJoining(0x3);
+
+  final int value;
+  const FetchType(this.value);
+
+  static FetchType? fromValue(int value) {
+    for (final type in values) {
+      if (type.value == value) return type;
+    }
+    return null;
+  }
+}
+
+/// FETCH message (0x16) per draft-ietf-moq-transport-14 Section 9.16
 ///
 /// Wire format:
 /// FETCH Message {
 ///   Type (i) = 0x16,
 ///   Length (16),
 ///   Request ID (i),
-///   Track Namespace (tuple),
-///   Track Name Length (i),
-///   Track Name (..),
-///   Start Group (i),
-///   Start Object (i),
-///   End Group (i),
-///   End Object (i),
-///   Fetch Priority (8),
+///   Subscriber Priority (8),
+///   Group Order (8),
+///   Fetch Type (i),
+///   [Standalone (Standalone Fetch)],  // if Fetch Type = 0x1
+///   [Joining (Joining Fetch)],        // if Fetch Type = 0x2 or 0x3
 ///   Number of Parameters (i),
 ///   Parameters (..) ...
 /// }
 class FetchMessage extends MoQControlMessage {
   final Int64 requestId;
-  final List<Uint8List> trackNamespace;
-  final Uint8List trackName;
-  final Int64 startGroup;
-  final Int64 startObject;
-  final Int64 endGroup;
-  final Int64 endObject;
-  final int fetchPriority;
+  final int subscriberPriority;
+  final GroupOrder groupOrder;
+  final FetchType fetchType;
+
+  // Standalone fetch fields (when fetchType == standalone)
+  final List<Uint8List>? trackNamespace;
+  final Uint8List? trackName;
+  final Location? startLocation;
+  final Location? endLocation;
+
+  // Joining fetch fields (when fetchType == relativeJoining or absoluteJoining)
+  final Int64? joiningRequestId;
+  final Int64? joiningStart;
+
   final List<KeyValuePair> parameters;
 
-  FetchMessage({
+  /// Create a standalone fetch
+  FetchMessage.standalone({
     required this.requestId,
-    required this.trackNamespace,
-    required this.trackName,
-    required this.startGroup,
-    required this.startObject,
-    required this.endGroup,
-    required this.endObject,
-    required this.fetchPriority,
+    required List<Uint8List> trackNamespace,
+    required Uint8List trackName,
+    required Location startLocation,
+    required Location endLocation,
+    this.subscriberPriority = 128,
+    this.groupOrder = GroupOrder.none,
+    this.parameters = const [],
+  })  : fetchType = FetchType.standalone,
+        trackNamespace = trackNamespace,
+        trackName = trackName,
+        startLocation = startLocation,
+        endLocation = endLocation,
+        joiningRequestId = null,
+        joiningStart = null;
+
+  /// Create a relative joining fetch (startLocation = Largest.Group - joiningStart, 0)
+  FetchMessage.relativeJoining({
+    required this.requestId,
+    required Int64 joiningRequestId,
+    required Int64 joiningStart,
+    this.subscriberPriority = 128,
+    this.groupOrder = GroupOrder.none,
+    this.parameters = const [],
+  })  : fetchType = FetchType.relativeJoining,
+        joiningRequestId = joiningRequestId,
+        joiningStart = joiningStart,
+        trackNamespace = null,
+        trackName = null,
+        startLocation = null,
+        endLocation = null;
+
+  /// Create an absolute joining fetch (startLocation = joiningStart as Location)
+  FetchMessage.absoluteJoining({
+    required this.requestId,
+    required Int64 joiningRequestId,
+    required Int64 joiningStart,
+    this.subscriberPriority = 128,
+    this.groupOrder = GroupOrder.none,
+    this.parameters = const [],
+  })  : fetchType = FetchType.absoluteJoining,
+        joiningRequestId = joiningRequestId,
+        joiningStart = joiningStart,
+        trackNamespace = null,
+        trackName = null,
+        startLocation = null,
+        endLocation = null;
+
+  /// Internal constructor for deserialization
+  FetchMessage._({
+    required this.requestId,
+    required this.subscriberPriority,
+    required this.groupOrder,
+    required this.fetchType,
+    this.trackNamespace,
+    this.trackName,
+    this.startLocation,
+    this.endLocation,
+    this.joiningRequestId,
+    this.joiningStart,
     this.parameters = const [],
   });
+
+  /// Get track namespace as path string (for standalone fetch)
+  String get namespacePath {
+    if (trackNamespace == null) return '';
+    return trackNamespace!.map((e) => String.fromCharCodes(e)).join('/');
+  }
+
+  /// Get track name as string (for standalone fetch)
+  String get trackNameString {
+    if (trackName == null) return '';
+    return String.fromCharCodes(trackName!);
+  }
 
   @override
   MoQMessageType get type => MoQMessageType.fetch;
@@ -51,13 +137,22 @@ class FetchMessage extends MoQControlMessage {
   int get payloadLength {
     int len = 0;
     len += MoQWireFormat._varintSize64(requestId);
-    len += _tupleSize(trackNamespace);
-    len += MoQWireFormat._varintSize(trackName.length) + trackName.length;
-    len += MoQWireFormat._varintSize64(startGroup);
-    len += MoQWireFormat._varintSize64(startObject);
-    len += MoQWireFormat._varintSize64(endGroup);
-    len += MoQWireFormat._varintSize64(endObject);
-    len += 1; // Fetch Priority
+    len += 1; // Subscriber Priority
+    len += 1; // Group Order
+    len += MoQWireFormat._varintSize(fetchType.value);
+
+    if (fetchType == FetchType.standalone) {
+      len += MoQWireFormat._tupleSize(trackNamespace!);
+      len += MoQWireFormat._varintSize(trackName!.length) + trackName!.length;
+      len += MoQWireFormat._varintSize64(startLocation!.group);
+      len += MoQWireFormat._varintSize64(startLocation!.object);
+      len += MoQWireFormat._varintSize64(endLocation!.group);
+      len += MoQWireFormat._varintSize64(endLocation!.object);
+    } else {
+      len += MoQWireFormat._varintSize64(joiningRequestId!);
+      len += MoQWireFormat._varintSize64(joiningStart!);
+    }
+
     len += MoQWireFormat._varintSize(parameters.length);
     for (final param in parameters) {
       len += MoQWireFormat._varintSize(param.type);
@@ -68,31 +163,31 @@ class FetchMessage extends MoQControlMessage {
     return len;
   }
 
-  int _tupleSize(List<Uint8List> tuple) {
-    int len = MoQWireFormat._varintSize(tuple.length);
-    for (final element in tuple) {
-      len += MoQWireFormat._varintSize(element.length) + element.length;
-    }
-    return len;
-  }
-
   @override
   Uint8List serialize() {
     final payload = Uint8List(payloadLength);
     int offset = 0;
 
     offset += _writeVarint64(payload, offset, requestId);
-    offset += _writeTuple(payload, offset, trackNamespace);
-    offset += _writeVarint(payload, offset, trackName.length);
-    payload.setAll(offset, trackName);
-    offset += trackName.length;
-    offset += _writeVarint64(payload, offset, startGroup);
-    offset += _writeVarint64(payload, offset, startObject);
-    offset += _writeVarint64(payload, offset, endGroup);
-    offset += _writeVarint64(payload, offset, endObject);
-    payload[offset++] = fetchPriority;
-    offset += _writeVarint(payload, offset, parameters.length);
+    payload[offset++] = subscriberPriority;
+    payload[offset++] = groupOrder.value;
+    offset += _writeVarint(payload, offset, fetchType.value);
 
+    if (fetchType == FetchType.standalone) {
+      offset += _writeTuple(payload, offset, trackNamespace!);
+      offset += _writeVarint(payload, offset, trackName!.length);
+      payload.setAll(offset, trackName!);
+      offset += trackName!.length;
+      offset += _writeVarint64(payload, offset, startLocation!.group);
+      offset += _writeVarint64(payload, offset, startLocation!.object);
+      offset += _writeVarint64(payload, offset, endLocation!.group);
+      offset += _writeVarint64(payload, offset, endLocation!.object);
+    } else {
+      offset += _writeVarint64(payload, offset, joiningRequestId!);
+      offset += _writeVarint64(payload, offset, joiningStart!);
+    }
+
+    offset += _writeVarint(payload, offset, parameters.length);
     for (final param in parameters) {
       offset += _writeVarint(payload, offset, param.type);
       if (param.value != null) {
@@ -145,27 +240,50 @@ class FetchMessage extends MoQControlMessage {
     final (requestId, len1) = MoQWireFormat.decodeVarint64(data, offset);
     offset += len1;
 
-    final (namespace, len2) = MoQWireFormat.decodeTuple(data, offset);
+    final subscriberPriority = data[offset++];
+    final groupOrder = GroupOrder.fromValue(data[offset++]) ?? GroupOrder.none;
+
+    final (fetchTypeValue, len2) = MoQWireFormat.decodeVarint(data, offset);
     offset += len2;
+    final fetchType = FetchType.fromValue(fetchTypeValue) ?? FetchType.standalone;
 
-    final (nameLen, len3) = MoQWireFormat.decodeVarint(data, offset);
-    offset += len3;
-    final trackName = data.sublist(offset, offset + nameLen);
-    offset += nameLen;
+    List<Uint8List>? trackNamespace;
+    Uint8List? trackName;
+    Location? startLocation;
+    Location? endLocation;
+    Int64? joiningRequestId;
+    Int64? joiningStart;
 
-    final (startGroup, len4) = MoQWireFormat.decodeVarint64(data, offset);
-    offset += len4;
+    if (fetchType == FetchType.standalone) {
+      final (namespace, len3) = MoQWireFormat.decodeTuple(data, offset);
+      offset += len3;
+      trackNamespace = namespace;
 
-    final (startObject, len5) = MoQWireFormat.decodeVarint64(data, offset);
-    offset += len5;
+      final (nameLen, len4) = MoQWireFormat.decodeVarint(data, offset);
+      offset += len4;
+      trackName = data.sublist(offset, offset + nameLen);
+      offset += nameLen;
 
-    final (endGroup, len6) = MoQWireFormat.decodeVarint64(data, offset);
-    offset += len6;
+      final (startGroup, len5) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += len5;
+      final (startObject, len6) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += len6;
+      startLocation = Location(group: startGroup, object: startObject);
 
-    final (endObject, len7) = MoQWireFormat.decodeVarint64(data, offset);
-    offset += len7;
+      final (endGroup, len7) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += len7;
+      final (endObject, len8) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += len8;
+      endLocation = Location(group: endGroup, object: endObject);
+    } else {
+      final (jReqId, len3) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += len3;
+      joiningRequestId = jReqId;
 
-    final fetchPriority = data[offset++];
+      final (jStart, len4) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += len4;
+      joiningStart = jStart;
+    }
 
     final (numParams, numParamsLen) = MoQWireFormat.decodeVarint(data, offset);
     offset += numParamsLen;
@@ -187,37 +305,52 @@ class FetchMessage extends MoQControlMessage {
       params.add(KeyValuePair(type: type, value: value));
     }
 
-    return FetchMessage(
+    return FetchMessage._(
       requestId: requestId,
-      trackNamespace: namespace,
+      subscriberPriority: subscriberPriority,
+      groupOrder: groupOrder,
+      fetchType: fetchType,
+      trackNamespace: trackNamespace,
       trackName: trackName,
-      startGroup: startGroup,
-      startObject: startObject,
-      endGroup: endGroup,
-      endObject: endObject,
-      fetchPriority: fetchPriority,
+      startLocation: startLocation,
+      endLocation: endLocation,
+      joiningRequestId: joiningRequestId,
+      joiningStart: joiningStart,
       parameters: params,
     );
   }
 }
 
-/// FETCH_OK message (0x18)
+/// FETCH_OK message (0x18) per draft-ietf-moq-transport-14 Section 9.17
+///
+/// Wire format:
+/// FETCH_OK Message {
+///   Type (i) = 0x18,
+///   Length (16),
+///   Request ID (i),
+///   Group Order (8),
+///   End Of Track (8),
+///   End Location (Location),
+///   Number of Parameters (i),
+///   Parameters (..) ...
+/// }
 class FetchOkMessage extends MoQControlMessage {
   final Int64 requestId;
-  final Int64 expires;
   final GroupOrder groupOrder;
-  final int contentExists;
-  final Location? largestLocation;
+  final int endOfTrack; // 1 if all objects published, 0 if not
+  final Location endLocation;
   final List<KeyValuePair> parameters;
 
   FetchOkMessage({
     required this.requestId,
-    required this.expires,
     required this.groupOrder,
-    required this.contentExists,
-    this.largestLocation,
+    required this.endOfTrack,
+    required this.endLocation,
     this.parameters = const [],
   });
+
+  /// Whether this is the final object in the track
+  bool get isEndOfTrack => endOfTrack == 1;
 
   @override
   MoQMessageType get type => MoQMessageType.fetchOk;
@@ -226,12 +359,10 @@ class FetchOkMessage extends MoQControlMessage {
   int get payloadLength {
     int len = 0;
     len += MoQWireFormat._varintSize64(requestId);
-    len += MoQWireFormat._varintSize64(expires);
     len += 1; // Group Order
-    len += 1; // Content Exists
-    if (contentExists == 1 && largestLocation != null) {
-      len += _locationSize();
-    }
+    len += 1; // End Of Track
+    len += MoQWireFormat._varintSize64(endLocation.group);
+    len += MoQWireFormat._varintSize64(endLocation.object);
     len += MoQWireFormat._varintSize(parameters.length);
     for (final param in parameters) {
       len += MoQWireFormat._varintSize(param.type);
@@ -242,25 +373,15 @@ class FetchOkMessage extends MoQControlMessage {
     return len;
   }
 
-  int _locationSize() {
-    int len = MoQWireFormat._varintSize64(largestLocation?.group ?? Int64(0));
-    len += MoQWireFormat._varintSize64(largestLocation?.object ?? Int64(0));
-    return len;
-  }
-
   @override
   Uint8List serialize() {
     final payload = Uint8List(payloadLength);
     int offset = 0;
 
     offset += _writeVarint64(payload, offset, requestId);
-    offset += _writeVarint64(payload, offset, expires);
     payload[offset++] = groupOrder.value;
-    payload[offset++] = contentExists;
-
-    if (contentExists == 1 && largestLocation != null) {
-      offset += _writeLocation(payload, offset, largestLocation!);
-    }
+    payload[offset++] = endOfTrack;
+    offset += _writeLocation(payload, offset, endLocation);
 
     offset += _writeVarint(payload, offset, parameters.length);
 
@@ -316,18 +437,11 @@ class FetchOkMessage extends MoQControlMessage {
     final (requestId, len1) = MoQWireFormat.decodeVarint64(data, offset);
     offset += len1;
 
-    final (expires, len2) = MoQWireFormat.decodeVarint64(data, offset);
-    offset += len2;
+    final groupOrder = GroupOrder.fromValue(data[offset++]) ?? GroupOrder.ascending;
+    final endOfTrack = data[offset++];
 
-    final groupOrder = GroupOrder.fromValue(data[offset++]) ?? GroupOrder.none;
-    final contentExists = data[offset++];
-
-    Location? largestLocation;
-    if (contentExists == 1 && offset < data.length) {
-      final (location, locLen) = MoQWireFormat.decodeLocation(data, offset);
-      offset += locLen;
-      largestLocation = location;
-    }
+    final (endLocation, locLen) = MoQWireFormat.decodeLocation(data, offset);
+    offset += locLen;
 
     final (numParams, numParamsLen) = MoQWireFormat.decodeVarint(data, offset);
     offset += numParamsLen;
@@ -351,10 +465,9 @@ class FetchOkMessage extends MoQControlMessage {
 
     return FetchOkMessage(
       requestId: requestId,
-      expires: expires,
       groupOrder: groupOrder,
-      contentExists: contentExists,
-      largestLocation: largestLocation,
+      endOfTrack: endOfTrack,
+      endLocation: endLocation,
       parameters: params,
     );
   }
