@@ -3,17 +3,21 @@ import 'package:flutter/material.dart';
 /// Publishing controls bar with mute and stop buttons
 class PublishingControls extends StatelessWidget {
   final bool isAudioMuted;
+  final bool isVideoMuted;
   final int videoFrames;
   final int audioFrames;
-  final VoidCallback onMuteToggle;
+  final VoidCallback onAudioMuteToggle;
+  final VoidCallback onVideoMuteToggle;
   final VoidCallback onStop;
 
   const PublishingControls({
     super.key,
     required this.isAudioMuted,
+    required this.isVideoMuted,
     required this.videoFrames,
     required this.audioFrames,
-    required this.onMuteToggle,
+    required this.onAudioMuteToggle,
+    required this.onVideoMuteToggle,
     required this.onStop,
   });
 
@@ -24,9 +28,18 @@ class PublishingControls extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         children: [
-          // Mute button
+          // Video mute button
           IconButton(
-            onPressed: onMuteToggle,
+            onPressed: onVideoMuteToggle,
+            icon: Icon(
+              isVideoMuted ? Icons.videocam_off : Icons.videocam,
+              color: isVideoMuted ? Colors.red : Colors.white,
+            ),
+            tooltip: isVideoMuted ? 'Unmute video' : 'Mute video',
+          ),
+          // Audio mute button
+          IconButton(
+            onPressed: onAudioMuteToggle,
             icon: Icon(
               isAudioMuted ? Icons.mic_off : Icons.mic,
               color: isAudioMuted ? Colors.red : Colors.white,

@@ -40,6 +40,7 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   CmafPublisher? _cmafPublisher;
   bool _isPublishing = false;
   bool _isAudioMuted = false;
+  bool _isVideoMuted = false;
   int _publishedFrames = 0;
   int _publishedAudioFrames = 0;
   String _statusMessage = '';
@@ -217,7 +218,7 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
       // Subscribe to encoded frames
       _h264FrameSubscription = _h264Encoder!.frames.listen((h264Frame) async {
-        if (!_isPublishing || _cmafPublisher == null) return;
+        if (!_isPublishing || _cmafPublisher == null || _isVideoMuted) return;
 
         try {
           await _cmafPublisher!.publishVideoFrame(
@@ -311,6 +312,7 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   Future<void> _stopPublishing() async {
     _isPublishing = false;
     _isAudioMuted = false;
+    _isVideoMuted = false;
 
     // Stop subscriptions
     await _previewFrameSubscription?.cancel();
@@ -419,9 +421,11 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
                       ),
                       PublishingControls(
                         isAudioMuted: _isAudioMuted,
+                        isVideoMuted: _isVideoMuted,
                         videoFrames: _publishedFrames,
                         audioFrames: _publishedAudioFrames,
-                        onMuteToggle: () => setState(() => _isAudioMuted = !_isAudioMuted),
+                        onAudioMuteToggle: () => setState(() => _isAudioMuted = !_isAudioMuted),
+                        onVideoMuteToggle: () => setState(() => _isVideoMuted = !_isVideoMuted),
                         onStop: _disconnect,
                       ),
                     ],
