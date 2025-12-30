@@ -170,6 +170,7 @@ sudo pacman -S mpv ffmpeg libpulse v4l-utils
 ```
 
 **Required for media capture:**
+
 - `ffmpeg` - Video capture from V4L2 webcams and H.264/Opus encoding
 - `pulseaudio-utils` - Audio capture via `parec` (PulseAudio)
 - `v4l-utils` - Webcam device enumeration
@@ -293,3 +294,7 @@ Draft-14 implementation with:
 
 - [draft-ietf-moq-transport-14](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/14/)
 - [MoQ Working Group](https://datatracker.ietf.org/wg/moq/about/)
+- [Dart Language Documentation](https://dart.dev/guides)
+- [Flutter Documentation](https://flutter.dev/docs)
+- [Publish Sequence](docs/PublishSequence.md)
+- [Subscribe Sequence](docs/SubscribeSequence.md)
