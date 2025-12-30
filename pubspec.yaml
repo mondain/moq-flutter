@@ -75,6 +75,12 @@ dependencies:
   collection: ^1.19.0
   fixnum: ^1.1.0
 
+  # Navigation
+  go_router: ^14.6.3
+
+  # Responsive sizing
+  sizer: ^3.0.4
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
