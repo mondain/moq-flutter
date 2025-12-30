@@ -8,6 +8,7 @@ import '../moq/media/audio_capture.dart';
 import '../moq/media/audio_encoder.dart';
 import '../moq/media/camera_capture.dart';
 import '../moq/media/video_encoder.dart';
+import '../moq/publisher/cmaf_publisher.dart';
 import '../moq/publisher/moq_publisher.dart';
 import '../providers/moq_providers.dart';
 
@@ -36,9 +37,11 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
   TransportType _transportType = TransportType.moqt;
   ClientRole _clientRole = ClientRole.subscriber;
   String _statusMessage = '';
+  final bool _useCmafPackaging = true; // Default to CMAF/fMP4 packaging
 
   // Publisher state
   MoQPublisher? _publisher;
+  CmafPublisher? _cmafPublisher;
   bool _isPublishing = false;
   int _publishedFrames = 0;
   int _publishedAudioFrames = 0;
@@ -137,56 +140,12 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
         _setStatus('Publishing namespace $namespace...');
 
         try {
-          // Create publisher
-          _publisher = MoQPublisher(client: client);
-
-          // Announce namespace
-          await _publisher!.announce([namespace]);
-
-          // Add video track to catalog (H.264/AVC)
-          final videoTrackAlias = await _publisher!.addVideoTrack(
-            trackName,
-            priority: 128,
-            codec: 'avc1.42001f', // H.264 Baseline Profile Level 3.1
-            width: 1280,
-            height: 720,
-            framerate: 30,
-            bitrate: 2000000,
-            updateCatalogNow: false, // Wait to update both tracks
-          );
-
-          // Add audio track with Opus codec to catalog
-          const audioTrackName = 'audio';
-          final audioTrackAlias = await _publisher!.addAudioTrack(
-            audioTrackName,
-            priority: 200,
-            codec: 'opus',
-            samplerate: 48000,
-            channelConfig: 'stereo',
-            bitrate: 128000,
-            updateCatalogNow: true, // Update catalog with both tracks
-          );
-
-          _isPublishing = true;
-          _publishedFrames = 0;
-          _publishedAudioFrames = 0;
-          _setStatus('Initializing capture...');
-
-          // Initialize video capture and H.264 encoder
-          await _initializeVideoPublishing(trackName);
-
-          // Initialize audio capture and Opus encoder
-          await _initializeAudioPublishing(audioTrackName);
-
-          _setStatus('Publishing video ($videoTrackAlias) and audio ($audioTrackAlias)');
-
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Publishing video and audio to $namespace'),
-                backgroundColor: Colors.green,
-              ),
-            );
+          if (_useCmafPackaging) {
+            // Use CMAF/fMP4 packaging (CARP compliant)
+            await _startCmafPublishing(client, namespace, trackName);
+          } else {
+            // Use LOC packaging (raw codec data)
+            await _startLocPublishing(client, namespace, trackName);
           }
         } catch (e) {
           _setStatus('Publish failed: $e');
@@ -216,6 +175,248 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
         setState(() => _isLoading = false);
       }
     }
+  }
+
+  /// Start publishing with CMAF/fMP4 packaging (CARP compliant)
+  Future<void> _startCmafPublishing(dynamic client, String namespace, String trackName) async {
+    // Create CMAF publisher
+    _cmafPublisher = CmafPublisher(client: client, logger: _logger);
+
+    // Announce namespace with init track
+    await _cmafPublisher!.announce([namespace], initTrackName: '0.mp4');
+
+    // Add video track with fMP4 muxer
+    const videoTrackName = '1.m4s';
+    await _cmafPublisher!.addVideoTrack(
+      videoTrackName,
+      width: 1280,
+      height: 720,
+      frameRate: 30,
+      timescale: 90000,
+      priority: 128,
+      trackId: 1,
+    );
+
+    // Add audio track with fMP4 muxer
+    const audioTrackName = '2.m4s';
+    await _cmafPublisher!.addAudioTrack(
+      audioTrackName,
+      sampleRate: 48000,
+      channels: 2,
+      bitrate: 128000,
+      frameDurationMs: 20,
+      priority: 200,
+      trackId: 2,
+    );
+
+    // Mark audio as ready (Opus doesn't need external config)
+    await _cmafPublisher!.setAudioReady(audioTrackName);
+
+    _isPublishing = true;
+    _publishedFrames = 0;
+    _publishedAudioFrames = 0;
+    _setStatus('Initializing CMAF capture...');
+
+    // Initialize video capture and encoding
+    await _initializeCmafVideoPublishing(videoTrackName);
+
+    // Initialize audio capture and encoding
+    await _initializeCmafAudioPublishing(audioTrackName);
+
+    _setStatus('Publishing CMAF video and audio to $namespace');
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Publishing CMAF video and audio to $namespace'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
+  }
+
+  /// Start publishing with LOC packaging (raw codec data)
+  Future<void> _startLocPublishing(dynamic client, String namespace, String trackName) async {
+    // Create publisher
+    _publisher = MoQPublisher(client: client);
+
+    // Announce namespace
+    await _publisher!.announce([namespace]);
+
+    // Add video track to catalog (H.264/AVC)
+    final videoTrackAlias = await _publisher!.addVideoTrack(
+      trackName,
+      priority: 128,
+      codec: 'avc1.42001f', // H.264 Baseline Profile Level 3.1
+      width: 1280,
+      height: 720,
+      framerate: 30,
+      bitrate: 2000000,
+      updateCatalogNow: false, // Wait to update both tracks
+    );
+
+    // Add audio track with Opus codec to catalog
+    const audioTrackName = 'audio';
+    final audioTrackAlias = await _publisher!.addAudioTrack(
+      audioTrackName,
+      priority: 200,
+      codec: 'opus',
+      samplerate: 48000,
+      channelConfig: 'stereo',
+      bitrate: 128000,
+      updateCatalogNow: true, // Update catalog with both tracks
+    );
+
+    _isPublishing = true;
+    _publishedFrames = 0;
+    _publishedAudioFrames = 0;
+    _setStatus('Initializing capture...');
+
+    // Initialize video capture and H.264 encoder
+    await _initializeVideoPublishing(trackName);
+
+    // Initialize audio capture and Opus encoder
+    await _initializeAudioPublishing(audioTrackName);
+
+    _setStatus('Publishing video ($videoTrackAlias) and audio ($audioTrackAlias)');
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Publishing video and audio to $namespace'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
+  }
+
+  /// Initialize CMAF video capture and publishing
+  Future<void> _initializeCmafVideoPublishing(String videoTrackName) async {
+    try {
+      // Create camera capture
+      _cameraCapture = CameraCapture(
+        config: CaptureConfig(
+          resolution: ResolutionPreset.high,
+          enableAudio: false,
+        ),
+      );
+      await _cameraCapture!.initialize();
+
+      // Create H.264 encoder
+      _h264Encoder = H264Encoder(
+        config: const H264EncoderConfig(
+          width: 1280,
+          height: 720,
+          frameRate: 30,
+          bitrate: 2000000,
+          gopSize: 30,
+          profile: 'baseline',
+          preset: 'ultrafast',
+          tune: 'zerolatency',
+          inputFormat: 'yuv420p',
+        ),
+      );
+      await _h264Encoder!.start();
+
+      // Subscribe to video frames from camera
+      _videoFrameSubscription = _cameraCapture!.videoFrames.listen((videoFrame) {
+        _h264Encoder?.addFrame(videoFrame.data, videoFrame.timestampMs);
+      });
+
+      // Subscribe to encoded H.264 frames and publish as CMAF
+      _h264FrameSubscription = _h264Encoder!.frames.listen((h264Frame) async {
+        if (!_isPublishing || _cmafPublisher == null) return;
+
+        try {
+          // Publish H.264 frame wrapped in fMP4
+          await _cmafPublisher!.publishVideoFrame(
+            videoTrackName,
+            h264Frame.data,
+            isKeyframe: h264Frame.isKeyframe,
+          );
+
+          _publishedFrames++;
+
+          if (_publishedFrames % 30 == 0) {
+            if (mounted) {
+              setState(() {
+                _statusMessage =
+                    'Publishing CMAF... $_publishedFrames video, $_publishedAudioFrames audio frames';
+              });
+            }
+          }
+        } catch (e) {
+          debugPrint('Error publishing CMAF video frame: $e');
+        }
+      });
+
+      // Start camera capture
+      await _cameraCapture!.startCapture();
+      _logger.i('CMAF video capture started');
+    } catch (e) {
+      _logger.e('Failed to initialize CMAF video publishing: $e');
+      _startDemoPublishing('demo');
+    }
+  }
+
+  /// Initialize CMAF audio capture and publishing
+  Future<void> _initializeCmafAudioPublishing(String audioTrackName) async {
+    // Create platform-specific audio capture
+    _audioCapture = AudioCapture(
+      config: const AudioCaptureConfig(
+        sampleRate: 48000,
+        channels: 2,
+        bitsPerSample: 16,
+      ),
+    );
+    await _audioCapture!.initialize();
+
+    // Create Opus encoder
+    _opusEncoder = OpusEncoder(
+      config: const OpusEncoderConfig(
+        sampleRate: 48000,
+        channels: 2,
+        bitrate: 128000,
+        frameDurationMs: 20,
+        application: 'audio',
+      ),
+    );
+    await _opusEncoder!.start();
+
+    // Subscribe to audio samples and feed to encoder
+    _audioSamplesSubscription = _audioCapture!.audioStream.listen((samples) {
+      _opusEncoder?.addSamples(samples);
+    });
+
+    // Subscribe to encoded Opus frames and publish as CMAF
+    _opusFrameSubscription = _opusEncoder!.frames.listen((opusFrame) async {
+      if (!_isPublishing || _cmafPublisher == null) return;
+
+      try {
+        // Publish Opus frame wrapped in fMP4
+        await _cmafPublisher!.publishAudioFrame(
+          audioTrackName,
+          opusFrame.data,
+        );
+
+        _publishedAudioFrames++;
+
+        if (_publishedAudioFrames % 50 == 0) {
+          if (mounted) {
+            setState(() {
+              _statusMessage =
+                  'Publishing CMAF... $_publishedFrames video, $_publishedAudioFrames audio frames';
+            });
+          }
+        }
+      } catch (e) {
+        debugPrint('Error publishing CMAF audio frame: $e');
+      }
+    });
+
+    // Start audio capture
+    await _audioCapture!.startCapture();
+    _logger.i('CMAF audio capture started');
   }
 
   /// Initialize video capture and H.264 encoding for publishing
@@ -444,6 +645,12 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
     if (_publisher != null) {
       await _publisher!.stop();
       _publisher = null;
+    }
+
+    // Stop CMAF publisher
+    if (_cmafPublisher != null) {
+      await _cmafPublisher!.stop();
+      _cmafPublisher = null;
     }
 
     _setStatus('Publishing stopped');
