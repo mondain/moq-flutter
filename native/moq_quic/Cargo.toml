@@ -8,6 +8,7 @@ name = "moq_quic"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
+web-transport-quinn = "0.10.1"
 quinn = { version = "0.11.9", default-features = false, features = ["rustls", "runtime-tokio"] }
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 rustls = { version = "0.23.35", default-features = false, features = ["ring", "std"] }

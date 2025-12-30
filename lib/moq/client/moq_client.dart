@@ -21,6 +21,9 @@ class MoQClient {
   // Active subscriptions
   final _subscriptions = <Int64, MoQSubscription>{};
 
+  // Active namespace announcements (for publishing)
+  final _namespaceAnnouncements = <Int64, MoQNamespaceAnnouncement>{};
+
   // Track aliases mapping
   final _trackAliases = <Int64, TrackInfo>{};
 
@@ -85,27 +88,38 @@ class MoQClient {
     _setupCompleter = Completer<void>();
 
     // Listen for incoming data first
-    _transport.incomingData.listen(
-      _handleIncomingData,
-      onError: (error) {
-        _logger.e('Transport error: $error');
-        if (!_setupCompleter!.isCompleted) {
-          _setupCompleter!.completeError(
-            MoQException(errorCode: -1, reason: 'Transport error: $error'),
-          );
-        }
-      },
-      onDone: () {
-        _logger.i('Transport closed');
-        _isConnected = false;
-        _connectionStateController.add(false);
-        if (!_setupCompleter!.isCompleted) {
-          _setupCompleter!.completeError(
-            MoQException(errorCode: -1, reason: 'Transport closed'),
-          );
-        }
-      },
-    );
+    StreamSubscription? subscription;
+    try {
+      subscription = _transport.incomingData.listen(
+        _handleIncomingData,
+        onError: (error) {
+          _logger.e('Transport error: $error');
+          if (!_setupCompleter!.isCompleted) {
+            _setupCompleter!.completeError(
+              MoQException(errorCode: -1, reason: 'Transport error: $error'),
+            );
+          }
+        },
+        onDone: () {
+          _logger.i('Transport closed');
+          _isConnected = false;
+          if (!_connectionStateController.isClosed) {
+            _connectionStateController.add(false);
+          }
+          if (!_setupCompleter!.isCompleted) {
+            _setupCompleter!.completeError(
+              MoQException(errorCode: -1, reason: 'Transport closed'),
+            );
+          }
+        },
+      );
+    } catch (e) {
+      _logger.e('Failed to listen to transport: $e');
+      _setupCompleter!.completeError(
+        MoQException(errorCode: -1, reason: 'Failed to listen: $e'),
+      );
+      rethrow;
+    }
 
     // Connect to transport
     try {
@@ -118,8 +132,8 @@ class MoQClient {
     }
 
     // Send CLIENT_SETUP message
-    // Draft versions use format 0xff00000X where X is draft number
-    // Draft-14 = 0xff00000e, Draft-15 = 0xff00000f
+    // Draft versions use 0xff000000 + draft number format per spec section 9.3.1
+    // Draft-14 = 0xff00000E (confirmed by moqt.js reference implementation)
     final versions = supportedVersions ?? [0xff00000e]; // Draft-14
     final setupMessage = ClientSetupMessage(
       supportedVersions: versions,
@@ -284,6 +298,136 @@ class MoQClient {
     }
   }
 
+  /// Announce a namespace for publishing
+  ///
+  /// This sends PUBLISH_NAMESPACE and waits for PUBLISH_NAMESPACE_OK.
+  /// Returns the request ID for this namespace announcement.
+  Future<Int64> announceNamespace(
+    List<Uint8List> trackNamespace, {
+    List<KeyValuePair>? parameters,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    final requestId = _getNextRequestId();
+
+    _logger.i('Announcing namespace: ${trackNamespace.map((n) => String.fromCharCodes(n)).join("/")}');
+
+    final message = PublishNamespaceMessage(
+      requestId: requestId,
+      trackNamespace: trackNamespace,
+      parameters: parameters ?? [],
+    );
+
+    await _transport.send(message.serialize());
+
+    // Create announcement object (will be completed when PUBLISH_NAMESPACE_OK arrives)
+    final announcement = MoQNamespaceAnnouncement(
+      client: this,
+      requestId: requestId,
+      trackNamespace: trackNamespace,
+    );
+
+    _namespaceAnnouncements[requestId] = announcement;
+
+    // Wait for response
+    await announcement.waitForResponse();
+
+    return requestId;
+  }
+
+  /// Open a data stream for publishing objects
+  ///
+  /// Returns a stream ID that can be used with streamWrite and streamFinish.
+  Future<int> openDataStream() async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    return await _transport.openStream();
+  }
+
+  /// Write subgroup header to a stream
+  ///
+  /// Per MoQ spec, each subgroup stream starts with SUBGROUP_HEADER (0x10).
+  Future<void> writeSubgroupHeader(
+    int streamId, {
+    required Int64 trackAlias,
+    required Int64 groupId,
+    required Int64 subgroupId,
+    required int publisherPriority,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    // Build subgroup header
+    final header = SubgroupHeaderMessage(
+      trackAlias: trackAlias,
+      groupId: groupId,
+      subgroupId: subgroupId,
+      publisherPriority: publisherPriority,
+    );
+
+    await _transport.streamWrite(streamId, header.serialize());
+    _logger.d('Wrote subgroup header to stream $streamId');
+  }
+
+  /// Write a media object to a stream
+  Future<void> writeObject(
+    int streamId, {
+    required Int64 objectId,
+    required Uint8List payload,
+    ObjectStatus status = ObjectStatus.normal,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    // Build object payload
+    // Format: object_id (varint) + object_status (varint) + payload
+    final objectIdBytes = MoQWireFormat.encodeVarint64(objectId);
+    final statusBytes = MoQWireFormat.encodeVarint(status.value);
+
+    final data = Uint8List(objectIdBytes.length + statusBytes.length + payload.length);
+    int offset = 0;
+    data.setAll(offset, objectIdBytes);
+    offset += objectIdBytes.length;
+    data.setAll(offset, statusBytes);
+    offset += statusBytes.length;
+    data.setAll(offset, payload);
+
+    await _transport.streamWrite(streamId, data);
+    _logger.d('Wrote object $objectId (${payload.length} bytes) to stream $streamId');
+  }
+
+  /// Finish a data stream
+  Future<void> finishDataStream(int streamId) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    await _transport.streamFinish(streamId);
+    _logger.d('Finished data stream $streamId');
+  }
+
+  /// Cancel a namespace announcement
+  Future<void> cancelNamespace(List<Uint8List> trackNamespace, {int statusCode = 0, String reason = ''}) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    final message = PublishNamespaceDoneMessage(
+      trackNamespace: trackNamespace,
+      statusCode: statusCode,
+      reason: ReasonPhrase(reason),
+    );
+
+    await _transport.send(message.serialize());
+    _logger.i('Cancelled namespace: ${trackNamespace.map((n) => String.fromCharCodes(n)).join("/")}');
+  }
+
   void _handleIncomingData(Uint8List data) {
     try {
       final (message, bytesRead) = MoQControlMessageParser.parse(data);
@@ -312,6 +456,12 @@ class MoQClient {
         break;
       case MoQMessageType.goaway:
         _handleGoaway(message as GoawayMessage);
+        break;
+      case MoQMessageType.publishNamespaceOk:
+        _handlePublishNamespaceOk(message as PublishNamespaceOkMessage);
+        break;
+      case MoQMessageType.publishNamespaceError:
+        _handlePublishNamespaceError(message as PublishNamespaceErrorMessage);
         break;
       default:
         _logger.w('Unhandled message type: ${message.type}');
@@ -417,6 +567,28 @@ class MoQClient {
       // TODO: Implement migration
     }
     // TODO: Close and migrate connection
+  }
+
+  void _handlePublishNamespaceOk(PublishNamespaceOkMessage message) {
+    final announcement = _namespaceAnnouncements[message.requestId];
+    if (announcement != null) {
+      announcement.complete(parameters: message.parameters);
+      _logger.i('Namespace announcement successful: ${announcement.namespacePath}');
+    } else {
+      _logger.w('Received PUBLISH_NAMESPACE_OK for unknown request: ${message.requestId}');
+    }
+  }
+
+  void _handlePublishNamespaceError(PublishNamespaceErrorMessage message) {
+    final announcement = _namespaceAnnouncements[message.requestId];
+    if (announcement != null) {
+      announcement.fail(
+        errorCode: message.errorCode,
+        reason: message.errorReason.reason,
+      );
+      _namespaceAnnouncements.remove(message.requestId);
+      _logger.e('Namespace announcement failed: ${message.errorCode} - ${message.errorReason.reason}');
+    }
   }
 
   void dispose() {
@@ -554,4 +726,99 @@ class MoQException implements Exception {
 /// Base message class for UI layer
 abstract class MoQMessage {
   MoQMessageType get type;
+}
+
+/// Namespace announcement for publishing
+class MoQNamespaceAnnouncement {
+  final MoQClient client;
+  final Int64 requestId;
+  final List<Uint8List> trackNamespace;
+
+  final Completer<void> _responseCompleter = Completer<void>();
+
+  // Parameters returned by server
+  List<KeyValuePair>? serverParameters;
+
+  MoQNamespaceAnnouncement({
+    required this.client,
+    required this.requestId,
+    required this.trackNamespace,
+  });
+
+  /// Get namespace as a string path
+  String get namespacePath {
+    return trackNamespace
+        .map((e) => String.fromCharCodes(e))
+        .join('/');
+  }
+
+  /// Wait for PUBLISH_NAMESPACE_OK response
+  Future<void> waitForResponse() => _responseCompleter.future;
+
+  /// Complete the announcement with successful response
+  void complete({List<KeyValuePair>? parameters}) {
+    if (_responseCompleter.isCompleted) return;
+    serverParameters = parameters;
+    _responseCompleter.complete();
+  }
+
+  /// Fail the announcement
+  void fail({required int errorCode, required String reason}) {
+    if (_responseCompleter.isCompleted) return;
+    _responseCompleter.completeError(
+      MoQException(errorCode: errorCode, reason: reason),
+    );
+  }
+}
+
+/// Subgroup header message for data streams
+///
+/// Per draft-ietf-moq-transport-14, each subgroup stream starts with:
+/// SUBGROUP_HEADER (0x10) {
+///   Track Alias (i),
+///   Group ID (i),
+///   Subgroup ID (i),
+///   Publisher Priority (8),
+/// }
+class SubgroupHeaderMessage {
+  final Int64 trackAlias;
+  final Int64 groupId;
+  final Int64 subgroupId;
+  final int publisherPriority;
+
+  SubgroupHeaderMessage({
+    required this.trackAlias,
+    required this.groupId,
+    required this.subgroupId,
+    required this.publisherPriority,
+  });
+
+  Uint8List serialize() {
+    final trackAliasBytes = MoQWireFormat.encodeVarint64(trackAlias);
+    final groupIdBytes = MoQWireFormat.encodeVarint64(groupId);
+    final subgroupIdBytes = MoQWireFormat.encodeVarint64(subgroupId);
+
+    // Stream type (0x10) + track alias + group id + subgroup id + priority (1 byte)
+    final streamType = MoQWireFormat.encodeVarint(0x10);
+    final buffer = Uint8List(
+      streamType.length +
+      trackAliasBytes.length +
+      groupIdBytes.length +
+      subgroupIdBytes.length +
+      1
+    );
+
+    int offset = 0;
+    buffer.setAll(offset, streamType);
+    offset += streamType.length;
+    buffer.setAll(offset, trackAliasBytes);
+    offset += trackAliasBytes.length;
+    buffer.setAll(offset, groupIdBytes);
+    offset += groupIdBytes.length;
+    buffer.setAll(offset, subgroupIdBytes);
+    offset += subgroupIdBytes.length;
+    buffer[offset] = publisherPriority & 0xFF;
+
+    return buffer;
+  }
 }

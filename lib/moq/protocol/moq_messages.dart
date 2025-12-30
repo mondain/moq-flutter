@@ -6,6 +6,7 @@ part 'moq_wire_format.dart';
 part 'moq_messages_control.dart';
 part 'moq_messages_control_extra.dart';
 part 'moq_messages_data.dart';
+part 'moq_messages_publish.dart';
 
 /// Message Types defined in draft-ietf-moq-transport-14
 enum MoQMessageType {
@@ -99,7 +100,8 @@ enum ObjectStatus {
   normal(0x0),
   doesNotExist(0x1),
   endOfGroup(0x3),
-  endOfTrack(0x4);
+  endOfTrack(0x4),
+  endOfSubgroup(0x5);
 
   final int value;
   const ObjectStatus(this.value);

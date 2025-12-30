@@ -34,6 +34,10 @@ class QuicTransport extends MoQTransport {
   _InitFunc? _moqQuicInit;
   _ConnectFunc? _moqQuicConnect;
   _SendFunc? _moqQuicSend;
+  _SendFunc? _moqQuicSendData;
+  _OpenStreamFunc? _moqQuicOpenStream;
+  _StreamWriteFunc? _moqQuicStreamWrite;
+  _StreamFinishFunc? _moqQuicStreamFinish;
   _CloseFunc? _moqQuicClose;
   _CleanupFunc? _moqQuicCleanup;
 
@@ -59,6 +63,22 @@ class QuicTransport extends MoQTransport {
       _moqQuicSend = _nativeLib!
           .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
               'moq_quic_send')
+          .asFunction();
+      _moqQuicSendData = _nativeLib!
+          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
+              'moq_quic_send_data')
+          .asFunction();
+      _moqQuicOpenStream = _nativeLib!
+          .lookup<NativeFunction<NativeInt32 Function(NativeUint64, Pointer<NativeUint64>)>>(
+              'moq_quic_open_stream')
+          .asFunction();
+      _moqQuicStreamWrite = _nativeLib!
+          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
+              'moq_quic_stream_write')
+          .asFunction();
+      _moqQuicStreamFinish = _nativeLib!
+          .lookup<NativeFunction<NativeInt32 Function(NativeUint64, NativeUint64)>>(
+              'moq_quic_stream_finish')
           .asFunction();
       _moqQuicClose = _nativeLib!
           .lookup<NativeFunction<NativeInt32 Function(NativeUint64)>>('moq_quic_close')
@@ -235,6 +255,11 @@ class QuicTransport extends MoQTransport {
     }
 
     try {
+      // Control messages are sent directly on the bidirectional control stream
+      // without any stream type prefix. The Rust native library handles the
+      // control stream management.
+      // See draft-ietf-moq-transport-14 section 6.1
+
       // Allocate native buffer
       final dataPtr = calloc<Uint8>(data.length);
       final nativeData = dataPtr.asTypedList(data.length);
@@ -255,9 +280,141 @@ class QuicTransport extends MoQTransport {
         lastActivity: DateTime.now(),
       );
 
-      _logger.d('Sent $sentInt bytes via QUIC');
+      _logger.d('Sent $sentInt bytes via QUIC control stream');
     } catch (e) {
       _logger.e('Send failed: $e');
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> sendData(Uint8List data) async {
+    if (!isConnected) {
+      throw StateError('Not connected');
+    }
+
+    if (!_nativeLibraryLoaded || _moqQuicSendData == null) {
+      _logger.e('Cannot send data: Native QUIC library is not available');
+      throw StateError('Native QUIC library not available');
+    }
+
+    try {
+      final dataPtr = calloc<Uint8>(data.length);
+      final nativeData = dataPtr.asTypedList(data.length);
+      nativeData.setAll(0, data);
+
+      final sent = _moqQuicSendData!(_connectionId, dataPtr, data.length);
+
+      calloc.free(dataPtr);
+
+      final sentInt = sent.toInt();
+      if (sentInt < 0) {
+        throw Exception('SendData failed with error code: $sentInt');
+      }
+
+      _stats = _stats.copyWith(
+        bytesSent: _stats.bytesSent + sentInt,
+        packetsSent: _stats.packetsSent + 1,
+        lastActivity: DateTime.now(),
+      );
+
+      _logger.d('Sent $sentInt bytes via QUIC data stream');
+    } catch (e) {
+      _logger.e('SendData failed: $e');
+      rethrow;
+    }
+  }
+
+  @override
+  Future<int> openStream() async {
+    if (!isConnected) {
+      throw StateError('Not connected');
+    }
+
+    if (!_nativeLibraryLoaded || _moqQuicOpenStream == null) {
+      _logger.e('Cannot open stream: Native QUIC library is not available');
+      throw StateError('Native QUIC library not available');
+    }
+
+    try {
+      final streamIdPtr = calloc<Uint64>();
+      final result = _moqQuicOpenStream!(_connectionId, streamIdPtr);
+
+      if (result != 0) {
+        calloc.free(streamIdPtr);
+        throw Exception('OpenStream failed with error code: $result');
+      }
+
+      final streamId = streamIdPtr.value;
+      calloc.free(streamIdPtr);
+
+      _logger.d('Opened QUIC stream $streamId');
+      return streamId;
+    } catch (e) {
+      _logger.e('OpenStream failed: $e');
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> streamWrite(int streamId, Uint8List data) async {
+    if (!isConnected) {
+      throw StateError('Not connected');
+    }
+
+    if (!_nativeLibraryLoaded || _moqQuicStreamWrite == null) {
+      _logger.e('Cannot write to stream: Native QUIC library is not available');
+      throw StateError('Native QUIC library not available');
+    }
+
+    try {
+      final dataPtr = calloc<Uint8>(data.length);
+      final nativeData = dataPtr.asTypedList(data.length);
+      nativeData.setAll(0, data);
+
+      final sent = _moqQuicStreamWrite!(_connectionId, streamId, dataPtr, data.length);
+
+      calloc.free(dataPtr);
+
+      final sentInt = sent.toInt();
+      if (sentInt < 0) {
+        throw Exception('StreamWrite failed with error code: $sentInt');
+      }
+
+      _stats = _stats.copyWith(
+        bytesSent: _stats.bytesSent + sentInt,
+        packetsSent: _stats.packetsSent + 1,
+        lastActivity: DateTime.now(),
+      );
+
+      _logger.d('Wrote $sentInt bytes to QUIC stream $streamId');
+    } catch (e) {
+      _logger.e('StreamWrite failed: $e');
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> streamFinish(int streamId) async {
+    if (!isConnected) {
+      throw StateError('Not connected');
+    }
+
+    if (!_nativeLibraryLoaded || _moqQuicStreamFinish == null) {
+      _logger.e('Cannot finish stream: Native QUIC library is not available');
+      throw StateError('Native QUIC library not available');
+    }
+
+    try {
+      final result = _moqQuicStreamFinish!(_connectionId, streamId);
+
+      if (result != 0) {
+        throw Exception('StreamFinish failed with error code: $result');
+      }
+
+      _logger.d('Finished QUIC stream $streamId');
+    } catch (e) {
+      _logger.e('StreamFinish failed: $e');
       rethrow;
     }
   }
@@ -290,8 +447,11 @@ class QuicTransport extends MoQTransport {
             lastActivity: DateTime.now(),
           );
 
-          _incomingDataController.add(data);
+          // Control stream messages come directly without stream type prefix
+          // Data streams (unidirectional) have stream headers but are also
+          // added to the same receive buffer by the Rust layer
           _logger.d('Received $received bytes via QUIC');
+          _incomingDataController.add(data);
         }
 
         calloc.free(buffer);
@@ -337,5 +497,11 @@ typedef _ConnectFunc = int Function(
     Pointer<Int8> host, int port, int insecure, Pointer<Uint64> outConnectionId);
 typedef _SendFunc = int Function(
     int connectionId, Pointer<Uint8> data, int len);
+typedef _OpenStreamFunc = int Function(
+    int connectionId, Pointer<Uint64> outStreamId);
+typedef _StreamWriteFunc = int Function(
+    int connectionId, int streamId, Pointer<Uint8> data, int len);
+typedef _StreamFinishFunc = int Function(
+    int connectionId, int streamId);
 typedef _CloseFunc = int Function(int connectionId);
 typedef _CleanupFunc = void Function();

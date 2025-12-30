@@ -46,6 +46,8 @@ class ObjectDatagram {
         return 0x03;
       case ObjectStatus.endOfTrack:
         return 0x04;
+      case ObjectStatus.endOfSubgroup:
+        return 0x05;
     }
   }
 

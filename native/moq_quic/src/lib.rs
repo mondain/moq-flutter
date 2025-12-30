@@ -3,13 +3,14 @@
 //
 // Architecture:
 // - DashMap for thread-safe connection/stream registry
-// - mpsc channels for async stream writes
-// - Spawning tasks for stream handling (no polling)
-// - Incremental reading for large streams
+// - Bidirectional control stream for MoQ control messages
+// - Receive buffer for polling from Dart
+// - Background tasks for stream handling
 
 mod stream_writer;
+pub mod webtransport;
 
-use quinn::{Endpoint, ClientConfig, Connection, VarInt, TokioRuntime, EndpointConfig, TransportConfig};
+use quinn::{Endpoint, ClientConfig, Connection, SendStream, VarInt, TokioRuntime, EndpointConfig, TransportConfig};
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::crypto::CryptoProvider;
@@ -18,8 +19,13 @@ use once_cell::sync::OnceCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time;
+use std::collections::VecDeque;
+use std::sync::Mutex;
 use tokio::runtime::Runtime;
 use std::slice;
+
+// Maximum receive buffer size per connection
+const MAX_RECV_BUFFER_SIZE: usize = 64 * 1024; // 64KB
 
 // No certificate verification for testing (DANGER: only use for development!)
 #[derive(Debug)]
@@ -67,6 +73,47 @@ impl rustls::client::danger::ServerCertVerifier for NoVerification {
     }
 }
 
+// Receive buffer for incoming data
+struct ReceiveBuffer {
+    data: VecDeque<u8>,
+    max_size: usize,
+}
+
+impl ReceiveBuffer {
+    fn new(max_size: usize) -> Self {
+        Self {
+            data: VecDeque::with_capacity(1024),
+            max_size,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> usize {
+        let available = self.max_size - self.data.len();
+        let to_copy = bytes.len().min(available);
+        for &byte in &bytes[..to_copy] {
+            self.data.push_back(byte);
+        }
+        to_copy
+    }
+
+    fn pop(&mut self, buf: &mut [u8]) -> usize {
+        let to_read = buf.len().min(self.data.len());
+        for i in 0..to_read {
+            buf[i] = self.data.pop_front().unwrap();
+        }
+        to_read
+    }
+
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
+// Control stream storage - only send stream needed (recv is handled by background task)
+struct ControlStream {
+    send: SendStream,
+}
+
 // Global Tokio runtime for async operations
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 
@@ -76,15 +123,32 @@ static CONNECTIONS: OnceCell<DashMap<u64, Arc<Connection>>> = OnceCell::new();
 // Global registry of endpoints (connection_id -> endpoint)
 static ENDPOINTS: OnceCell<DashMap<u64, Arc<Endpoint>>> = OnceCell::new();
 
+// Global registry of control streams (connection_id -> control stream)
+static CONTROL_STREAMS: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<Option<ControlStream>>>>> = OnceCell::new();
+
+// Global registry of receive buffers (connection_id -> receive buffer)
+static RECV_BUFFERS: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<ReceiveBuffer>>>> = OnceCell::new();
+
 // Global registry of stream writers (connection_id -> stream_id -> writer)
 static STREAM_WRITERS: OnceCell<DashMap<(u64, u64), Arc<stream_writer::StreamWriter>>> = OnceCell::new();
 
 // Next connection ID counter
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
-// Next unidirectional stream ID counter (for server-initiated streams)
-// Starts from 100000 to avoid collisions with accepted streams
-static NEXT_UNI_STREAM_ID: AtomicU64 = AtomicU64::new(100000);
+// Last error message
+static LAST_ERROR: OnceCell<Mutex<Vec<u8>>> = OnceCell::new();
+const MAX_ERROR_LEN: usize = 512;
+
+/// Set the last error message
+fn set_last_error(msg: &str) {
+    if let Some(error_buf) = LAST_ERROR.get() {
+        let mut buf = error_buf.lock().unwrap();
+        let msg_bytes = msg.as_bytes();
+        let len = msg_bytes.len().min(MAX_ERROR_LEN);
+        buf.clear();
+        buf.extend_from_slice(&msg_bytes[..len]);
+    }
+}
 
 /// Get the global Tokio runtime
 fn get_runtime() -> &'static Runtime {
@@ -118,15 +182,30 @@ pub extern "C" fn moq_quic_init() {
         log::warn!("Endpoint registry already initialized");
     }
 
+    // Initialize control streams registry
+    if CONTROL_STREAMS.set(DashMap::new()).is_err() {
+        log::warn!("Control streams registry already initialized");
+    }
+
+    // Initialize receive buffers registry
+    if RECV_BUFFERS.set(DashMap::new()).is_err() {
+        log::warn!("Receive buffers registry already initialized");
+    }
+
     // Initialize stream writers registry
     if STREAM_WRITERS.set(DashMap::new()).is_err() {
         log::warn!("Stream writers registry already initialized");
     }
 
+    // Initialize last error buffer
+    if LAST_ERROR.set(Mutex::new(Vec::new())).is_err() {
+        log::warn!("Last error buffer already initialized");
+    }
+
     log::info!("MoQ QUIC transport initialized");
 }
 
-/// Create a new QUIC connection
+/// Create a new QUIC connection with bidirectional control stream
 ///
 /// # Arguments
 /// * `host` - The hostname to connect to (must be null-terminated)
@@ -162,7 +241,9 @@ pub extern "C" fn moq_quic_connect(
         let addrs = match tokio::net::lookup_host(&addr_str).await {
             Ok(addrs) => addrs,
             Err(e) => {
-                log::error!("DNS resolution error for {}: {:?}", addr_str, e);
+                let err_msg = format!("DNS resolution error for {}: {:?}", addr_str, e);
+                log::error!("{}", err_msg);
+                set_last_error(&err_msg);
                 return Err(-4);
             }
         };
@@ -170,7 +251,10 @@ pub extern "C" fn moq_quic_connect(
         // Use the first resolved address
         let addr = match addrs.into_iter().next() {
             Some(a) => a,
-            None => return Err(-4),
+            None => {
+                set_last_error("No addresses resolved");
+                return Err(-4);
+            }
         };
 
         // Create client configuration with proper transport settings
@@ -203,7 +287,9 @@ pub extern "C" fn moq_quic_connect(
         let crypto = match QuicClientConfig::try_from(client_crypto) {
             Ok(c) => c,
             Err(e) => {
-                log::error!("QuicClientConfig error: {:?}", e);
+                let err_msg = format!("QuicClientConfig error: {:?}", e);
+                log::error!("{}", err_msg);
+                set_last_error(&err_msg);
                 return Err(-6);
             }
         };
@@ -214,7 +300,9 @@ pub extern "C" fn moq_quic_connect(
         let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
             Ok(s) => s,
             Err(e) => {
-                log::error!("UDP bind error: {:?}", e);
+                let err_msg = format!("UDP bind error: {:?}", e);
+                log::error!("{}", err_msg);
+                set_last_error(&err_msg);
                 return Err(-5);
             }
         };
@@ -227,7 +315,9 @@ pub extern "C" fn moq_quic_connect(
         ) {
             Ok(e) => e,
             Err(e) => {
-                log::error!("Endpoint creation error: {:?}", e);
+                let err_msg = format!("Endpoint creation error: {:?}", e);
+                log::error!("{}", err_msg);
+                set_last_error(&err_msg);
                 return Err(-6);
             }
         };
@@ -239,7 +329,9 @@ pub extern "C" fn moq_quic_connect(
         let connecting = match endpoint.connect(addr, &host_str) {
             Ok(c) => c,
             Err(e) => {
-                log::error!("Connect error: {:?}", e);
+                let err_msg = format!("Connect error: {:?}", e);
+                log::error!("{}", err_msg);
+                set_last_error(&err_msg);
                 return Err(-6);
             }
         };
@@ -247,7 +339,9 @@ pub extern "C" fn moq_quic_connect(
         let connection = match connecting.await {
             Ok(conn) => conn,
             Err(e) => {
-                log::error!("Connection await error: {:?}", e);
+                let err_msg = format!("Connection await error: {:?}", e);
+                log::error!("{}", err_msg);
+                set_last_error(&err_msg);
                 return Err(-7);
             }
         };
@@ -266,17 +360,110 @@ pub extern "C" fn moq_quic_connect(
     // Store connection and endpoint IMMEDIATELY (before any other operations)
     let connections = CONNECTIONS.get().expect("Connection registry not initialized");
     let endpoints = ENDPOINTS.get().expect("Endpoint registry not initialized");
+    let control_streams = CONTROL_STREAMS.get().expect("Control streams not initialized");
+    let recv_buffers = RECV_BUFFERS.get().expect("Receive buffers not initialized");
 
     let connection_arc = Arc::new(connection);
     let endpoint_arc = Arc::new(endpoint);
+    let recv_buffer = Arc::new(tokio::sync::Mutex::new(ReceiveBuffer::new(MAX_RECV_BUFFER_SIZE)));
 
     connections.insert(connection_id, connection_arc.clone());
     endpoints.insert(connection_id, endpoint_arc);
+    control_streams.insert(connection_id, Arc::new(tokio::sync::Mutex::new(None)));
+    recv_buffers.insert(connection_id, recv_buffer.clone());
 
-    // Start accepting streams immediately - spawn task
-    let connection_for_accept = connection_arc.clone();
+    // Open bidirectional control stream (required by MoQ spec)
+    let connection_for_control = connection_arc.clone();
+    let recv_buffer_for_control = recv_buffer.clone();
     runtime.spawn(async move {
-        handle_connection_streams(connection_id, connection_for_accept).await;
+        log::info!("Opening bidirectional control stream for connection {}", connection_id);
+        match connection_for_control.open_bi().await {
+            Ok((send, mut recv)) => {
+                log::info!("Bidirectional control stream opened for connection {}", connection_id);
+                let control_streams = CONTROL_STREAMS.get().expect("Control streams not initialized");
+
+                // Store the send stream for sending control messages
+                if let Some(ctrl_stream_mutex) = control_streams.get(&connection_id) {
+                    *ctrl_stream_mutex.lock().await = Some(ControlStream { send });
+                }
+
+                // Start reading from the control stream's receive side
+                let mut buffer = vec![0u8; 4096];
+                loop {
+                    match recv.read(&mut buffer).await {
+                        Ok(None) => {
+                            log::debug!("Control stream closed for connection {}", connection_id);
+                            break;
+                        }
+                        Ok(Some(n)) => {
+                            // Add data to receive buffer
+                            let mut recv_buf = recv_buffer_for_control.lock().await;
+                            let pushed = recv_buf.push(&buffer[..n]);
+                            if pushed < n {
+                                log::warn!("Receive buffer full, dropped {} bytes", n - pushed);
+                            }
+                            log::trace!("Received {} bytes on control stream for connection {}", n, connection_id);
+                        }
+                        Err(e) => {
+                            log::error!("Error reading from control stream: {:?}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to open control stream for connection {}: {:?}", connection_id, e);
+            }
+        }
+    });
+
+    // Start accepting incoming unidirectional streams (data streams)
+    let connection_for_streams = connection_arc.clone();
+    let recv_buffer_for_streams = recv_buffer.clone();
+    runtime.spawn(async move {
+        log::info!("Starting data stream acceptor for connection {}", connection_id);
+        loop {
+            match connection_for_streams.accept_uni().await {
+                Ok(mut recv_stream) => {
+                    let stream_id = recv_stream.id().index();
+                    log::debug!("Accepted incoming unidirectional stream {} on connection {}", stream_id, connection_id);
+
+                    let recv_buffer_clone = recv_buffer_for_streams.clone();
+
+                    // Spawn task to read from this stream
+                    tokio::spawn(async move {
+                        let mut buffer = vec![0u8; 4096];
+                        loop {
+                            match recv_stream.read(&mut buffer).await {
+                                Ok(None) => {
+                                    log::debug!("Data stream {} closed on connection {}", stream_id, connection_id);
+                                    break;
+                                }
+                                Ok(Some(n)) => {
+                                    // Add data to receive buffer
+                                    let mut recv_buf = recv_buffer_clone.lock().await;
+                                    let pushed = recv_buf.push(&buffer[..n]);
+                                    if pushed < n {
+                                        log::warn!("Receive buffer full, dropped {} bytes", n - pushed);
+                                    }
+                                    log::trace!("Received {} bytes on data stream {} for connection {}", n, stream_id, connection_id);
+                                }
+                                Err(e) => {
+                                    log::error!("Error reading from data stream {}: {:?}", stream_id, e);
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    log::error!("Error accepting incoming stream: {:?}", e);
+                    // Connection might be closed
+                    break;
+                }
+            }
+        }
+        log::info!("Data stream acceptor stopped for connection {}", connection_id);
     });
 
     unsafe {
@@ -287,142 +474,10 @@ pub extern "C" fn moq_quic_connect(
     0
 }
 
-/// Handle incoming streams for a connection
-async fn handle_connection_streams(connection_id: u64, connection: Arc<Connection>) {
-    log::info!("Connection {} accept loop started", connection_id);
-
-    loop {
-        tokio::select! {
-            // Accept unidirectional streams
-            result = connection.accept_uni() => {
-                match result {
-                    Ok(recv_stream) => {
-                        let stream_id = recv_stream.id().index();
-                        log::info!("Connection {} accepted unidirectional stream: {}", connection_id, stream_id);
-
-                        // Spawn task to handle this stream
-                        tokio::spawn(async move {
-                            handle_unidirectional_stream_internal(connection_id, stream_id, recv_stream).await;
-                        });
-                    }
-                    Err(e) => {
-                        log::warn!("Connection {} accept_uni error: {:?}", connection_id, e);
-                        break;
-                    }
-                }
-            }
-            // Accept bidirectional streams
-            result = connection.accept_bi() => {
-                match result {
-                    Ok((send_stream, recv_stream)) => {
-                        let stream_id = send_stream.id().index();
-                        log::info!("Connection {} accepted bidirectional stream: {}", connection_id, stream_id);
-
-                        // Spawn task to handle this stream
-                        tokio::spawn(async move {
-                            handle_bidirectional_stream_internal(connection_id, stream_id, send_stream, recv_stream).await;
-                        });
-                    }
-                    Err(e) => {
-                        log::warn!("Connection {} accept_bi error: {:?}", connection_id, e);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    log::info!("Connection {} accept loop exited", connection_id);
-
-    // Notify through callback (in real implementation, would call Dart)
-    // For now, just log
-}
-
-/// Handle a unidirectional stream with incremental reading
-async fn handle_unidirectional_stream_internal(
-    connection_id: u64,
-    stream_id: u64,
-    mut recv_stream: quinn::RecvStream,
-) {
-    let mut buffer = vec![0u8; 65536]; // 64KB read buffer
-
-    loop {
-        match recv_stream.read(&mut buffer).await {
-            Ok(Some(len)) => {
-                log::debug!("Uni stream {}:{} received {} bytes", connection_id, stream_id, len);
-
-                // In real implementation, would callback to Dart here
-                // For now, just log the data
-                if len <= 100 {
-                    let hex: String = buffer[..len].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-                    log::info!("Data: [{}]", hex);
-                } else {
-                    log::info!("Data: {} bytes (truncated)", len);
-                }
-            }
-            Ok(None) => {
-                log::debug!("Uni stream {}:{} closed", connection_id, stream_id);
-                break;
-            }
-            Err(e) => {
-                log::error!("Error reading from uni stream {}:{}: {:?}", connection_id, stream_id, e);
-                break;
-            }
-        }
-    }
-}
-
-/// Handle a bidirectional stream with incremental reading
-async fn handle_bidirectional_stream_internal(
-    connection_id: u64,
-    stream_id: u64,
-    send_stream: quinn::SendStream,
-    mut recv_stream: quinn::RecvStream,
-) {
-    // Create stream writer for the send side
-    let writer = stream_writer::StreamWriter::new(
-        connection_id,
-        stream_id,
-        send_stream,
-        50, // Channel capacity
-    );
-
-    // Register in global registry
-    let stream_writers = STREAM_WRITERS.get().expect("Stream writers not initialized");
-    stream_writers.insert((connection_id, stream_id), Arc::new(writer));
-
-    // Read data incrementally
-    let mut buffer = vec![0u8; 65536]; // 64KB read buffer
-
-    loop {
-        match recv_stream.read(&mut buffer).await {
-            Ok(Some(len)) => {
-                log::debug!("Bi stream {}:{} received {} bytes", connection_id, stream_id, len);
-
-                // In real implementation, would callback to Dart here
-                if len <= 100 {
-                    let hex: String = buffer[..len].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-                    log::info!("Data: [{}]", hex);
-                } else {
-                    log::info!("Data: {} bytes (truncated)", len);
-                }
-            }
-            Ok(None) => {
-                log::debug!("Bi stream {}:{} closed", connection_id, stream_id);
-                break;
-            }
-            Err(e) => {
-                log::error!("Error reading from bi stream {}:{}: {:?}", connection_id, stream_id, e);
-                break;
-            }
-        }
-    }
-
-    // Clean up stream writer
-    stream_writers.remove(&(connection_id, stream_id));
-}
-
-/// Send data over a unidirectional stream
+/// Send data over the bidirectional control stream
+///
+/// Per MoQ spec, the first stream is a client-initiated bidirectional control stream.
+/// All control messages are sent on this stream.
 ///
 /// # Arguments
 /// * `connection_id` - The connection ID
@@ -437,12 +492,12 @@ pub extern "C" fn moq_quic_send(
     data: *const u8,
     len: usize,
 ) -> i64 {
-    let connections = CONNECTIONS.get().expect("Connection registry not initialized");
+    let control_streams = CONTROL_STREAMS.get().expect("Control streams not initialized");
 
-    let connection = match connections.get(&connection_id) {
-        Some(conn) => conn.clone(),
+    let control_stream_mutex = match control_streams.get(&connection_id) {
+        Some(cs) => cs.clone(),
         None => {
-            log::error!("Connection {} not found", connection_id);
+            log::error!("Control stream {} not found", connection_id);
             return -1;
         }
     };
@@ -453,30 +508,35 @@ pub extern "C" fn moq_quic_send(
     let runtime = get_runtime();
 
     let result = runtime.block_on(async {
-        // Open unidirectional stream for sending
-        match connection.open_uni().await {
-            Ok(mut send_stream) => {
-                match send_stream.write_all(&data_to_send).await {
-                    Ok(_) => {
-                        match send_stream.finish() {
-                            Ok(_) => {
-                                log::info!("Sent {} bytes on connection {}", len, connection_id);
-                                len as i64
-                            },
-                            Err(e) => {
-                                log::error!("Failed to finish stream: {:?}", e);
-                                -2
-                            },
-                        }
-                    },
-                    Err(e) => {
-                        log::error!("Failed to write to stream: {:?}", e);
-                        -2
-                    }
-                }
+        let mut control_stream_guard = control_stream_mutex.lock().await;
+
+        // Wait for control stream to be available (it's opened asynchronously)
+        let max_retries = 50; // 5 seconds max (50 * 100ms)
+        let mut retries = 0;
+
+        while control_stream_guard.is_none() && retries < max_retries {
+            drop(control_stream_guard);
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            control_stream_guard = control_stream_mutex.lock().await;
+            retries += 1;
+        }
+
+        let control_stream: &mut ControlStream = match control_stream_guard.as_mut() {
+            Some(cs) => cs,
+            None => {
+                log::error!("Control stream not available for connection {}", connection_id);
+                return -2;
+            }
+        };
+
+        // Send on the bidirectional control stream
+        match control_stream.send.write_all(&data_to_send).await {
+            Ok(_) => {
+                log::debug!("Sent {} bytes on control stream for connection {}", len, connection_id);
+                len as i64
             }
             Err(e) => {
-                log::error!("Failed to open unidirectional stream: {:?}", e);
+                log::error!("Failed to write to control stream: {:?}", e);
                 -2
             }
         }
@@ -485,36 +545,50 @@ pub extern "C" fn moq_quic_send(
     result
 }
 
-/// Receive data from the QUIC connection (non-blocking, immediate return)
-///
-/// Note: This is now a polling interface for Dart compatibility.
-/// The actual receive loop runs in spawned tasks that handle streams asynchronously.
+/// Receive data from the QUIC connection (non-blocking poll)
 ///
 /// # Arguments
 /// * `connection_id` - The connection ID
-/// * `buffer` - Buffer to receive data
+/// * `buffer` - Pointer to buffer to store received data
 /// * `buffer_len` - Length of buffer
 ///
 /// # Returns
-/// * Number of bytes received on success, 0 if no data available, negative on error
+/// * Number of bytes received on success, 0 if no data available, negative error code on failure
 #[no_mangle]
 pub extern "C" fn moq_quic_recv(
     connection_id: u64,
-    _buffer: *mut u8,
-    _buffer_len: usize,
+    buffer: *mut u8,
+    buffer_len: usize,
 ) -> i64 {
-    // With the new async architecture, data is received through callbacks
-    // This function is kept for FFI compatibility but returns 0 (no polling)
-    // Real data comes through the callback mechanism
+    let recv_buffers = RECV_BUFFERS.get().expect("Receive buffers not initialized");
 
-    // Check if connection exists
-    let connections = CONNECTIONS.get().expect("Connection registry not initialized");
-    if !connections.contains_key(&connection_id) {
-        return -1;
+    let recv_buffer = match recv_buffers.get(&connection_id) {
+        Some(rb) => rb.clone(),
+        None => {
+            log::error!("Connection {} not found for recv", connection_id);
+            return -1;
+        }
+    };
+
+    if buffer.is_null() || buffer_len == 0 {
+        return 0;
     }
 
-    // No polling data available - use callback mechanism instead
-    0
+    let runtime = get_runtime();
+
+    let result = runtime.block_on(async {
+        let mut recv_buf = recv_buffer.lock().await;
+
+        if recv_buf.is_empty() {
+            0
+        } else {
+            let output_buf = unsafe { slice::from_raw_parts_mut(buffer, buffer_len) };
+            let bytes_read = recv_buf.pop(output_buf);
+            bytes_read as i64
+        }
+    });
+
+    result
 }
 
 /// Check if connection is established
@@ -533,6 +607,8 @@ pub extern "C" fn moq_quic_is_connected(connection_id: u64) -> i32 {
 pub extern "C" fn moq_quic_close(connection_id: u64) -> i32 {
     let connections = CONNECTIONS.get().expect("Connection registry not initialized");
     let endpoints = ENDPOINTS.get().expect("Endpoint registry not initialized");
+    let control_streams = CONTROL_STREAMS.get().expect("Control streams not initialized");
+    let recv_buffers = RECV_BUFFERS.get().expect("Receive buffers not initialized");
 
     let (_, connection) = match connections.remove(&connection_id) {
         Some(conn) => conn,
@@ -549,6 +625,10 @@ pub extern "C" fn moq_quic_close(connection_id: u64) -> i32 {
             return -1;
         }
     };
+
+    // Clean up control stream and receive buffer
+    control_streams.remove(&connection_id);
+    recv_buffers.remove(&connection_id);
 
     // Clean up stream writers for this connection
     let stream_writers = STREAM_WRITERS.get().expect("Stream writers not initialized");
@@ -604,13 +684,55 @@ pub extern "C" fn moq_quic_cleanup() {
     let endpoints = ENDPOINTS.get().expect("Endpoint registry not initialized");
     endpoints.clear();
 
+    let control_streams = CONTROL_STREAMS.get().expect("Control streams not initialized");
+    control_streams.clear();
+
+    let recv_buffers = RECV_BUFFERS.get().expect("Receive buffers not initialized");
+    recv_buffers.clear();
+
     let stream_writers = STREAM_WRITERS.get().expect("Stream writers not initialized");
     stream_writers.clear();
 
     log::info!("MoQ QUIC transport cleanup complete");
 }
 
-/// Create a unidirectional stream and write initial data
+/// Get the last error message
+///
+/// # Arguments
+/// * `buffer` - Pointer to buffer to store error message
+/// * `buffer_len` - Length of buffer
+///
+/// # Returns
+/// * Number of bytes written to buffer on success, 0 if no error
+#[no_mangle]
+pub extern "C" fn moq_quic_get_last_error(
+    buffer: *mut u8,
+    buffer_len: usize,
+) -> i32 {
+    if buffer.is_null() || buffer_len == 0 {
+        return 0;
+    }
+
+    if let Some(error_buf) = LAST_ERROR.get() {
+        let buf = error_buf.lock().unwrap();
+        let to_copy = buf.len().min(buffer_len);
+        if to_copy > 0 {
+            unsafe {
+                let dst = slice::from_raw_parts_mut(buffer, to_copy);
+                dst.copy_from_slice(&buf[..to_copy]);
+            }
+            to_copy as i32
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+/// Create a unidirectional data stream and write data (single-shot)
+///
+/// For MoQ data streams (not control messages)
 ///
 /// # Arguments
 /// * `connection_id` - The connection ID
@@ -618,9 +740,9 @@ pub extern "C" fn moq_quic_cleanup() {
 /// * `len` - Length of data
 ///
 /// # Returns
-/// * Stream ID on success, negative error code on failure
+/// * Number of bytes sent on success, negative error code on failure
 #[no_mangle]
-pub extern "C" fn moq_quic_open_uni(
+pub extern "C" fn moq_quic_send_data(
     connection_id: u64,
     data: *const u8,
     len: usize,
@@ -640,36 +762,179 @@ pub extern "C" fn moq_quic_open_uni(
 
     let runtime = get_runtime();
 
-    // Generate synthetic stream ID
-    let stream_id = NEXT_UNI_STREAM_ID.fetch_add(1, Ordering::SeqCst);
-
-    // Spawn task to open stream and write data
-    runtime.spawn(async move {
+    let result = runtime.block_on(async {
+        // Open unidirectional stream for data
         match connection.open_uni().await {
             Ok(mut send_stream) => {
-                log::info!("Opened uni stream {}:{} for sending", connection_id, stream_id);
-
                 match send_stream.write_all(&data_to_send).await {
                     Ok(_) => {
                         match send_stream.finish() {
                             Ok(_) => {
-                                log::info!("Sent {} bytes on uni stream {}:{}", len, connection_id, stream_id);
-                            }
+                                log::debug!("Sent {} bytes on data stream for connection {}", len, connection_id);
+                                len as i64
+                            },
                             Err(e) => {
-                                log::error!("Failed to finish uni stream {}:{}: {:?}", connection_id, stream_id, e);
-                            }
+                                log::error!("Failed to finish data stream: {:?}", e);
+                                -2
+                            },
                         }
-                    }
+                    },
                     Err(e) => {
-                        log::error!("Failed to write to uni stream {}:{}: {:?}", connection_id, stream_id, e);
+                        log::error!("Failed to write to data stream: {:?}", e);
+                        -2
                     }
                 }
             }
             Err(e) => {
-                log::error!("Failed to open uni stream {}:{}: {:?}", connection_id, stream_id, e);
+                log::error!("Failed to open data stream: {:?}", e);
+                -2
             }
         }
     });
 
-    stream_id as i64
+    result
+}
+
+// Counter for stream IDs within a connection
+static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Open a persistent unidirectional stream for subgroup data
+///
+/// For MoQ publishing, each subgroup gets its own unidirectional stream.
+/// The stream header is written when objects start being sent.
+///
+/// # Arguments
+/// * `connection_id` - The connection ID
+/// * `out_stream_id` - Output parameter for the stream ID
+///
+/// # Returns
+/// * 0 on success, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_quic_open_stream(
+    connection_id: u64,
+    out_stream_id: *mut u64,
+) -> i32 {
+    let connections = CONNECTIONS.get().expect("Connection registry not initialized");
+    let stream_writers = STREAM_WRITERS.get().expect("Stream writers not initialized");
+
+    let connection = match connections.get(&connection_id) {
+        Some(conn) => conn.clone(),
+        None => {
+            log::error!("Connection {} not found for open_stream", connection_id);
+            return -1;
+        }
+    };
+
+    let runtime = get_runtime();
+
+    let result = runtime.block_on(async {
+        match connection.open_uni().await {
+            Ok(send_stream) => {
+                let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::SeqCst);
+
+                // Create a persistent stream writer
+                let writer = Arc::new(stream_writer::StreamWriter::new(
+                    connection_id,
+                    stream_id,
+                    send_stream,
+                    128, // Channel capacity for buffered writes
+                ));
+
+                stream_writers.insert((connection_id, stream_id), writer);
+
+                log::debug!("Opened unidirectional stream {} for connection {}", stream_id, connection_id);
+                Ok(stream_id)
+            }
+            Err(e) => {
+                log::error!("Failed to open stream: {:?}", e);
+                Err(-2)
+            }
+        }
+    });
+
+    match result {
+        Ok(stream_id) => {
+            unsafe { *out_stream_id = stream_id; }
+            0
+        }
+        Err(code) => code
+    }
+}
+
+/// Write data to an open stream
+///
+/// # Arguments
+/// * `connection_id` - The connection ID
+/// * `stream_id` - The stream ID from moq_quic_open_stream
+/// * `data` - Pointer to data to send
+/// * `len` - Length of data
+///
+/// # Returns
+/// * Number of bytes queued on success, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_quic_stream_write(
+    connection_id: u64,
+    stream_id: u64,
+    data: *const u8,
+    len: usize,
+) -> i64 {
+    let stream_writers = STREAM_WRITERS.get().expect("Stream writers not initialized");
+
+    let writer = match stream_writers.get(&(connection_id, stream_id)) {
+        Some(w) => w.clone(),
+        None => {
+            log::error!("Stream {} not found for connection {}", stream_id, connection_id);
+            return -1;
+        }
+    };
+
+    let data_bytes = unsafe { slice::from_raw_parts(data, len) };
+    let data_to_send = data_bytes.to_vec();
+
+    match writer.try_write(data_to_send) {
+        Ok(()) => {
+            log::trace!("Queued {} bytes to stream {} for connection {}", len, stream_id, connection_id);
+            len as i64
+        }
+        Err(e) => {
+            log::error!("Failed to queue write to stream {}: {:?}", stream_id, e);
+            -2
+        }
+    }
+}
+
+/// Finish/close an open stream
+///
+/// # Arguments
+/// * `connection_id` - The connection ID
+/// * `stream_id` - The stream ID from moq_quic_open_stream
+///
+/// # Returns
+/// * 0 on success, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_quic_stream_finish(
+    connection_id: u64,
+    stream_id: u64,
+) -> i32 {
+    let stream_writers = STREAM_WRITERS.get().expect("Stream writers not initialized");
+
+    // Remove the stream writer (this will trigger cleanup)
+    let writer = match stream_writers.remove(&(connection_id, stream_id)) {
+        Some((_, w)) => w,
+        None => {
+            log::warn!("Stream {} not found for finish on connection {}", stream_id, connection_id);
+            return -1;
+        }
+    };
+
+    match writer.try_finish() {
+        Ok(()) => {
+            log::debug!("Finished stream {} for connection {}", stream_id, connection_id);
+            0
+        }
+        Err(e) => {
+            log::error!("Failed to finish stream {}: {:?}", stream_id, e);
+            -2
+        }
+    }
 }

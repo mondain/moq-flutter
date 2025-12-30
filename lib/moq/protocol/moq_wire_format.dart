@@ -1,96 +1,204 @@
 part of 'moq_messages.dart';
 
 /// Wire format utilities for MoQ protocol
+///
+/// Uses prefix varint encoding (not standard continuation-bit varint):
+/// - 0x00-0x3F: 1 byte (6 bits of data)
+/// - 0x40-0x7F: 2 bytes (14 bits of data) - prefix 01
+/// - 0x80-0xBF: 4 bytes (30 bits of data) - prefix 10
+/// - 0xC0-0xFF: 8 bytes (54 bits of data) - prefix 11
 class MoQWireFormat {
-  /// Maximum varint size (64-bit)
-  static const int maxVarintSize = 10;
+  /// Maximum varint size (8 bytes for prefix varint)
+  static const int maxVarintSize = 8;
 
-  /// Encode a varint
+  /// Encode a varint using prefix encoding
   static Uint8List encodeVarint(int value) {
-    final buffer = Uint8List(maxVarintSize);
-    int offset = 0;
-    int v = value;
+    if (value < 0) {
+      throw ArgumentError('Value must be non-negative: $value');
+    }
 
-    do {
-      int byte = v & 0x7F;
-      v >>= 7;
-      if (v > 0) {
-        byte |= 0x80;
+    if (value <= 0x3F) {
+      // 1 byte: 00xxxxxx
+      return Uint8List.fromList([value]);
+    } else if (value <= 0x3FFF) {
+      // 2 bytes: 01xxxxxxxxxxxxxx
+      return Uint8List.fromList([
+        ((value >> 8) & 0x3F) | 0x40,
+        value & 0xFF,
+      ]);
+    } else if (value <= 0x3FFFFFFF) {
+      // 4 bytes: 10xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      return Uint8List.fromList([
+        ((value >> 24) & 0x3F) | 0x80,
+        (value >> 16) & 0xFF,
+        (value >> 8) & 0xFF,
+        value & 0xFF,
+      ]);
+    } else if (value <= 0x3FFFFFFFFFFFFFFF) {
+      // 8 bytes: 11xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      final bytes = Uint8List(8);
+      final byteData = ByteData(8)..setUint64(0, value, Endian.big);
+      for (int i = 0; i < 8; i++) {
+        bytes[i] = byteData.getUint8(i);
       }
-      buffer[offset++] = byte;
-    } while (v > 0);
-
-    return buffer.sublist(0, offset);
+      // Set top 2 bits to 11, keep remaining 6 bits of first byte
+      bytes[0] = (bytes[0] & 0x3F) | 0xC0;
+      return bytes;
+    } else {
+      throw ArgumentError('Value too large for 54-bit prefix varint: $value');
+    }
   }
 
-  /// Decode a varint
+  /// Decode a prefix varint
   static (int value, int bytesRead) decodeVarint(Uint8List data, int offset) {
-    int value = 0;
-    int shift = 0;
-    int bytesRead = 0;
+    if (offset >= data.length) {
+      throw FormatException('No data to decode varint');
+    }
 
-    do {
-      if (offset + bytesRead >= data.length) {
-        throw FormatException('Unexpected end of varint');
-      }
-      int b = data[offset + bytesRead];
-      value |= (b & 0x7F) << shift;
-      shift += 7;
-      bytesRead++;
+    final prefix = data[offset] & 0xC0;
 
-      if (bytesRead > maxVarintSize) {
-        throw FormatException('Varint too long');
-      }
-    } while ((data[offset + bytesRead - 1] & 0x80) != 0);
+    switch (prefix) {
+      case 0x00: // 1 byte
+        if (offset + 1 > data.length) {
+          throw FormatException('Incomplete 1-byte varint');
+        }
+        return (data[offset] & 0x3F, 1);
 
-    return (value, bytesRead);
+      case 0x40: // 2 bytes
+        if (offset + 2 > data.length) {
+          throw FormatException('Incomplete 2-byte varint');
+        }
+        return (
+          ((data[offset] & 0x3F) << 8) | data[offset + 1],
+          2,
+        );
+
+      case 0x80: // 4 bytes
+        if (offset + 4 > data.length) {
+          throw FormatException('Incomplete 4-byte varint');
+        }
+        return (
+          ((data[offset] & 0x3F) << 24) |
+              (data[offset + 1] << 16) |
+              (data[offset + 2] << 8) |
+              data[offset + 3],
+          4,
+        );
+
+      case 0xC0: // 8 bytes
+        if (offset + 8 > data.length) {
+          throw FormatException('Incomplete 8-byte varint');
+        }
+        final byteData = ByteData(8);
+        for (int i = 0; i < 8; i++) {
+          byteData.setUint8(i, data[offset + i]);
+        }
+        return (
+          byteData.getUint64(0, Endian.big) & 0x3FFFFFFFFFFFFFFF,
+          8,
+        );
+
+      default:
+        throw FormatException('Invalid varint prefix: 0x${prefix.toRadixString(16)}');
+    }
   }
 
-  /// Encode a 64-bit varint
+  /// Encode a 64-bit varint using prefix encoding
   static Uint8List encodeVarint64(Int64 value) {
-    final buffer = Uint8List(maxVarintSize);
-    int offset = 0;
-    Int64 v = value;
+    if (value < Int64(0)) {
+      throw ArgumentError('Value must be non-negative: $value');
+    }
 
-    do {
-      int byte = (v.toInt()) & 0x7F;
-      v = v >> 7;
-      if (v > Int64(0)) {
-        byte |= 0x80;
+    // Convert to unsigned for comparison
+    final unsigned = value.toUnsigned(64);
+
+    if (unsigned <= Int64(0x3F)) {
+      // 1 byte
+      return Uint8List.fromList([value.toInt()]);
+    } else if (unsigned <= Int64(0x3FFF)) {
+      // 2 bytes
+      return Uint8List.fromList([
+        ((value.toInt() >> 8) & 0x3F) | 0x40,
+        value.toInt() & 0xFF,
+      ]);
+    } else if (unsigned <= Int64(0x3FFFFFFF)) {
+      // 4 bytes
+      return Uint8List.fromList([
+        ((value.toInt() >> 24) & 0x3F) | 0x80,
+        (value.toInt() >> 16) & 0xFF,
+        (value.toInt() >> 8) & 0xFF,
+        value.toInt() & 0xFF,
+      ]);
+    } else if (unsigned <= Int64(0x3FFFFFFFFFFFFFFF)) {
+      // 8 bytes
+      final bytes = Uint8List(8);
+      final byteData = ByteData(8)..setUint64(0, value.toInt(), Endian.big);
+      for (int i = 0; i < 8; i++) {
+        bytes[i] = byteData.getUint8(i);
       }
-      buffer[offset++] = byte;
-    } while (v > Int64(0));
-
-    return buffer.sublist(0, offset);
+      bytes[0] = (bytes[0] & 0x3F) | 0xC0;
+      return bytes;
+    } else {
+      throw ArgumentError('Value too large for 54-bit prefix varint: $value');
+    }
   }
 
-  /// Decode a 64-bit varint
+  /// Decode a 64-bit prefix varint
   static (Int64 value, int bytesRead) decodeVarint64(
       Uint8List data, int offset) {
-    int value = 0;
-    int shift = 0;
-    int bytesRead = 0;
+    if (offset >= data.length) {
+      throw FormatException('No data to decode varint64');
+    }
 
-    do {
-      if (offset + bytesRead >= data.length) {
-        throw FormatException('Unexpected end of varint64');
-      }
-      int b = data[offset + bytesRead];
-      value |= (b & 0x7F) << shift;
-      shift += 7;
-      bytesRead++;
+    final prefix = data[offset] & 0xC0;
 
-      if (bytesRead > maxVarintSize) {
-        throw FormatException('Varint64 too long');
-      }
-    } while ((data[offset + bytesRead - 1] & 0x80) != 0);
+    switch (prefix) {
+      case 0x00: // 1 byte
+        if (offset + 1 > data.length) {
+          throw FormatException('Incomplete 1-byte varint64');
+        }
+        return (Int64(data[offset] & 0x3F), 1);
 
-    return (Int64(value), bytesRead);
+      case 0x40: // 2 bytes
+        if (offset + 2 > data.length) {
+          throw FormatException('Incomplete 2-byte varint64');
+        }
+        return (
+          Int64(((data[offset] & 0x3F) << 8) | data[offset + 1]),
+          2,
+        );
+
+      case 0x80: // 4 bytes
+        if (offset + 4 > data.length) {
+          throw FormatException('Incomplete 4-byte varint64');
+        }
+        return (
+          Int64(((data[offset] & 0x3F) << 24) |
+              (data[offset + 1] << 16) |
+              (data[offset + 2] << 8) |
+              data[offset + 3]),
+          4,
+        );
+
+      case 0xC0: // 8 bytes
+        if (offset + 8 > data.length) {
+          throw FormatException('Incomplete 8-byte varint64');
+        }
+        final byteData = ByteData(8);
+        for (int i = 0; i < 8; i++) {
+          byteData.setUint8(i, data[offset + i]);
+        }
+        final unsigned = byteData.getUint64(0, Endian.big) & 0x3FFFFFFFFFFFFFFF;
+        return (Int64(unsigned), 8);
+
+      default:
+        throw FormatException('Invalid varint64 prefix: 0x${prefix.toRadixString(16)}');
+    }
   }
 
   /// Encode a tuple (array of byte arrays)
   static Uint8List encodeTuple(List<Uint8List> tuple) {
-    // Count: varint + each element: varint length + data
+    // Calculate total size
     int totalSize = 0;
     for (final element in tuple) {
       totalSize += _varintSize(element.length) + element.length;
@@ -144,28 +252,25 @@ class MoQWireFormat {
     return (tuple, totalBytes);
   }
 
-  /// Calculate varint size
+  /// Calculate prefix varint size for a given value
   static int _varintSize(int value) {
     if (value < 0) return maxVarintSize;
-    int size = 1;
-    while (value >= 0x80) {
-      value >>= 7;
-      size++;
-    }
-    return size;
+    if (value <= 0x3F) return 1;
+    if (value <= 0x3FFF) return 2;
+    if (value <= 0x3FFFFFFF) return 4;
+    if (value <= 0x3FFFFFFFFFFFFFFF) return 8;
+    return maxVarintSize;
   }
 
-  /// Calculate 64-bit varint size
+  /// Calculate prefix varint size for a 64-bit value
   static int _varintSize64(Int64 value) {
-    // For 64-bit, we need to check the actual value
     if (value < Int64(0)) return maxVarintSize;
-    int v = value.toInt();
-    int size = 1;
-    while (v >= 0x80) {
-      v >>= 7;
-      size++;
-    }
-    return size;
+    final unsigned = value.toUnsigned(64);
+    if (unsigned <= Int64(0x3F)) return 1;
+    if (unsigned <= Int64(0x3FFF)) return 2;
+    if (unsigned <= Int64(0x3FFFFFFF)) return 4;
+    if (unsigned <= Int64(0x3FFFFFFFFFFFFFFF)) return 8;
+    return maxVarintSize;
   }
 
   /// Encode a Location structure
@@ -207,11 +312,11 @@ class MoQControlMessageParser {
 
     int offset = 0;
 
-    // Read message type (varint)
+    // Read message type (varint - prefix encoded)
     final (type, typeBytes) = MoQWireFormat.decodeVarint(data, offset);
     offset += typeBytes;
 
-    // Read message length (16-bit)
+    // Read message length (16-bit big endian)
     if (offset + 2 > data.length) {
       throw FormatException('Unexpected end of message length');
     }
@@ -288,6 +393,16 @@ class MoQControlMessageParser {
         return TrackStatusOkMessage.deserialize(payload);
       case MoQMessageType.trackStatusError:
         return TrackStatusErrorMessage.deserialize(payload);
+      case MoQMessageType.publishNamespace:
+        return PublishNamespaceMessage.deserialize(payload);
+      case MoQMessageType.publishNamespaceOk:
+        return PublishNamespaceOkMessage.deserialize(payload);
+      case MoQMessageType.publishNamespaceError:
+        return PublishNamespaceErrorMessage.deserialize(payload);
+      case MoQMessageType.publishNamespaceDone:
+        return PublishNamespaceDoneMessage.deserialize(payload);
+      case MoQMessageType.publishNamespaceCancel:
+        return PublishNamespaceCancelMessage.deserialize(payload);
       default:
         // Unknown or unimplemented message type
         return null;

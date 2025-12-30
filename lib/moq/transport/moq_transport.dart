@@ -13,8 +13,22 @@ abstract class MoQTransport {
   /// Disconnect from the MoQ endpoint
   Future<void> disconnect();
 
-  /// Send data over the QUIC connection
+  /// Send data over the bidirectional control stream
   Future<void> send(Uint8List data);
+
+  /// Send data on a unidirectional stream (single-shot, opens and closes stream)
+  /// Used for simple data objects
+  Future<void> sendData(Uint8List data);
+
+  /// Open a persistent unidirectional stream for subgroup data
+  /// Returns the stream ID
+  Future<int> openStream();
+
+  /// Write data to an open stream
+  Future<void> streamWrite(int streamId, Uint8List data);
+
+  /// Finish/close an open stream
+  Future<void> streamFinish(int streamId);
 
   /// Stream of incoming data
   Stream<Uint8List> get incomingData;
