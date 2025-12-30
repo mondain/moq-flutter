@@ -266,6 +266,8 @@ Draft-14 implementation with:
 - Server-side PUBLISH/PUBLISH_OK/PUBLISH_ERROR handling for receiving publish requests
 - Publisher-side SUBSCRIBE/SUBSCRIBE_OK/SUBSCRIBE_ERROR handling for relay subscriptions
 - GOAWAY message handling with migration URI support
+- Complete QUIC FFI bindings via Rust native library (quinn)
+- Data stream handling with SUBGROUP_HEADER parser and transport separation
 - Comprehensive test coverage for wire format (44 tests passing)
 
 ### Test Coverage
@@ -281,13 +283,10 @@ Draft-14 implementation with:
 
 ## TODO
 
-- Complete QUIC FFI bindings (quiche or msquic) for transport layer
-- Implement data stream handling (SUBGROUP_HEADER, OBJECT_DATAGRAM reception)
-- Implement FETCH for past objects
-- Implement namespace discovery (SUBSCRIBE_NAMESPACE, PUBLISH_NAMESPACE)
-- Add error handling and reconnection logic
+- Implement FETCH client API for past objects (message classes exist)
+- Implement SUBSCRIBE_NAMESPACE message classes and client API
+- Add automatic reconnection logic (GOAWAY handling exists)
 - Add integration tests for full client/server flow
-- Improve test coverage for control and data messages
 - Add performance benchmarks for serialization
 
 ## References
