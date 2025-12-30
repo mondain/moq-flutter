@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:logger/logger.dart';
 import 'audio_capture.dart';
+import 'native_capture_channel.dart';
 
 // Re-export AudioSamples from audio_capture.dart
 export 'audio_capture.dart' show AudioSamples, AudioCaptureConfig;
@@ -45,7 +47,7 @@ class CaptureConfig {
 /// - Android/iOS: audio_streamer package
 /// - Linux: PulseAudio via parec
 /// - macOS/Windows: Stub (silence) - native capture not yet implemented
-class CameraCapture {
+class CameraCapture implements VideoCapture {
   final CaptureConfig config;
   final Logger _logger;
 
@@ -105,7 +107,7 @@ class CameraCapture {
     }
   }
 
-  /// Start capturing video and audio
+  @override
   Future<void> startCapture() async {
     if (_cameraController == null || !_cameraController!.value.isInitialized) {
       throw StateError('Camera not initialized');
@@ -129,7 +131,7 @@ class CameraCapture {
     }
   }
 
-  /// Stop capturing
+  @override
   Future<void> stopCapture() async {
     if (!_isCapturing) return;
 
@@ -198,10 +200,10 @@ class CameraCapture {
     return result;
   }
 
-  /// Stream of video frames
+  @override
   Stream<VideoFrame> get videoFrames => _videoFrameController.stream;
 
-  /// Stream of audio samples from platform-specific capture
+  @override
   Stream<AudioSamples>? get audioSamples => _audioCapture?.audioStream;
 
   /// Get the audio capture instance (for direct access)
@@ -210,14 +212,274 @@ class CameraCapture {
   /// Get camera preview widget (for UI)
   CameraController? get cameraController => _cameraController;
 
-  /// Check if capturing
+  @override
   bool get isCapturing => _isCapturing;
 
-  /// Dispose resources
+  @override
   void dispose() {
     stopCapture();
     _cameraController?.dispose();
     _audioCapture?.dispose();
     _videoFrameController.close();
+  }
+
+  /// Factory to create platform-appropriate video capture
+  static Future<VideoCapture> createNative({
+    CaptureConfig? config,
+    Logger? logger,
+  }) async {
+    final cfg = config ?? const CaptureConfig();
+    final log = logger ?? Logger();
+
+    if (Platform.isIOS || Platform.isMacOS) {
+      return NativeVideoCapture(config: cfg, logger: log);
+    } else {
+      // For other platforms, use the camera package-based CameraCapture
+      final capture = CameraCapture(config: cfg, logger: log);
+      await capture.initialize();
+      return capture;
+    }
+  }
+}
+
+/// Abstract interface for video capture (allows native implementations)
+abstract class VideoCapture {
+  /// Stream of video frames
+  Stream<VideoFrame> get videoFrames;
+
+  /// Stream of audio samples
+  Stream<AudioSamples>? get audioSamples;
+
+  /// Whether capture is currently active
+  bool get isCapturing;
+
+  /// Start capturing
+  Future<void> startCapture();
+
+  /// Stop capturing
+  Future<void> stopCapture();
+
+  /// Dispose resources
+  void dispose();
+}
+
+
+/// Native video capture for macOS and iOS using AVFoundation via Platform Channels
+class NativeVideoCapture implements VideoCapture {
+  final CaptureConfig config;
+  final Logger _logger;
+
+  final _videoFrameController = StreamController<VideoFrame>.broadcast();
+  bool _isCapturing = false;
+  NativeCaptureChannel? _nativeChannel;
+  StreamSubscription<NativeVideoFrame>? _videoSubscription;
+  bool _nativeAvailable = true;
+
+  // Audio capture (using native channel as well)
+  final _audioController = StreamController<AudioSamples>.broadcast();
+  StreamSubscription<NativeAudioSamples>? _audioSubscription;
+
+  NativeVideoCapture({
+    CaptureConfig? config,
+    Logger? logger,
+  })  : config = config ?? const CaptureConfig(),
+        _logger = logger ?? Logger();
+
+  @override
+  Stream<VideoFrame> get videoFrames => _videoFrameController.stream;
+
+  @override
+  Stream<AudioSamples>? get audioSamples =>
+      config.enableAudio ? _audioController.stream : null;
+
+  @override
+  bool get isCapturing => _isCapturing;
+
+  /// Get list of available cameras
+  Future<List<NativeCameraInfo>> getAvailableCameras() async {
+    _nativeChannel ??= NativeCaptureChannel(logger: _logger);
+    return _nativeChannel!.getAvailableCameras();
+  }
+
+  /// Initialize with optional camera selection
+  Future<void> initialize({String? cameraId}) async {
+    try {
+      _nativeChannel = NativeCaptureChannel(logger: _logger);
+
+      // Request camera permission
+      final hasCameraPermission = await _nativeChannel!.hasCameraPermission();
+      if (!hasCameraPermission) {
+        final granted = await _nativeChannel!.requestCameraPermission();
+        if (!granted) {
+          _logger.w('Camera permission denied');
+          _nativeAvailable = false;
+          return;
+        }
+      }
+
+      // Request microphone permission if audio is enabled
+      if (config.enableAudio) {
+        final hasMicPermission = await _nativeChannel!.hasMicrophonePermission();
+        if (!hasMicPermission) {
+          final granted = await _nativeChannel!.requestMicrophonePermission();
+          if (!granted) {
+            _logger.w('Microphone permission denied');
+          }
+        }
+      }
+
+      // Get resolution dimensions from preset
+      final (width, height) = _resolutionFromPreset(config.resolution);
+
+      await _nativeChannel!.initializeVideo(
+        width: width,
+        height: height,
+        frameRate: 30,
+        cameraId: cameraId,
+      );
+
+      if (config.enableAudio) {
+        await _nativeChannel!.initializeAudio(
+          sampleRate: config.audioSampleRate,
+          channels: config.audioChannels,
+        );
+      }
+
+      _logger.i('Native video capture initialized');
+    } catch (e) {
+      _logger.e('Failed to initialize native video capture: $e');
+      _nativeAvailable = false;
+    }
+  }
+
+  /// Select a specific camera
+  Future<void> selectCamera(String cameraId) async {
+    if (_nativeChannel != null) {
+      await _nativeChannel!.selectCamera(cameraId);
+    }
+  }
+
+  (int, int) _resolutionFromPreset(ResolutionPreset preset) {
+    switch (preset) {
+      case ResolutionPreset.low:
+        return (320, 240);
+      case ResolutionPreset.medium:
+        return (720, 480);
+      case ResolutionPreset.high:
+        return (1280, 720);
+      case ResolutionPreset.veryHigh:
+        return (1920, 1080);
+      case ResolutionPreset.ultraHigh:
+        return (3840, 2160);
+      case ResolutionPreset.max:
+        return (3840, 2160);
+    }
+  }
+
+  @override
+  Future<void> startCapture() async {
+    if (_isCapturing) {
+      _logger.w('Already capturing');
+      return;
+    }
+
+    if (!_nativeAvailable || _nativeChannel == null) {
+      _logger.e('Native video capture not available');
+      return;
+    }
+
+    _isCapturing = true;
+
+    try {
+      // Subscribe to video stream
+      _videoSubscription = _nativeChannel!.videoStream.listen(
+        _onVideoFrame,
+        onError: (error) {
+          _logger.e('Native video stream error: $error');
+        },
+      );
+
+      await _nativeChannel!.startVideoCapture();
+      _logger.i('Native video capture started');
+
+      // Start audio if enabled
+      if (config.enableAudio) {
+        _audioSubscription = _nativeChannel!.audioStream.listen(
+          _onAudioSamples,
+          onError: (error) {
+            _logger.e('Native audio stream error: $error');
+          },
+        );
+
+        await _nativeChannel!.startAudioCapture();
+        _logger.i('Native audio capture started');
+      }
+    } catch (e) {
+      _logger.e('Failed to start native capture: $e');
+      _isCapturing = false;
+      rethrow;
+    }
+  }
+
+  void _onVideoFrame(NativeVideoFrame nativeFrame) {
+    if (!_isCapturing) return;
+
+    final frame = VideoFrame(
+      data: nativeFrame.data,
+      width: nativeFrame.width,
+      height: nativeFrame.height,
+      timestampMs: nativeFrame.timestampMs,
+      format: nativeFrame.format,
+    );
+
+    _videoFrameController.add(frame);
+  }
+
+  void _onAudioSamples(NativeAudioSamples nativeSamples) {
+    if (!_isCapturing) return;
+
+    final samples = AudioSamples(
+      data: nativeSamples.data,
+      sampleRate: nativeSamples.sampleRate,
+      channels: nativeSamples.channels,
+      timestampMs: nativeSamples.timestampMs,
+      bitsPerSample: nativeSamples.bitsPerSample,
+    );
+
+    _audioController.add(samples);
+  }
+
+  @override
+  Future<void> stopCapture() async {
+    if (!_isCapturing) return;
+
+    _isCapturing = false;
+
+    await _videoSubscription?.cancel();
+    _videoSubscription = null;
+
+    await _audioSubscription?.cancel();
+    _audioSubscription = null;
+
+    if (_nativeChannel != null) {
+      try {
+        await _nativeChannel!.stopVideoCapture();
+        if (config.enableAudio) {
+          await _nativeChannel!.stopAudioCapture();
+        }
+      } catch (e) {
+        _logger.w('Error stopping native capture: $e');
+      }
+    }
+
+    _logger.i('Native video capture stopped');
+  }
+
+  @override
+  void dispose() {
+    stopCapture();
+    _nativeChannel?.dispose();
+    _videoFrameController.close();
+    _audioController.close();
   }
 }

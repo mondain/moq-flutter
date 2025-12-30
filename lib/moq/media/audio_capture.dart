@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:audio_streamer/audio_streamer.dart' as audio_pkg;
 import 'package:logger/logger.dart';
+import 'native_capture_channel.dart';
 
 /// Raw audio samples from microphone
 class AudioSamples {
@@ -86,12 +87,14 @@ abstract class AudioCapture {
     final cfg = config ?? AudioCaptureConfig.opus;
     final log = logger ?? Logger();
 
-    if (Platform.isAndroid || Platform.isIOS) {
+    if (Platform.isAndroid) {
       return MobileAudioCapture(config: cfg, logger: log);
+    } else if (Platform.isIOS) {
+      return NativeIOSAudioCapture(config: cfg, logger: log);
     } else if (Platform.isLinux) {
       return LinuxAudioCapture(config: cfg, logger: log);
     } else if (Platform.isMacOS) {
-      return MacOSAudioCapture(config: cfg, logger: log);
+      return NativeMacOSAudioCapture(config: cfg, logger: log);
     } else if (Platform.isWindows) {
       return WindowsAudioCapture(config: cfg, logger: log);
     } else {
@@ -359,7 +362,309 @@ class LinuxAudioCapture implements AudioCapture {
   }
 }
 
-/// macOS audio capture (placeholder - uses AVFoundation)
+/// Native macOS audio capture using AVFoundation via Platform Channels
+class NativeMacOSAudioCapture implements AudioCapture {
+  @override
+  final AudioCaptureConfig config;
+  final Logger _logger;
+
+  final _audioController = StreamController<AudioSamples>.broadcast();
+  bool _isCapturing = false;
+  NativeCaptureChannel? _nativeChannel;
+  StreamSubscription<NativeAudioSamples>? _nativeSubscription;
+
+  // Fallback timer for generating silence if native capture fails
+  Timer? _silenceTimer;
+  int _startTimeMs = 0;
+  bool _nativeAvailable = true;
+
+  NativeMacOSAudioCapture({
+    required this.config,
+    required Logger logger,
+  }) : _logger = logger;
+
+  @override
+  Stream<AudioSamples> get audioStream => _audioController.stream;
+
+  @override
+  bool get isCapturing => _isCapturing;
+
+  @override
+  Future<void> initialize() async {
+    try {
+      _nativeChannel = NativeCaptureChannel(logger: _logger);
+
+      // Request microphone permission if needed
+      final hasPermission = await _nativeChannel!.hasMicrophonePermission();
+      if (!hasPermission) {
+        final granted = await _nativeChannel!.requestMicrophonePermission();
+        if (!granted) {
+          _logger.w('Microphone permission denied, falling back to silence');
+          _nativeAvailable = false;
+          return;
+        }
+      }
+
+      await _nativeChannel!.initializeAudio(
+        sampleRate: config.sampleRate,
+        channels: config.channels,
+        bitsPerSample: config.bitsPerSample,
+      );
+
+      _logger.i('macOS native audio capture initialized');
+    } catch (e) {
+      _logger.w('Failed to initialize native audio capture: $e');
+      _logger.w('Falling back to silence generator');
+      _nativeAvailable = false;
+    }
+  }
+
+  @override
+  Future<void> startCapture() async {
+    if (_isCapturing) return;
+
+    _isCapturing = true;
+    _startTimeMs = DateTime.now().millisecondsSinceEpoch;
+
+    if (_nativeAvailable && _nativeChannel != null) {
+      try {
+        // Subscribe to native audio stream
+        _nativeSubscription = _nativeChannel!.audioStream.listen(
+          _onNativeAudioData,
+          onError: (error) {
+            _logger.e('Native audio stream error: $error');
+            _startSilenceGenerator();
+          },
+        );
+
+        await _nativeChannel!.startAudioCapture();
+        _logger.i('macOS native audio capture started');
+      } catch (e) {
+        _logger.e('Failed to start native audio capture: $e');
+        _startSilenceGenerator();
+      }
+    } else {
+      _startSilenceGenerator();
+    }
+  }
+
+  void _onNativeAudioData(NativeAudioSamples nativeSamples) {
+    if (!_isCapturing) return;
+
+    _audioController.add(AudioSamples(
+      data: nativeSamples.data,
+      sampleRate: nativeSamples.sampleRate,
+      channels: nativeSamples.channels,
+      timestampMs: nativeSamples.timestampMs,
+      bitsPerSample: nativeSamples.bitsPerSample,
+    ));
+  }
+
+  void _startSilenceGenerator() {
+    _silenceTimer?.cancel();
+    _silenceTimer = Timer.periodic(const Duration(milliseconds: 20), (timer) {
+      if (!_isCapturing) {
+        timer.cancel();
+        return;
+      }
+
+      final timestampMs = DateTime.now().millisecondsSinceEpoch - _startTimeMs;
+      final samplesPerFrame = (config.sampleRate * 20) ~/ 1000;
+      final frameSize = samplesPerFrame * config.channels * 2;
+
+      _audioController.add(AudioSamples(
+        data: Uint8List(frameSize),
+        sampleRate: config.sampleRate,
+        channels: config.channels,
+        timestampMs: timestampMs,
+        bitsPerSample: 16,
+      ));
+    });
+    _logger.w('macOS audio capture falling back to silence generator');
+  }
+
+  @override
+  Future<void> stopCapture() async {
+    if (!_isCapturing) return;
+
+    _isCapturing = false;
+    _silenceTimer?.cancel();
+    _silenceTimer = null;
+
+    await _nativeSubscription?.cancel();
+    _nativeSubscription = null;
+
+    if (_nativeAvailable && _nativeChannel != null) {
+      try {
+        await _nativeChannel!.stopAudioCapture();
+      } catch (e) {
+        _logger.w('Error stopping native audio capture: $e');
+      }
+    }
+
+    _logger.i('macOS audio capture stopped');
+  }
+
+  @override
+  void dispose() {
+    stopCapture();
+    _nativeChannel?.dispose();
+    _audioController.close();
+  }
+}
+
+/// Native iOS audio capture using AVFoundation via Platform Channels
+class NativeIOSAudioCapture implements AudioCapture {
+  @override
+  final AudioCaptureConfig config;
+  final Logger _logger;
+
+  final _audioController = StreamController<AudioSamples>.broadcast();
+  bool _isCapturing = false;
+  NativeCaptureChannel? _nativeChannel;
+  StreamSubscription<NativeAudioSamples>? _nativeSubscription;
+
+  // Fallback timer for generating silence if native capture fails
+  Timer? _silenceTimer;
+  int _startTimeMs = 0;
+  bool _nativeAvailable = true;
+
+  NativeIOSAudioCapture({
+    required this.config,
+    required Logger logger,
+  }) : _logger = logger;
+
+  @override
+  Stream<AudioSamples> get audioStream => _audioController.stream;
+
+  @override
+  bool get isCapturing => _isCapturing;
+
+  @override
+  Future<void> initialize() async {
+    try {
+      _nativeChannel = NativeCaptureChannel(logger: _logger);
+
+      // Request microphone permission if needed
+      final hasPermission = await _nativeChannel!.hasMicrophonePermission();
+      if (!hasPermission) {
+        final granted = await _nativeChannel!.requestMicrophonePermission();
+        if (!granted) {
+          _logger.w('Microphone permission denied, falling back to silence');
+          _nativeAvailable = false;
+          return;
+        }
+      }
+
+      await _nativeChannel!.initializeAudio(
+        sampleRate: config.sampleRate,
+        channels: config.channels,
+        bitsPerSample: config.bitsPerSample,
+      );
+
+      _logger.i('iOS native audio capture initialized');
+    } catch (e) {
+      _logger.w('Failed to initialize native audio capture: $e');
+      _logger.w('Falling back to silence generator');
+      _nativeAvailable = false;
+    }
+  }
+
+  @override
+  Future<void> startCapture() async {
+    if (_isCapturing) return;
+
+    _isCapturing = true;
+    _startTimeMs = DateTime.now().millisecondsSinceEpoch;
+
+    if (_nativeAvailable && _nativeChannel != null) {
+      try {
+        // Subscribe to native audio stream
+        _nativeSubscription = _nativeChannel!.audioStream.listen(
+          _onNativeAudioData,
+          onError: (error) {
+            _logger.e('Native audio stream error: $error');
+            _startSilenceGenerator();
+          },
+        );
+
+        await _nativeChannel!.startAudioCapture();
+        _logger.i('iOS native audio capture started');
+      } catch (e) {
+        _logger.e('Failed to start native audio capture: $e');
+        _startSilenceGenerator();
+      }
+    } else {
+      _startSilenceGenerator();
+    }
+  }
+
+  void _onNativeAudioData(NativeAudioSamples nativeSamples) {
+    if (!_isCapturing) return;
+
+    _audioController.add(AudioSamples(
+      data: nativeSamples.data,
+      sampleRate: nativeSamples.sampleRate,
+      channels: nativeSamples.channels,
+      timestampMs: nativeSamples.timestampMs,
+      bitsPerSample: nativeSamples.bitsPerSample,
+    ));
+  }
+
+  void _startSilenceGenerator() {
+    _silenceTimer?.cancel();
+    _silenceTimer = Timer.periodic(const Duration(milliseconds: 20), (timer) {
+      if (!_isCapturing) {
+        timer.cancel();
+        return;
+      }
+
+      final timestampMs = DateTime.now().millisecondsSinceEpoch - _startTimeMs;
+      final samplesPerFrame = (config.sampleRate * 20) ~/ 1000;
+      final frameSize = samplesPerFrame * config.channels * 2;
+
+      _audioController.add(AudioSamples(
+        data: Uint8List(frameSize),
+        sampleRate: config.sampleRate,
+        channels: config.channels,
+        timestampMs: timestampMs,
+        bitsPerSample: 16,
+      ));
+    });
+    _logger.w('iOS audio capture falling back to silence generator');
+  }
+
+  @override
+  Future<void> stopCapture() async {
+    if (!_isCapturing) return;
+
+    _isCapturing = false;
+    _silenceTimer?.cancel();
+    _silenceTimer = null;
+
+    await _nativeSubscription?.cancel();
+    _nativeSubscription = null;
+
+    if (_nativeAvailable && _nativeChannel != null) {
+      try {
+        await _nativeChannel!.stopAudioCapture();
+      } catch (e) {
+        _logger.w('Error stopping native audio capture: $e');
+      }
+    }
+
+    _logger.i('iOS audio capture stopped');
+  }
+
+  @override
+  void dispose() {
+    stopCapture();
+    _nativeChannel?.dispose();
+    _audioController.close();
+  }
+}
+
+/// Legacy macOS audio capture stub (kept for reference)
 class MacOSAudioCapture implements AudioCapture {
   @override
   final AudioCaptureConfig config;
@@ -393,8 +698,6 @@ class MacOSAudioCapture implements AudioCapture {
     _isCapturing = true;
     _startTimeMs = DateTime.now().millisecondsSinceEpoch;
 
-    // TODO: Implement native macOS audio capture via FFI/platform channel
-    // For now, generate silence
     _silenceTimer = Timer.periodic(const Duration(milliseconds: 20), (timer) {
       if (!_isCapturing) {
         timer.cancel();

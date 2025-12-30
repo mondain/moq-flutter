@@ -28,5 +28,9 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSCameraUsageDescription</key>
+	<string>This app requires camera access to publish video streams over MoQ.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>This app requires microphone access to publish audio streams over MoQ.</string>
 </dict>
 </plist>
