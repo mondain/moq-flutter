@@ -289,11 +289,18 @@ Draft-14 implementation with:
 
 - **Control Message Tests**: Round-trip serialization for all control messages
 - **Data Message Tests**: Object datagram, subgroup header, subgroup object
+- **Client Integration Tests**: 22/22 passing
+  - Connection flow (CLIENT_SETUP/SERVER_SETUP handshake, timeout, disconnect)
+  - Subscription flow (SUBSCRIBE/SUBSCRIBE_OK/SUBSCRIBE_ERROR, unsubscribe)
+  - FETCH flow (standalone fetch, FETCH_OK/FETCH_ERROR, cancel)
+  - Namespace operations (announceNamespace, subscribeNamespace, unsubscribeNamespace)
+  - GOAWAY handling (with and without migration URI)
+  - Publisher mode (incoming SUBSCRIBE requests, acceptSubscribe, rejectSubscribe, PUBLISH_DONE)
+  - Data stream handling (openDataStream, writeSubgroupHeader)
 
 ## TODO
 
 - Add automatic reconnection logic (GOAWAY handling exists)
-- Add integration tests for full client/server flow
 - Add performance benchmarks for serialization
 
 ## References

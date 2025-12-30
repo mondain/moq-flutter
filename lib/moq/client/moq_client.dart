@@ -139,7 +139,7 @@ class MoQClient {
         _handleIncomingData,
         onError: (error) {
           _logger.e('Transport error: $error');
-          if (!_setupCompleter!.isCompleted) {
+          if (_setupCompleter != null && !_setupCompleter!.isCompleted) {
             _setupCompleter!.completeError(
               MoQException(errorCode: -1, reason: 'Transport error: $error'),
             );
@@ -151,7 +151,7 @@ class MoQClient {
           if (!_connectionStateController.isClosed) {
             _connectionStateController.add(false);
           }
-          if (!_setupCompleter!.isCompleted) {
+          if (_setupCompleter != null && !_setupCompleter!.isCompleted) {
             _setupCompleter!.completeError(
               MoQException(errorCode: -1, reason: 'Transport closed'),
             );
@@ -246,7 +246,9 @@ class MoQClient {
     _subscriptions.clear();
     _trackAliases.clear();
 
-    _connectionStateController.add(false);
+    if (!_connectionStateController.isClosed) {
+      _connectionStateController.add(false);
+    }
   }
 
   /// Subscribe to a track
@@ -1850,6 +1852,11 @@ class MoQFetch {
   /// Cancel the fetch
   void cancel() {
     _isCanceled = true;
+    if (!_responseCompleter.isCompleted) {
+      _responseCompleter.completeError(
+        MoQException(errorCode: -1, reason: 'Fetch cancelled'),
+      );
+    }
     _objectController.close();
   }
 
