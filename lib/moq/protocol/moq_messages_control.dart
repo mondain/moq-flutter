@@ -1193,15 +1193,16 @@ class GoawayMessage extends MoQControlMessage {
 
 /// PUBLISH_DONE message (0xB)
 ///
-/// Wire format:
+/// Wire format per draft-ietf-moq-transport-14:
 /// PUBLISH_DONE Message {
 ///   Type (i) = 0xB,
 ///   Length (16),
 ///   Request ID (i),
 ///   Status Code (i),
 ///   Stream Count (i),
-///   [Error Reason (Reason Phrase)]
+///   Error Reason (Reason Phrase)
 /// }
+/// Note: Error Reason is required per spec (always write length, even if 0)
 class PublishDoneMessage extends MoQControlMessage {
   final Int64 requestId;
   final int statusCode;
@@ -1224,9 +1225,12 @@ class PublishDoneMessage extends MoQControlMessage {
     len += MoQWireFormat._varintSize64(requestId);
     len += MoQWireFormat._varintSize(statusCode);
     len += MoQWireFormat._varintSize64(streamCount);
+    // Error Reason is required - always include length (even if 0)
     if (errorReason != null) {
       final reasonBytes = const Utf8Encoder().convert(errorReason!.reason);
       len += MoQWireFormat._varintSize(reasonBytes.length) + reasonBytes.length;
+    } else {
+      len += MoQWireFormat._varintSize(0); // Empty reason phrase
     }
     return len;
   }
@@ -1240,10 +1244,13 @@ class PublishDoneMessage extends MoQControlMessage {
     offset += _writeVarint(payload, offset, statusCode);
     offset += _writeVarint64(payload, offset, streamCount);
 
+    // Error Reason is required - always write length (even if 0)
     if (errorReason != null) {
       final reasonBytes = const Utf8Encoder().convert(errorReason!.reason);
       offset += _writeVarint(payload, offset, reasonBytes.length);
       payload.setAll(offset, reasonBytes);
+    } else {
+      offset += _writeVarint(payload, offset, 0); // Empty reason phrase
     }
 
     return _wrapMessage(payload);
@@ -1290,6 +1297,7 @@ class PublishDoneMessage extends MoQControlMessage {
     final (streamCount, len3) = MoQWireFormat.decodeVarint64(data, offset);
     offset += len3;
 
+    // Error Reason is required per spec - always read the length
     ReasonPhrase? errorReason;
     if (offset < data.length) {
       final (reasonLen, len4) = MoQWireFormat.decodeVarint(data, offset);
@@ -1299,7 +1307,10 @@ class PublishDoneMessage extends MoQControlMessage {
         final reason = const Utf8Decoder().convert(reasonBytes);
         errorReason = ReasonPhrase(reason);
       }
+      // If reasonLen is 0, errorReason remains null (empty reason)
     }
+    // Note: Defensive - handle case where sender omits Error Reason entirely
+    // (technically not spec-compliant, but we handle gracefully)
 
     return PublishDoneMessage(
       requestId: requestId,
