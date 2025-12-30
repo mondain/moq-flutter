@@ -63,7 +63,13 @@ The project includes automatic Rust library compilation during the build process
 - **iOS**: Xcode build phases via `build/rust_build_ios.sh`
 - **Platform-specific scripts**: `build/rust_build_*.sh`
 
+Manual build commands:
+
+- **Linux/macOS/iOS**: via `scripts/build_native.sh`
+- **Windows**: `scripts/build_native.bat`
+
 The Rust QUIC library is compiled automatically when running:
+
 ```bash
 flutter build apk
 flutter build ios
