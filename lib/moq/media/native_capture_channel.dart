@@ -2,7 +2,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:logger/logger.dart';
 
-/// Platform channel interface for native audio/video capture on macOS and iOS
+/// Platform channel interface for native audio/video capture on macOS, iOS, and Windows
 class NativeCaptureChannel {
   static const MethodChannel _methodChannel =
       MethodChannel('com.moq_flutter/native_capture');

@@ -46,7 +46,7 @@ class CaptureConfig {
 /// Uses platform-specific audio capture:
 /// - Android/iOS: audio_streamer package
 /// - Linux: PulseAudio via parec
-/// - macOS/Windows: Stub (silence) - native capture not yet implemented
+/// - macOS/iOS/Windows: Native capture via Platform Channels (AVFoundation/Media Foundation)
 class CameraCapture implements VideoCapture {
   final CaptureConfig config;
   final Logger _logger;
@@ -231,7 +231,7 @@ class CameraCapture implements VideoCapture {
     final cfg = config ?? const CaptureConfig();
     final log = logger ?? Logger();
 
-    if (Platform.isIOS || Platform.isMacOS) {
+    if (Platform.isIOS || Platform.isMacOS || Platform.isWindows) {
       return NativeVideoCapture(config: cfg, logger: log);
     } else {
       // For other platforms, use the camera package-based CameraCapture
@@ -264,7 +264,7 @@ abstract class VideoCapture {
 }
 
 
-/// Native video capture for macOS and iOS using AVFoundation via Platform Channels
+/// Native video capture for macOS, iOS, and Windows using AVFoundation/Media Foundation via Platform Channels
 class NativeVideoCapture implements VideoCapture {
   final CaptureConfig config;
   final Logger _logger;

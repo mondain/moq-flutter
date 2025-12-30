@@ -738,7 +738,7 @@ class MacOSAudioCapture implements AudioCapture {
   }
 }
 
-/// Windows audio capture (placeholder - uses WASAPI)
+/// Windows audio capture using Media Foundation via Platform Channels
 class WindowsAudioCapture implements AudioCapture {
   @override
   final AudioCaptureConfig config;
@@ -748,6 +748,10 @@ class WindowsAudioCapture implements AudioCapture {
   bool _isCapturing = false;
   int _startTimeMs = 0;
   Timer? _silenceTimer;
+
+  NativeCaptureChannel? _nativeChannel;
+  StreamSubscription<NativeAudioSamples>? _nativeSubscription;
+  bool _useNativeCapture = true;
 
   WindowsAudioCapture({
     required this.config,
@@ -762,7 +766,31 @@ class WindowsAudioCapture implements AudioCapture {
 
   @override
   Future<void> initialize() async {
-    _logger.i('Windows audio capture initialized (stub - generating silence)');
+    try {
+      _nativeChannel = NativeCaptureChannel(logger: _logger);
+
+      // Request microphone permission (Windows doesn't require explicit permission)
+      final hasPermission = await _nativeChannel!.hasMicrophonePermission();
+      if (!hasPermission) {
+        final granted = await _nativeChannel!.requestMicrophonePermission();
+        if (!granted) {
+          _logger.w('Microphone permission not available, falling back to silence');
+          _useNativeCapture = false;
+        }
+      }
+
+      if (_useNativeCapture) {
+        await _nativeChannel!.initializeAudio(
+          sampleRate: config.sampleRate,
+          channels: config.channels,
+          bitsPerSample: config.bitsPerSample,
+        );
+        _logger.i('Windows native audio capture initialized');
+      }
+    } catch (e) {
+      _logger.w('Failed to initialize native audio capture: $e, using silence fallback');
+      _useNativeCapture = false;
+    }
   }
 
   @override
@@ -772,8 +800,38 @@ class WindowsAudioCapture implements AudioCapture {
     _isCapturing = true;
     _startTimeMs = DateTime.now().millisecondsSinceEpoch;
 
-    // TODO: Implement native Windows audio capture via FFI/platform channel
-    // For now, generate silence
+    if (_useNativeCapture && _nativeChannel != null) {
+      try {
+        _nativeSubscription = _nativeChannel!.audioStream.listen(
+          _onNativeAudioData,
+          onError: (e) => _logger.e('Native audio stream error: $e'),
+        );
+        await _nativeChannel!.startAudioCapture();
+        _logger.i('Windows native audio capture started');
+        return;
+      } catch (e) {
+        _logger.w('Failed to start native audio capture: $e, falling back to silence');
+        _useNativeCapture = false;
+      }
+    }
+
+    // Fallback: generate silence
+    _startSilenceGenerator();
+  }
+
+  void _onNativeAudioData(NativeAudioSamples nativeSamples) {
+    if (!_isCapturing) return;
+
+    _audioController.add(AudioSamples(
+      data: nativeSamples.data,
+      sampleRate: nativeSamples.sampleRate,
+      channels: nativeSamples.channels,
+      timestampMs: nativeSamples.timestampMs,
+      bitsPerSample: nativeSamples.bitsPerSample,
+    ));
+  }
+
+  void _startSilenceGenerator() {
     _silenceTimer = Timer.periodic(const Duration(milliseconds: 20), (timer) {
       if (!_isCapturing) {
         timer.cancel();
@@ -793,7 +851,7 @@ class WindowsAudioCapture implements AudioCapture {
       ));
     });
 
-    _logger.i('Windows audio capture started (stub)');
+    _logger.w('Windows audio capture falling back to silence generator');
   }
 
   @override
@@ -801,6 +859,18 @@ class WindowsAudioCapture implements AudioCapture {
     if (!_isCapturing) return;
 
     _isCapturing = false;
+
+    await _nativeSubscription?.cancel();
+    _nativeSubscription = null;
+
+    if (_nativeChannel != null) {
+      try {
+        await _nativeChannel!.stopAudioCapture();
+      } catch (e) {
+        _logger.w('Error stopping native audio capture: $e');
+      }
+    }
+
     _silenceTimer?.cancel();
     _silenceTimer = null;
 
@@ -810,6 +880,7 @@ class WindowsAudioCapture implements AudioCapture {
   @override
   void dispose() {
     stopCapture();
+    _nativeChannel?.dispose();
     _audioController.close();
   }
 }

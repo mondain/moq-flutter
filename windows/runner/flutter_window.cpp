@@ -3,6 +3,8 @@
 #include <optional>
 
 #include "flutter/generated_plugin_registrant.h"
+#include <flutter/plugin_registrar_windows.h>
+#include "native_capture_plugin.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -25,6 +27,13 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+
+  // Register native capture plugin
+  auto registrar = flutter::PluginRegistrarManager::GetInstance()
+      ->GetRegistrar<flutter::PluginRegistrarWindows>(
+          flutter_controller_->engine()->GetRegistrarForPlugin("NativeCapturePlugin"));
+  moq_flutter::NativeCapturePlugin::RegisterWithRegistrar(registrar);
+
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
