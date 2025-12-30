@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:logger/logger.dart';
 import 'audio_capture.dart';
+import 'linux_capture.dart';
 import 'native_capture_channel.dart';
 
 // Re-export AudioSamples from audio_capture.dart
@@ -233,8 +234,13 @@ class CameraCapture implements VideoCapture {
 
     if (Platform.isIOS || Platform.isMacOS || Platform.isWindows) {
       return NativeVideoCapture(config: cfg, logger: log);
+    } else if (Platform.isLinux) {
+      // Use FFmpeg-based V4L2 capture on Linux
+      final capture = LinuxVideoCapture(config: cfg, logger: log);
+      await capture.initialize();
+      return capture;
     } else {
-      // For other platforms, use the camera package-based CameraCapture
+      // For other platforms (Android), use the camera package-based CameraCapture
       final capture = CameraCapture(config: cfg, logger: log);
       await capture.initialize();
       return capture;

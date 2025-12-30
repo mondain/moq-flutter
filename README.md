@@ -10,6 +10,16 @@ lib/
 ├── moq/                          # MoQ protocol implementation
 │   ├── client/                   # MoQ client
 │   │   └── moq_client.dart        # Main client with subscription handling
+│   ├── media/                    # Media capture and encoding
+│   │   ├── audio_capture.dart     # Platform-specific audio capture
+│   │   ├── audio_encoder.dart     # Opus audio encoder (FFmpeg)
+│   │   ├── camera_capture.dart    # Camera capture abstraction
+│   │   ├── linux_capture.dart     # Linux V4L2/FFmpeg video capture
+│   │   ├── video_encoder.dart     # H.264 video encoder (FFmpeg)
+│   │   └── fmp4/                  # CMAF/fMP4 packaging
+│   ├── publisher/                # Publishing support
+│   │   ├── cmaf_publisher.dart    # CMAF/fMP4 publisher
+│   │   └── moq_publisher.dart     # LOC publisher
 │   ├── protocol/                 # Protocol messages and types
 │   │   ├── moq_messages.dart     # Core message types and enums
 │   │   ├── moq_wire_format.dart  # Varint encoding/decoding
@@ -146,18 +156,23 @@ This implementation follows [draft-ietf-moq-transport-14](https://datatracker.ie
 
 #### Linux Dependencies
 
-For video playback support on Linux, install the mpv library:
+For video playback and capture support on Linux:
 
 ```bash
 # Ubuntu/Debian
-sudo apt update && sudo apt install libmpv-dev mpv
+sudo apt update && sudo apt install libmpv-dev mpv ffmpeg pulseaudio-utils v4l-utils
 
 # Fedora
-sudo dnf install mpv-devel
+sudo dnf install mpv-devel ffmpeg pulseaudio-utils v4l-utils
 
 # Arch Linux
-sudo pacman -S mpv
+sudo pacman -S mpv ffmpeg libpulse v4l-utils
 ```
+
+**Required for media capture:**
+- `ffmpeg` - Video capture from V4L2 webcams and H.264/Opus encoding
+- `pulseaudio-utils` - Audio capture via `parec` (PulseAudio)
+- `v4l-utils` - Webcam device enumeration
 
 #### macOS Dependencies
 
@@ -199,6 +214,38 @@ flutter build macos        # macOS
 flutter build windows      # Windows
 ```
 
+## Media Capture
+
+The application supports publishing live audio and video with platform-specific capture implementations:
+
+### Video Capture
+
+| Platform | Implementation | Details |
+|----------|---------------|---------|
+| **Linux** | FFmpeg + V4L2 | Captures from `/dev/video*` devices, outputs YUV420P |
+| **Android** | camera package | Uses Flutter's camera plugin |
+| **iOS/macOS** | AVFoundation | Native capture via Platform Channels |
+| **Windows** | Media Foundation | Native capture via Platform Channels |
+
+### Audio Capture
+
+| Platform | Implementation | Details |
+|----------|---------------|---------|
+| **Linux** | PulseAudio (parec) | Captures via `parec` command |
+| **Android** | audio_streamer | Flutter plugin for microphone access |
+| **iOS/macOS** | AVFoundation | Native capture via Platform Channels |
+| **Windows** | Media Foundation | Native capture via Platform Channels |
+
+### Encoding
+
+- **Video**: H.264 encoding via FFmpeg (baseline profile, ultrafast preset)
+- **Audio**: Opus encoding via FFmpeg (48kHz stereo, 128kbps)
+
+### Packaging
+
+- **CMAF/fMP4**: CARP-compliant fragmented MP4 packaging
+- **LOC**: Raw codec data packaging (H.264 NALUs, Opus frames)
+
 ## Current Status
 
 Draft-14 implementation with:
@@ -214,6 +261,8 @@ Draft-14 implementation with:
 - Data message serialization/deserialization
 - Video player integration with media_kit
 - State management with Riverpod
+- Platform-specific media capture (Linux, Android, iOS, macOS, Windows)
+- CMAF/fMP4 packaging for MoQ publishing
 - Comprehensive test coverage for wire format (44 tests passing)
 
 ### Test Coverage

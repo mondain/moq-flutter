@@ -1,12 +1,15 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
-import 'package:camera/camera.dart' show ResolutionPreset;
+import 'dart:ui' as ui;
+import 'package:camera/camera.dart' show CameraPreview, ResolutionPreset;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart';
 import '../moq/media/audio_capture.dart';
 import '../moq/media/audio_encoder.dart';
 import '../moq/media/camera_capture.dart';
+import '../moq/media/linux_capture.dart';
 import '../moq/media/video_encoder.dart';
 import '../moq/publisher/cmaf_publisher.dart';
 import '../moq/publisher/moq_publisher.dart';
@@ -43,11 +46,12 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
   MoQPublisher? _publisher;
   CmafPublisher? _cmafPublisher;
   bool _isPublishing = false;
+  bool _isAudioMuted = false;
   int _publishedFrames = 0;
   int _publishedAudioFrames = 0;
 
-  // Video capture and encoding
-  CameraCapture? _cameraCapture;
+  // Video capture and encoding (VideoCapture is abstract, can be CameraCapture or LinuxVideoCapture)
+  VideoCapture? _videoCapture;
   H264Encoder? _h264Encoder;
   StreamSubscription<VideoFrame>? _videoFrameSubscription;
   StreamSubscription<H264Frame>? _h264FrameSubscription;
@@ -57,6 +61,10 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
   OpusEncoder? _opusEncoder;
   StreamSubscription<AudioSamples>? _audioSamplesSubscription;
   StreamSubscription<OpusFrame>? _opusFrameSubscription;
+
+  // Linux preview frame
+  ui.Image? _linuxPreviewImage;
+  StreamSubscription<PreviewFrame>? _previewFrameSubscription;
 
   @override
   void initState() {
@@ -179,69 +187,108 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
 
   /// Start publishing with CMAF/fMP4 packaging (CARP compliant)
   Future<void> _startCmafPublishing(dynamic client, String namespace, String trackName) async {
-    // Create CMAF publisher
-    _cmafPublisher = CmafPublisher(client: client, logger: _logger);
+    debugPrint('=== Starting CMAF publishing ===');
 
-    // Announce namespace with init track
-    await _cmafPublisher!.announce([namespace], initTrackName: '0.mp4');
-
-    // Add video track with fMP4 muxer
-    const videoTrackName = '1.m4s';
-    await _cmafPublisher!.addVideoTrack(
-      videoTrackName,
-      width: 1280,
-      height: 720,
-      frameRate: 30,
-      timescale: 90000,
-      priority: 128,
-      trackId: 1,
-    );
-
-    // Add audio track with fMP4 muxer
-    const audioTrackName = '2.m4s';
-    await _cmafPublisher!.addAudioTrack(
-      audioTrackName,
-      sampleRate: 48000,
-      channels: 2,
-      bitrate: 128000,
-      frameDurationMs: 20,
-      priority: 200,
-      trackId: 2,
-    );
-
-    // Mark audio as ready (Opus doesn't need external config)
-    await _cmafPublisher!.setAudioReady(audioTrackName);
-
+    // Set publishing state IMMEDIATELY so UI shows controls
     _isPublishing = true;
     _publishedFrames = 0;
     _publishedAudioFrames = 0;
-    _setStatus('Initializing CMAF capture...');
+    if (mounted) setState(() {});
+    debugPrint('Set _isPublishing = true, UI should now show controls');
 
-    // Initialize video capture and encoding
-    await _initializeCmafVideoPublishing(videoTrackName);
+    try {
+      // Create CMAF publisher
+      debugPrint('Creating CMAF publisher...');
+      _cmafPublisher = CmafPublisher(client: client, logger: _logger);
 
-    // Initialize audio capture and encoding
-    await _initializeCmafAudioPublishing(audioTrackName);
+      _setStatus('Announcing namespace...');
+      debugPrint('Announcing namespace...');
+      // Announce namespace with init track
+      await _cmafPublisher!.announce([namespace], initTrackName: '0.mp4');
+      debugPrint('Namespace announced');
 
-    _setStatus('Publishing CMAF video and audio to $namespace');
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Publishing CMAF video and audio to $namespace'),
-          backgroundColor: Colors.green,
-        ),
+      // Add video track with fMP4 muxer
+      _setStatus('Adding video track...');
+      debugPrint('Adding video track...');
+      const videoTrackName = '1.m4s';
+      await _cmafPublisher!.addVideoTrack(
+        videoTrackName,
+        width: 1280,
+        height: 720,
+        frameRate: 30,
+        timescale: 90000,
+        priority: 128,
+        trackId: 1,
       );
+      debugPrint('Video track added');
+
+      // Add audio track with fMP4 muxer
+      _setStatus('Adding audio track...');
+      debugPrint('Adding audio track...');
+      const audioTrackName = '2.m4s';
+      await _cmafPublisher!.addAudioTrack(
+        audioTrackName,
+        sampleRate: 48000,
+        channels: 2,
+        bitrate: 128000,
+        frameDurationMs: 20,
+        priority: 200,
+        trackId: 2,
+      );
+      debugPrint('Audio track added');
+
+      // Mark audio as ready (Opus doesn't need external config)
+      debugPrint('Setting audio ready...');
+      await _cmafPublisher!.setAudioReady(audioTrackName);
+      debugPrint('Audio ready');
+
+      _setStatus('Initializing CMAF capture...');
+
+      // Initialize video capture and encoding
+      debugPrint('Initializing video publishing...');
+      await _initializeCmafVideoPublishing(videoTrackName);
+      debugPrint('Video publishing initialized');
+
+      // Initialize audio capture and encoding
+      debugPrint('Initializing audio publishing...');
+      await _initializeCmafAudioPublishing(audioTrackName);
+      debugPrint('Audio publishing initialized');
+
+      _setStatus('Publishing CMAF video and audio to $namespace');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Publishing CMAF video and audio to $namespace'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e, stack) {
+      debugPrint('ERROR in _startCmafPublishing: $e');
+      debugPrint('Stack trace: $stack');
+      // Reset publishing state on error
+      _isPublishing = false;
+      if (mounted) setState(() {});
+      rethrow;
     }
   }
 
   /// Start publishing with LOC packaging (raw codec data)
   Future<void> _startLocPublishing(dynamic client, String namespace, String trackName) async {
-    // Create publisher
-    _publisher = MoQPublisher(client: client);
+    // Set publishing state IMMEDIATELY so UI shows controls
+    _isPublishing = true;
+    _publishedFrames = 0;
+    _publishedAudioFrames = 0;
+    if (mounted) setState(() {});
 
-    // Announce namespace
-    await _publisher!.announce([namespace]);
+    try {
+      // Create publisher
+      _publisher = MoQPublisher(client: client);
+
+      // Announce namespace
+      _setStatus('Announcing namespace...');
+      await _publisher!.announce([namespace]);
 
     // Add video track to catalog (H.264/AVC)
     final videoTrackAlias = await _publisher!.addVideoTrack(
@@ -267,40 +314,58 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
       updateCatalogNow: true, // Update catalog with both tracks
     );
 
-    _isPublishing = true;
-    _publishedFrames = 0;
-    _publishedAudioFrames = 0;
-    _setStatus('Initializing capture...');
+      _setStatus('Initializing capture...');
 
-    // Initialize video capture and H.264 encoder
-    await _initializeVideoPublishing(trackName);
+      // Initialize video capture and H.264 encoder
+      await _initializeVideoPublishing(trackName);
 
-    // Initialize audio capture and Opus encoder
-    await _initializeAudioPublishing(audioTrackName);
+      // Initialize audio capture and Opus encoder
+      await _initializeAudioPublishing(audioTrackName);
 
-    _setStatus('Publishing video ($videoTrackAlias) and audio ($audioTrackAlias)');
+      _setStatus('Publishing video ($videoTrackAlias) and audio ($audioTrackAlias)');
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Publishing video and audio to $namespace'),
-          backgroundColor: Colors.green,
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Publishing video and audio to $namespace'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e, stack) {
+      debugPrint('ERROR in _startLocPublishing: $e');
+      debugPrint('Stack trace: $stack');
+      _isPublishing = false;
+      if (mounted) setState(() {});
+      rethrow;
     }
   }
 
   /// Initialize CMAF video capture and publishing
   Future<void> _initializeCmafVideoPublishing(String videoTrackName) async {
     try {
-      // Create camera capture
-      _cameraCapture = CameraCapture(
-        config: CaptureConfig(
-          resolution: ResolutionPreset.high,
-          enableAudio: false,
-        ),
-      );
-      await _cameraCapture!.initialize();
+      // Create platform-appropriate video capture
+      if (Platform.isLinux) {
+        // Use FFmpeg/V4L2 capture on Linux
+        final linuxCapture = LinuxVideoCapture(
+          config: CaptureConfig(
+            resolution: ResolutionPreset.high,
+            enableAudio: false,
+          ),
+        );
+        await linuxCapture.initialize();
+        _videoCapture = linuxCapture;
+      } else {
+        // Use camera package on other platforms
+        final cameraCapture = CameraCapture(
+          config: CaptureConfig(
+            resolution: ResolutionPreset.high,
+            enableAudio: false,
+          ),
+        );
+        await cameraCapture.initialize();
+        _videoCapture = cameraCapture;
+      }
 
       // Create H.264 encoder
       _h264Encoder = H264Encoder(
@@ -319,7 +384,7 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
       await _h264Encoder!.start();
 
       // Subscribe to video frames from camera
-      _videoFrameSubscription = _cameraCapture!.videoFrames.listen((videoFrame) {
+      _videoFrameSubscription = _videoCapture!.videoFrames.listen((videoFrame) {
         _h264Encoder?.addFrame(videoFrame.data, videoFrame.timestampMs);
       });
 
@@ -351,10 +416,32 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
       });
 
       // Start camera capture
-      await _cameraCapture!.startCapture();
+      await _videoCapture!.startCapture();
       _logger.i('CMAF video capture started');
+
+      // Subscribe to Linux preview frames for UI display
+      if (_videoCapture is LinuxVideoCapture) {
+        _previewFrameSubscription = (_videoCapture as LinuxVideoCapture).previewFrames.listen(
+          (previewFrame) async {
+            try {
+              final image = await previewFrame.toImage();
+              if (mounted) {
+                setState(() => _linuxPreviewImage = image);
+              }
+            } catch (e) {
+              debugPrint('Error converting preview frame: $e');
+            }
+          },
+          onError: (e) => debugPrint('Preview stream error: $e'),
+        );
+      }
+
+      // Trigger UI rebuild to show camera preview
+      if (mounted) setState(() {});
     } catch (e) {
       _logger.e('Failed to initialize CMAF video publishing: $e');
+      // Trigger UI rebuild to show fallback
+      if (mounted) setState(() {});
       _startDemoPublishing('demo');
     }
   }
@@ -391,6 +478,7 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
     // Subscribe to encoded Opus frames and publish as CMAF
     _opusFrameSubscription = _opusEncoder!.frames.listen((opusFrame) async {
       if (!_isPublishing || _cmafPublisher == null) return;
+      if (_isAudioMuted) return; // Skip audio when muted
 
       try {
         // Publish Opus frame wrapped in fMP4
@@ -422,16 +510,26 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
   /// Initialize video capture and H.264 encoding for publishing
   Future<void> _initializeVideoPublishing(String videoTrackName) async {
     try {
-      // Create camera capture
-      _cameraCapture = CameraCapture(
-        config: CaptureConfig(
-          resolution: ResolutionPreset.high, // 720p on most devices
-          enableAudio: false, // Audio is handled separately
-        ),
-      );
-
-      // Initialize camera
-      await _cameraCapture!.initialize();
+      // Create platform-appropriate video capture
+      if (Platform.isLinux) {
+        final linuxCapture = LinuxVideoCapture(
+          config: CaptureConfig(
+            resolution: ResolutionPreset.high,
+            enableAudio: false,
+          ),
+        );
+        await linuxCapture.initialize();
+        _videoCapture = linuxCapture;
+      } else {
+        final cameraCapture = CameraCapture(
+          config: CaptureConfig(
+            resolution: ResolutionPreset.high, // 720p on most devices
+            enableAudio: false, // Audio is handled separately
+          ),
+        );
+        await cameraCapture.initialize();
+        _videoCapture = cameraCapture;
+      }
 
       // Create H.264 encoder with matching resolution
       _h264Encoder = H264Encoder(
@@ -450,7 +548,7 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
       await _h264Encoder!.start();
 
       // Subscribe to video frames from camera
-      _videoFrameSubscription = _cameraCapture!.videoFrames.listen((videoFrame) {
+      _videoFrameSubscription = _videoCapture!.videoFrames.listen((videoFrame) {
         // Feed frame to H.264 encoder
         _h264Encoder?.addFrame(videoFrame.data, videoFrame.timestampMs);
       });
@@ -485,10 +583,32 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
       });
 
       // Start camera capture
-      await _cameraCapture!.startCapture();
+      await _videoCapture!.startCapture();
       _logger.i('Video capture and H.264 encoding started');
+
+      // Subscribe to Linux preview frames for UI display
+      if (_videoCapture is LinuxVideoCapture) {
+        _previewFrameSubscription = (_videoCapture as LinuxVideoCapture).previewFrames.listen(
+          (previewFrame) async {
+            try {
+              final image = await previewFrame.toImage();
+              if (mounted) {
+                setState(() => _linuxPreviewImage = image);
+              }
+            } catch (e) {
+              debugPrint('Error converting preview frame: $e');
+            }
+          },
+          onError: (e) => debugPrint('Preview stream error: $e'),
+        );
+      }
+
+      // Trigger UI rebuild to show camera preview
+      if (mounted) setState(() {});
     } catch (e) {
       _logger.e('Failed to initialize video publishing: $e');
+      // Trigger UI rebuild to show fallback
+      if (mounted) setState(() {});
       // Fall back to demo publishing if camera fails
       _startDemoPublishing(videoTrackName);
     }
@@ -529,6 +649,7 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
     // Subscribe to encoded Opus frames and publish them
     _opusFrameSubscription = _opusEncoder!.frames.listen((opusFrame) async {
       if (!_isPublishing || _publisher == null) return;
+      if (_isAudioMuted) return; // Skip audio when muted
 
       try {
         // Publish Opus frame to audio track
@@ -604,6 +725,12 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
 
   Future<void> _stopPublishing() async {
     _isPublishing = false;
+    _isAudioMuted = false; // Reset mute state
+
+    // Stop Linux preview subscription
+    await _previewFrameSubscription?.cancel();
+    _previewFrameSubscription = null;
+    _linuxPreviewImage = null;
 
     // Stop video capture and encoding
     await _videoFrameSubscription?.cancel();
@@ -611,10 +738,10 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
     await _h264FrameSubscription?.cancel();
     _h264FrameSubscription = null;
 
-    if (_cameraCapture != null) {
-      await _cameraCapture!.stopCapture();
-      _cameraCapture!.dispose();
-      _cameraCapture = null;
+    if (_videoCapture != null) {
+      await _videoCapture!.stopCapture();
+      _videoCapture!.dispose();
+      _videoCapture = null;
     }
 
     if (_h264Encoder != null) {
@@ -759,6 +886,123 @@ class _MoQHomeScreenState extends ConsumerState<MoQHomeScreen> {
               ),
             ),
             const SizedBox(height: 16),
+
+            // Publishing controls - show when actively publishing
+            if (_isPublishing) ...[
+              // Video preview card
+              Card(
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Camera preview - check if we have a CameraCapture with initialized controller
+                    if (_videoCapture is CameraCapture &&
+                        (_videoCapture as CameraCapture).cameraController?.value.isInitialized == true)
+                      AspectRatio(
+                        aspectRatio: 16 / 9,
+                        child: CameraPreview((_videoCapture as CameraCapture).cameraController!),
+                      )
+                    else if (_videoCapture is LinuxVideoCapture)
+                      // Linux capture - show live preview or status
+                      AspectRatio(
+                        aspectRatio: 16 / 9,
+                        child: Container(
+                          color: Colors.black87,
+                          child: _linuxPreviewImage != null
+                              ? RawImage(
+                                  image: _linuxPreviewImage,
+                                  fit: BoxFit.contain,
+                                )
+                              : Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const CircularProgressIndicator(
+                                        valueColor: AlwaysStoppedAnimation<Color>(Colors.green),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      const Text(
+                                        'Starting webcam...',
+                                        style: TextStyle(color: Colors.white70),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        '$_publishedFrames frames',
+                                        style: const TextStyle(color: Colors.white54, fontSize: 12),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                        ),
+                      )
+                    else
+                      AspectRatio(
+                        aspectRatio: 16 / 9,
+                        child: Container(
+                          color: Colors.black87,
+                          child: Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.videocam_off, size: 48, color: Colors.white54),
+                                const SizedBox(height: 8),
+                                Text(
+                                  _videoCapture == null
+                                      ? 'Camera not available'
+                                      : 'Camera initializing...',
+                                  style: const TextStyle(color: Colors.white54),
+                                ),
+                                if (_videoCapture == null) ...[
+                                  const SizedBox(height: 4),
+                                  const Text(
+                                    '(Publishing test frames)',
+                                    style: TextStyle(color: Colors.white38, fontSize: 12),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    // Controls bar
+                    Container(
+                      color: Colors.black87,
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      child: Row(
+                        children: [
+                          // Mute button
+                          IconButton(
+                            onPressed: () {
+                              setState(() => _isAudioMuted = !_isAudioMuted);
+                            },
+                            icon: Icon(
+                              _isAudioMuted ? Icons.mic_off : Icons.mic,
+                              color: _isAudioMuted ? Colors.red : Colors.white,
+                            ),
+                            tooltip: _isAudioMuted ? 'Unmute audio' : 'Mute audio',
+                          ),
+                          const SizedBox(width: 8),
+                          // Status text
+                          Expanded(
+                            child: Text(
+                              '$_publishedFrames video / $_publishedAudioFrames audio frames',
+                              style: const TextStyle(color: Colors.white70, fontSize: 12),
+                            ),
+                          ),
+                          // Stop button
+                          TextButton.icon(
+                            onPressed: _disconnect,
+                            icon: const Icon(Icons.stop, color: Colors.red),
+                            label: const Text('Stop', style: TextStyle(color: Colors.red)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
 
             // Role selector
             Text(
