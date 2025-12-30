@@ -268,6 +268,7 @@ Draft-14 implementation with:
 - GOAWAY message handling with migration URI support
 - Complete QUIC FFI bindings via Rust native library (quinn)
 - Data stream handling with SUBGROUP_HEADER parser and transport separation
+- Namespace discovery with SUBSCRIBE_NAMESPACE/UNSUBSCRIBE_NAMESPACE support
 - Comprehensive test coverage for wire format (44 tests passing)
 
 ### Test Coverage
@@ -284,7 +285,6 @@ Draft-14 implementation with:
 ## TODO
 
 - Implement FETCH client API for past objects (message classes exist)
-- Implement SUBSCRIBE_NAMESPACE message classes and client API
 - Add automatic reconnection logic (GOAWAY handling exists)
 - Add integration tests for full client/server flow
 - Add performance benchmarks for serialization

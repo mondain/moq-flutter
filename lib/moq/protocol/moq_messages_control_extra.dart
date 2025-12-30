@@ -1459,3 +1459,343 @@ class TrackStatusErrorMessage extends MoQControlMessage {
     );
   }
 }
+
+/// SUBSCRIBE_NAMESPACE message (0x11) per draft-ietf-moq-transport-14
+///
+/// The subscriber sends SUBSCRIBE_NAMESPACE to request the current set of
+/// matching published namespaces and established subscriptions, as well as
+/// future updates to the set.
+class SubscribeNamespaceMessage extends MoQControlMessage {
+  final Int64 requestId;
+  final List<Uint8List> trackNamespacePrefix;
+  final List<KeyValuePair> parameters;
+
+  SubscribeNamespaceMessage({
+    required this.requestId,
+    required this.trackNamespacePrefix,
+    this.parameters = const [],
+  });
+
+  @override
+  MoQMessageType get type => MoQMessageType.subscribeNamespace;
+
+  @override
+  int get payloadLength {
+    int len = 0;
+    len += MoQWireFormat._varintSize64(requestId);
+    len += MoQWireFormat._tupleSize(trackNamespacePrefix);
+    len += MoQWireFormat._varintSize(parameters.length);
+    for (final param in parameters) {
+      len += MoQWireFormat._varintSize(param.type);
+      final valueLen = param.value?.length ?? 0;
+      len += MoQWireFormat._varintSize(valueLen);
+      len += valueLen;
+    }
+    return len;
+  }
+
+  @override
+  Uint8List serialize() {
+    final payload = Uint8List(payloadLength);
+    int offset = 0;
+
+    offset += _writeVarint64(payload, offset, requestId);
+    offset += _writeTuple(payload, offset, trackNamespacePrefix);
+    offset += _writeVarint(payload, offset, parameters.length);
+
+    for (final param in parameters) {
+      offset += _writeVarint(payload, offset, param.type);
+      final valueLen = param.value?.length ?? 0;
+      offset += _writeVarint(payload, offset, valueLen);
+      if (valueLen > 0) {
+        payload.setAll(offset, param.value!);
+        offset += valueLen;
+      }
+    }
+
+    return _wrapMessage(payload);
+  }
+
+  int _writeVarint(Uint8List buffer, int offset, int value) {
+    final bytes = MoQWireFormat.encodeVarint(value);
+    buffer.setAll(offset, bytes);
+    return bytes.length;
+  }
+
+  int _writeVarint64(Uint8List buffer, int offset, Int64 value) {
+    final bytes = MoQWireFormat.encodeVarint64(value);
+    buffer.setAll(offset, bytes);
+    return bytes.length;
+  }
+
+  int _writeTuple(Uint8List buffer, int offset, List<Uint8List> tuple) {
+    final bytes = MoQWireFormat.encodeTuple(tuple);
+    buffer.setAll(offset, bytes);
+    return bytes.length;
+  }
+
+  Uint8List _wrapMessage(Uint8List payload) {
+    final typeBytes = MoQWireFormat.encodeVarint(type.value);
+    final buffer = Uint8List(typeBytes.length + 2 + payload.length);
+    int offset = 0;
+
+    buffer.setAll(offset, typeBytes);
+    offset += typeBytes.length;
+
+    buffer[offset++] = (payload.length >> 8) & 0xFF;
+    buffer[offset++] = payload.length & 0xFF;
+
+    buffer.setAll(offset, payload);
+
+    return buffer;
+  }
+
+  static SubscribeNamespaceMessage deserialize(Uint8List data) {
+    int offset = 0;
+
+    final (requestId, reqLen) = MoQWireFormat.decodeVarint64(data, offset);
+    offset += reqLen;
+
+    final (namespacePrefix, tupleLen) = MoQWireFormat.decodeTuple(data, offset);
+    offset += tupleLen;
+
+    final (numParams, numParamsLen) = MoQWireFormat.decodeVarint(data, offset);
+    offset += numParamsLen;
+
+    final params = <KeyValuePair>[];
+    for (int i = 0; i < numParams && offset < data.length; i++) {
+      final (paramType, typeLen) = MoQWireFormat.decodeVarint(data, offset);
+      offset += typeLen;
+
+      final (valueLen, valueLenLen) = MoQWireFormat.decodeVarint(data, offset);
+      offset += valueLenLen;
+
+      Uint8List? value;
+      if (valueLen > 0 && offset + valueLen <= data.length) {
+        value = data.sublist(offset, offset + valueLen);
+        offset += valueLen;
+      }
+      params.add(KeyValuePair(type: paramType, value: value));
+    }
+
+    return SubscribeNamespaceMessage(
+      requestId: requestId,
+      trackNamespacePrefix: namespacePrefix,
+      parameters: params,
+    );
+  }
+
+  /// Get namespace prefix as a string path
+  String get namespacePrefixPath {
+    return trackNamespacePrefix
+        .map((e) => const Utf8Decoder().convert(e))
+        .join('/');
+  }
+}
+
+/// SUBSCRIBE_NAMESPACE_OK message (0x12) per draft-ietf-moq-transport-14
+///
+/// The publisher sends SUBSCRIBE_NAMESPACE_OK to confirm a namespace subscription.
+class SubscribeNamespaceOkMessage extends MoQControlMessage {
+  final Int64 requestId;
+
+  SubscribeNamespaceOkMessage({
+    required this.requestId,
+  });
+
+  @override
+  MoQMessageType get type => MoQMessageType.subscribeNamespaceOk;
+
+  @override
+  int get payloadLength {
+    return MoQWireFormat._varintSize64(requestId);
+  }
+
+  @override
+  Uint8List serialize() {
+    final payload = Uint8List(payloadLength);
+    int offset = 0;
+
+    final reqIdBytes = MoQWireFormat.encodeVarint64(requestId);
+    payload.setAll(offset, reqIdBytes);
+
+    return _wrapMessage(payload);
+  }
+
+  Uint8List _wrapMessage(Uint8List payload) {
+    final typeBytes = MoQWireFormat.encodeVarint(type.value);
+    final buffer = Uint8List(typeBytes.length + 2 + payload.length);
+    int offset = 0;
+
+    buffer.setAll(offset, typeBytes);
+    offset += typeBytes.length;
+
+    buffer[offset++] = (payload.length >> 8) & 0xFF;
+    buffer[offset++] = payload.length & 0xFF;
+
+    buffer.setAll(offset, payload);
+
+    return buffer;
+  }
+
+  static SubscribeNamespaceOkMessage deserialize(Uint8List data) {
+    int offset = 0;
+
+    final (requestId, _) = MoQWireFormat.decodeVarint64(data, offset);
+
+    return SubscribeNamespaceOkMessage(requestId: requestId);
+  }
+}
+
+/// SUBSCRIBE_NAMESPACE_ERROR message (0x13) per draft-ietf-moq-transport-14
+///
+/// The publisher sends SUBSCRIBE_NAMESPACE_ERROR to reject a namespace subscription.
+class SubscribeNamespaceErrorMessage extends MoQControlMessage {
+  final Int64 requestId;
+  final int errorCode;
+  final ReasonPhrase errorReason;
+
+  SubscribeNamespaceErrorMessage({
+    required this.requestId,
+    required this.errorCode,
+    required this.errorReason,
+  });
+
+  @override
+  MoQMessageType get type => MoQMessageType.subscribeNamespaceError;
+
+  @override
+  int get payloadLength {
+    final reasonBytes = const Utf8Encoder().convert(errorReason.reason);
+    int len = 0;
+    len += MoQWireFormat._varintSize64(requestId);
+    len += MoQWireFormat._varintSize(errorCode);
+    len += MoQWireFormat._varintSize(reasonBytes.length) + reasonBytes.length;
+    return len;
+  }
+
+  @override
+  Uint8List serialize() {
+    final reasonBytes = const Utf8Encoder().convert(errorReason.reason);
+    final payload = Uint8List(payloadLength);
+    int offset = 0;
+
+    offset += _writeVarint64(payload, offset, requestId);
+    offset += _writeVarint(payload, offset, errorCode);
+    offset += _writeVarint(payload, offset, reasonBytes.length);
+    payload.setAll(offset, reasonBytes);
+
+    return _wrapMessage(payload);
+  }
+
+  int _writeVarint(Uint8List buffer, int offset, int value) {
+    final bytes = MoQWireFormat.encodeVarint(value);
+    buffer.setAll(offset, bytes);
+    return bytes.length;
+  }
+
+  int _writeVarint64(Uint8List buffer, int offset, Int64 value) {
+    final bytes = MoQWireFormat.encodeVarint64(value);
+    buffer.setAll(offset, bytes);
+    return bytes.length;
+  }
+
+  Uint8List _wrapMessage(Uint8List payload) {
+    final typeBytes = MoQWireFormat.encodeVarint(type.value);
+    final buffer = Uint8List(typeBytes.length + 2 + payload.length);
+    int offset = 0;
+
+    buffer.setAll(offset, typeBytes);
+    offset += typeBytes.length;
+
+    buffer[offset++] = (payload.length >> 8) & 0xFF;
+    buffer[offset++] = payload.length & 0xFF;
+
+    buffer.setAll(offset, payload);
+
+    return buffer;
+  }
+
+  static SubscribeNamespaceErrorMessage deserialize(Uint8List data) {
+    int offset = 0;
+
+    final (requestId, reqLen) = MoQWireFormat.decodeVarint64(data, offset);
+    offset += reqLen;
+
+    final (errorCode, errLen) = MoQWireFormat.decodeVarint(data, offset);
+    offset += errLen;
+
+    final (reasonLen, reasonLenLen) = MoQWireFormat.decodeVarint(data, offset);
+    offset += reasonLenLen;
+
+    final reasonBytes = data.sublist(offset, offset + reasonLen);
+    final reason = const Utf8Decoder().convert(reasonBytes);
+
+    return SubscribeNamespaceErrorMessage(
+      requestId: requestId,
+      errorCode: errorCode,
+      errorReason: ReasonPhrase(reason),
+    );
+  }
+}
+
+/// UNSUBSCRIBE_NAMESPACE message (0x14) per draft-ietf-moq-transport-14
+///
+/// The subscriber sends UNSUBSCRIBE_NAMESPACE to end a namespace subscription.
+class UnsubscribeNamespaceMessage extends MoQControlMessage {
+  final List<Uint8List> trackNamespacePrefix;
+
+  UnsubscribeNamespaceMessage({
+    required this.trackNamespacePrefix,
+  });
+
+  @override
+  MoQMessageType get type => MoQMessageType.unsubscribeNamespace;
+
+  @override
+  int get payloadLength {
+    return MoQWireFormat._tupleSize(trackNamespacePrefix);
+  }
+
+  @override
+  Uint8List serialize() {
+    final payload = Uint8List(payloadLength);
+    int offset = 0;
+
+    final tupleBytes = MoQWireFormat.encodeTuple(trackNamespacePrefix);
+    payload.setAll(offset, tupleBytes);
+
+    return _wrapMessage(payload);
+  }
+
+  Uint8List _wrapMessage(Uint8List payload) {
+    final typeBytes = MoQWireFormat.encodeVarint(type.value);
+    final buffer = Uint8List(typeBytes.length + 2 + payload.length);
+    int offset = 0;
+
+    buffer.setAll(offset, typeBytes);
+    offset += typeBytes.length;
+
+    buffer[offset++] = (payload.length >> 8) & 0xFF;
+    buffer[offset++] = payload.length & 0xFF;
+
+    buffer.setAll(offset, payload);
+
+    return buffer;
+  }
+
+  static UnsubscribeNamespaceMessage deserialize(Uint8List data) {
+    int offset = 0;
+
+    final (namespacePrefix, _) = MoQWireFormat.decodeTuple(data, offset);
+
+    return UnsubscribeNamespaceMessage(trackNamespacePrefix: namespacePrefix);
+  }
+
+  /// Get namespace prefix as a string path
+  String get namespacePrefixPath {
+    return trackNamespacePrefix
+        .map((e) => const Utf8Decoder().convert(e))
+        .join('/');
+  }
+}

@@ -297,6 +297,15 @@ class MoQWireFormat {
     return (Location(group: group, object: object),
         groupBytes + objectBytes);
   }
+
+  /// Calculate the size of a tuple when encoded
+  static int _tupleSize(List<Uint8List> tuple) {
+    int size = _varintSize(tuple.length);
+    for (final element in tuple) {
+      size += _varintSize(element.length) + element.length;
+    }
+    return size;
+  }
 }
 
 /// Control message parser
@@ -403,6 +412,14 @@ class MoQControlMessageParser {
         return PublishNamespaceDoneMessage.deserialize(payload);
       case MoQMessageType.publishNamespaceCancel:
         return PublishNamespaceCancelMessage.deserialize(payload);
+      case MoQMessageType.subscribeNamespace:
+        return SubscribeNamespaceMessage.deserialize(payload);
+      case MoQMessageType.subscribeNamespaceOk:
+        return SubscribeNamespaceOkMessage.deserialize(payload);
+      case MoQMessageType.subscribeNamespaceError:
+        return SubscribeNamespaceErrorMessage.deserialize(payload);
+      case MoQMessageType.unsubscribeNamespace:
+        return UnsubscribeNamespaceMessage.deserialize(payload);
       default:
         // Unknown or unimplemented message type
         return null;

@@ -25,6 +25,9 @@ class MoQClient {
   // Active namespace announcements (for publishing)
   final _namespaceAnnouncements = <Int64, MoQNamespaceAnnouncement>{};
 
+  // Active namespace subscriptions (for discovery)
+  final _namespaceSubscriptions = <Int64, MoQNamespaceSubscription>{};
+
   // Incoming publish requests (server mode)
   final _incomingPublishController = StreamController<MoQPublishRequest>.broadcast();
   final _pendingPublishRequests = <Int64, MoQPublishRequest>{};
@@ -389,6 +392,74 @@ class MoQClient {
     return requestId;
   }
 
+  /// Subscribe to a namespace for discovery
+  ///
+  /// This sends SUBSCRIBE_NAMESPACE and waits for SUBSCRIBE_NAMESPACE_OK.
+  /// Returns a MoQNamespaceSubscription for tracking incoming PUBLISH_NAMESPACE
+  /// and PUBLISH messages.
+  Future<MoQNamespaceSubscription> subscribeNamespace(
+    List<Uint8List> trackNamespacePrefix, {
+    List<KeyValuePair>? parameters,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    final requestId = _getNextRequestId();
+
+    _logger.i('Subscribing to namespace: ${trackNamespacePrefix.map((n) => String.fromCharCodes(n)).join("/")}');
+
+    final message = SubscribeNamespaceMessage(
+      requestId: requestId,
+      trackNamespacePrefix: trackNamespacePrefix,
+      parameters: parameters ?? [],
+    );
+
+    await _transport.send(message.serialize());
+
+    // Create subscription object (will be completed when SUBSCRIBE_NAMESPACE_OK arrives)
+    final subscription = MoQNamespaceSubscription(
+      client: this,
+      requestId: requestId,
+      trackNamespacePrefix: trackNamespacePrefix,
+    );
+
+    _namespaceSubscriptions[requestId] = subscription;
+
+    // Wait for response
+    await subscription.waitForResponse();
+
+    return subscription;
+  }
+
+  /// Unsubscribe from a namespace
+  Future<void> unsubscribeNamespace(List<Uint8List> trackNamespacePrefix) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    _logger.i('Unsubscribing from namespace: ${trackNamespacePrefix.map((n) => String.fromCharCodes(n)).join("/")}');
+
+    final message = UnsubscribeNamespaceMessage(
+      trackNamespacePrefix: trackNamespacePrefix,
+    );
+
+    await _transport.send(message.serialize());
+
+    // Remove matching subscription
+    _namespaceSubscriptions.removeWhere((_, sub) {
+      if (sub.trackNamespacePrefix.length != trackNamespacePrefix.length) {
+        return false;
+      }
+      for (int i = 0; i < sub.trackNamespacePrefix.length; i++) {
+        if (!_bytesEqual(sub.trackNamespacePrefix[i], trackNamespacePrefix[i])) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
   /// Open a data stream for publishing objects
   ///
   /// Returns a stream ID that can be used with streamWrite and streamFinish.
@@ -599,6 +670,12 @@ class MoQClient {
       case MoQMessageType.publishNamespaceError:
         _handlePublishNamespaceError(message as PublishNamespaceErrorMessage);
         break;
+      case MoQMessageType.subscribeNamespaceOk:
+        _handleSubscribeNamespaceOk(message as SubscribeNamespaceOkMessage);
+        break;
+      case MoQMessageType.subscribeNamespaceError:
+        _handleSubscribeNamespaceError(message as SubscribeNamespaceErrorMessage);
+        break;
       case MoQMessageType.publish:
         _handlePublish(message as PublishMessage);
         break;
@@ -741,6 +818,28 @@ class MoQClient {
       );
       _namespaceAnnouncements.remove(message.requestId);
       _logger.e('Namespace announcement failed: ${message.errorCode} - ${message.errorReason.reason}');
+    }
+  }
+
+  void _handleSubscribeNamespaceOk(SubscribeNamespaceOkMessage message) {
+    final subscription = _namespaceSubscriptions[message.requestId];
+    if (subscription != null) {
+      subscription.complete();
+      _logger.i('Namespace subscription successful: ${subscription.namespacePrefixPath}');
+    } else {
+      _logger.w('Received SUBSCRIBE_NAMESPACE_OK for unknown request: ${message.requestId}');
+    }
+  }
+
+  void _handleSubscribeNamespaceError(SubscribeNamespaceErrorMessage message) {
+    final subscription = _namespaceSubscriptions[message.requestId];
+    if (subscription != null) {
+      subscription.fail(
+        errorCode: message.errorCode,
+        reason: message.errorReason.reason,
+      );
+      _namespaceSubscriptions.remove(message.requestId);
+      _logger.e('Namespace subscription failed: ${message.errorCode} - ${message.errorReason.reason}');
     }
   }
 
@@ -1143,6 +1242,50 @@ class MoQNamespaceAnnouncement {
     _responseCompleter.completeError(
       MoQException(errorCode: errorCode, reason: reason),
     );
+  }
+}
+
+/// Namespace subscription for discovery
+class MoQNamespaceSubscription {
+  final MoQClient client;
+  final Int64 requestId;
+  final List<Uint8List> trackNamespacePrefix;
+
+  final Completer<void> _responseCompleter = Completer<void>();
+
+  MoQNamespaceSubscription({
+    required this.client,
+    required this.requestId,
+    required this.trackNamespacePrefix,
+  });
+
+  /// Get namespace prefix as a string path
+  String get namespacePrefixPath {
+    return trackNamespacePrefix
+        .map((e) => String.fromCharCodes(e))
+        .join('/');
+  }
+
+  /// Wait for SUBSCRIBE_NAMESPACE_OK response
+  Future<void> waitForResponse() => _responseCompleter.future;
+
+  /// Complete the subscription with successful response
+  void complete() {
+    if (_responseCompleter.isCompleted) return;
+    _responseCompleter.complete();
+  }
+
+  /// Fail the subscription
+  void fail({required int errorCode, required String reason}) {
+    if (_responseCompleter.isCompleted) return;
+    _responseCompleter.completeError(
+      MoQException(errorCode: errorCode, reason: reason),
+    );
+  }
+
+  /// Unsubscribe from this namespace
+  Future<void> unsubscribe() async {
+    await client.unsubscribeNamespace(trackNamespacePrefix);
   }
 }
 
