@@ -7,8 +7,8 @@ plugins {
 
 android {
     namespace = "com.moqapp.moq_flutter"
-    compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    compileSdk = 36
+    ndkVersion = "27.0.12077973"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -96,8 +96,29 @@ val buildRustLibs = tasks.register("buildRustLibs") {
             println("Building for $rustTarget...")
             exec {
                 workingDir(rustProjectDir)
-                commandLine(cargoExe, "build", "--lib", "--target", rustTarget, buildFlag)
-                environment("CARGO_TERM_COLOR" to "always")
+                // Use ring crypto backend for Android (aws-lc-rs has cross-compilation issues)
+                commandLine(cargoExe, "build", "--lib", "--target", rustTarget, "--no-default-features", "--features", "ring", buildFlag)
+
+                // Set up environment for NDK toolchain
+                val ndkRoot = System.getenv("ANDROID_NDK_ROOT")
+                    ?: "${System.getenv("ANDROID_HOME") ?: "/home/mondain/Android/Sdk"}/ndk/27.0.12077973"
+                val toolchainBin = "$ndkRoot/toolchains/llvm/prebuilt/linux-x86_64/bin"
+                val currentPath = System.getenv("PATH") ?: ""
+
+                environment(
+                    "CARGO_TERM_COLOR" to "always",
+                    "ANDROID_NDK_ROOT" to ndkRoot,
+                    "PATH" to "$toolchainBin:$currentPath",
+                    // Set explicit CC for the target
+                    "CC_aarch64-linux-android" to "$toolchainBin/aarch64-linux-android21-clang",
+                    "CC_armv7-linux-androideabi" to "$toolchainBin/armv7a-linux-androideabi21-clang",
+                    "CC_x86_64-linux-android" to "$toolchainBin/x86_64-linux-android21-clang",
+                    "CC_i686-linux-android" to "$toolchainBin/i686-linux-android21-clang",
+                    "AR_aarch64-linux-android" to "$toolchainBin/llvm-ar",
+                    "AR_armv7-linux-androideabi" to "$toolchainBin/llvm-ar",
+                    "AR_x86_64-linux-android" to "$toolchainBin/llvm-ar",
+                    "AR_i686-linux-android" to "$toolchainBin/llvm-ar"
+                )
             }
         }
 

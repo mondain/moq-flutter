@@ -8,7 +8,7 @@ name = "moq_quic"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-web-transport-quinn = "0.10.1"
+web-transport-quinn = { version = "0.10.1", default-features = false, features = ["ring"] }
 quinn = { version = "0.11.9", default-features = false, features = ["rustls", "runtime-tokio"] }
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 rustls = { version = "0.23.35", default-features = false, features = ["ring", "std"] }
@@ -20,8 +20,8 @@ once_cell = "1.20"
 
 [features]
 default = ["ring"]
-ring = ["rustls/ring", "quinn/ring"]
-aws-lc-rs = ["rustls/aws-lc-rs", "quinn/aws-lc-rs"]
+ring = ["rustls/ring", "quinn/ring", "web-transport-quinn/ring"]
+aws-lc-rs = ["rustls/aws-lc-rs", "quinn/aws-lc-rs", "web-transport-quinn/aws-lc-rs"]
 
 # Platform-specific features
 macos = ["ring"]

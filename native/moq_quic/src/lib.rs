@@ -23,6 +23,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use tokio::runtime::Runtime;
 use std::slice;
+use std::ffi::c_char;
 
 // Maximum receive buffer size per connection
 const MAX_RECV_BUFFER_SIZE: usize = 64 * 1024; // 64KB
@@ -217,7 +218,7 @@ pub extern "C" fn moq_quic_init() {
 /// * 0 on success, negative error code on failure
 #[no_mangle]
 pub extern "C" fn moq_quic_connect(
-    host: *const i8,
+    host: *const c_char,
     port: u16,
     insecure: u8,
     out_connection_id: *mut u64,

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::runtime::Runtime;
 use std::slice;
+use std::ffi::c_char;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use log;
@@ -185,9 +186,9 @@ pub extern "C" fn moq_webtransport_set_runtime(runtime_ptr: *const Runtime) {
 /// * 0 on success, negative error code on failure
 #[no_mangle]
 pub extern "C" fn moq_webtransport_connect(
-    host: *const i8,
+    host: *const c_char,
     port: u16,
-    path: *const i8,
+    path: *const c_char,
     _insecure: u8,
     out_session_id: *mut u64,
 ) -> i32 {

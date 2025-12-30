@@ -44,6 +44,9 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Native library build outputs
+/android/app/src/main/jniLibs/
+
 # will have compiled files and executables
 debug
 target
