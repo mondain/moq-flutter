@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:fixnum/fixnum.dart';
 import 'package:logger/logger.dart';
 import '../protocol/moq_messages.dart';
+import '../protocol/moq_data_parser.dart';
 import '../transport/moq_transport.dart';
 
 /// MoQ Client implementation per draft-ietf-moq-transport-14
@@ -24,12 +25,28 @@ class MoQClient {
   // Active namespace announcements (for publishing)
   final _namespaceAnnouncements = <Int64, MoQNamespaceAnnouncement>{};
 
+  // Incoming publish requests (server mode)
+  final _incomingPublishController = StreamController<MoQPublishRequest>.broadcast();
+  final _pendingPublishRequests = <Int64, MoQPublishRequest>{};
+
+  // Incoming subscribe requests (publisher mode)
+  final _incomingSubscribeController = StreamController<MoQSubscribeRequest>.broadcast();
+  final _pendingSubscribeRequests = <Int64, MoQSubscribeRequest>{};
+  final _activePublisherSubscriptions = <Int64, MoQSubscribeRequest>{}; // Accepted subscriptions
+
   // Track aliases mapping
   final _trackAliases = <Int64, TrackInfo>{};
+
+  // Data stream parsers (stream_id -> parser)
+  final _dataStreamParsers = <int, MoQDataStreamParser>{};
+
+  // Data stream subscription
+  StreamSubscription<DataStreamChunk>? _dataStreamSubscription;
 
   // Message controllers
   final _messageController = StreamController<MoQMessage>.broadcast();
   final _connectionStateController = StreamController<bool>.broadcast();
+  final _goawayController = StreamController<GoawayEvent>.broadcast();
 
   // Setup parameters received from server
   final List<KeyValuePair> _serverSetupParameters = [];
@@ -74,6 +91,29 @@ class MoQClient {
   /// Get max track alias from server
   int get maxTrackAlias => _maxTrackAlias;
 
+  /// Stream of incoming PUBLISH requests (server mode)
+  ///
+  /// Listen to this stream to receive PUBLISH requests from publishers.
+  /// Use [acceptPublish] or [rejectPublish] to respond.
+  Stream<MoQPublishRequest> get incomingPublishRequests => _incomingPublishController.stream;
+
+  /// Stream of incoming SUBSCRIBE requests (publisher mode)
+  ///
+  /// Listen to this stream to receive SUBSCRIBE requests from subscribers/relays.
+  /// Use [acceptSubscribe] or [rejectSubscribe] to respond.
+  Stream<MoQSubscribeRequest> get incomingSubscribeRequests => _incomingSubscribeController.stream;
+
+  /// Get active publisher subscriptions (tracks being published to subscribers)
+  Map<Int64, MoQSubscribeRequest> get activePublisherSubscriptions =>
+      Map.unmodifiable(_activePublisherSubscriptions);
+
+  /// Stream of GOAWAY events
+  ///
+  /// Listen to this stream to receive GOAWAY messages from the server.
+  /// When received, the client should gracefully close and optionally
+  /// reconnect to the new URI if provided.
+  Stream<GoawayEvent> get goawayEvents => _goawayController.stream;
+
   /// Connect to a MoQ server
   Future<void> connect(String host, int port,
       {List<int>? supportedVersions, Map<String, String>? options}) async {
@@ -87,10 +127,9 @@ class MoQClient {
     // Setup completer for waiting on SERVER_SETUP
     _setupCompleter = Completer<void>();
 
-    // Listen for incoming data first
-    StreamSubscription? subscription;
+    // Listen for incoming control data
     try {
-      subscription = _transport.incomingData.listen(
+      _transport.incomingData.listen(
         _handleIncomingData,
         onError: (error) {
           _logger.e('Transport error: $error');
@@ -111,6 +150,14 @@ class MoQClient {
               MoQException(errorCode: -1, reason: 'Transport closed'),
             );
           }
+        },
+      );
+
+      // Listen for incoming data streams (SUBGROUP_HEADER + objects)
+      _dataStreamSubscription = _transport.incomingDataStreams.listen(
+        _handleDataStreamChunk,
+        onError: (error) {
+          _logger.e('Data stream error: $error');
         },
       );
     } catch (e) {
@@ -181,6 +228,11 @@ class MoQClient {
 
     await _transport.disconnect();
     _isConnected = false;
+
+    // Cancel data stream subscription
+    await _dataStreamSubscription?.cancel();
+    _dataStreamSubscription = null;
+    _dataStreamParsers.clear();
 
     for (final sub in _subscriptions.values) {
       await sub.close();
@@ -440,6 +492,90 @@ class MoQClient {
     }
   }
 
+  /// Handle incoming data stream chunk (SUBGROUP_HEADER + objects)
+  void _handleDataStreamChunk(DataStreamChunk chunk) {
+    var parser = _dataStreamParsers[chunk.streamId];
+
+    if (parser == null) {
+      // New stream - create parser
+      parser = MoQDataStreamParser(logger: _logger);
+      _dataStreamParsers[chunk.streamId] = parser;
+    }
+
+    // Parse the chunk - may return header and/or objects
+    final objects = parser.parseChunk(chunk.data);
+
+    // If we have a header and objects, deliver them
+    if (parser.hasHeader) {
+      for (final obj in objects) {
+        _deliverObject(parser.header!, obj);
+      }
+    }
+
+    // Clean up if stream is complete
+    if (chunk.isComplete) {
+      _dataStreamParsers.remove(chunk.streamId);
+      _logger.d('Data stream ${chunk.streamId} complete');
+    }
+  }
+
+  /// Deliver a parsed object to the appropriate subscription
+  void _deliverObject(SubgroupHeader header, SubgroupObject obj) {
+    // Find track info by alias
+    final trackInfo = _trackAliases[header.trackAlias];
+    if (trackInfo == null) {
+      _logger.w('Received object for unknown track alias: ${header.trackAlias}');
+      return;
+    }
+
+    // Find matching subscription
+    for (final sub in _subscriptions.values) {
+      if (_tracksMatch(sub, trackInfo)) {
+        final moqObject = MoQObject(
+          trackNamespace: trackInfo.namespace,
+          trackName: trackInfo.name,
+          groupId: header.groupId,
+          subgroupId: header.subgroupId,
+          objectId: obj.objectId ?? Int64(0),
+          publisherPriority: obj.publisherPriority,
+          forwardingPreference: ObjectForwardingPreference.subgroup,
+          status: obj.status ?? ObjectStatus.normal,
+          extensionHeaders: obj.extensionHeaders,
+          payload: obj.payload,
+        );
+        sub._objectController.add(moqObject);
+        _logger.d('Delivered object ${obj.objectId} to subscription ${sub.id}');
+        return;
+      }
+    }
+
+    _logger.w('No subscription found for track alias: ${header.trackAlias}');
+  }
+
+  /// Check if subscription matches track info
+  bool _tracksMatch(MoQSubscription sub, TrackInfo trackInfo) {
+    // Compare namespace
+    if (sub.trackNamespace.length != trackInfo.namespace.length) {
+      return false;
+    }
+    for (int i = 0; i < sub.trackNamespace.length; i++) {
+      if (!_bytesEqual(sub.trackNamespace[i], trackInfo.namespace[i])) {
+        return false;
+      }
+    }
+    // Compare track name
+    return _bytesEqual(sub.trackName, trackInfo.name);
+  }
+
+  /// Compare two byte arrays for equality
+  bool _bytesEqual(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   void _processControlMessage(MoQControlMessage message) {
     switch (message.type) {
       case MoQMessageType.serverSetup:
@@ -462,6 +598,15 @@ class MoQClient {
         break;
       case MoQMessageType.publishNamespaceError:
         _handlePublishNamespaceError(message as PublishNamespaceErrorMessage);
+        break;
+      case MoQMessageType.publish:
+        _handlePublish(message as PublishMessage);
+        break;
+      case MoQMessageType.subscribe:
+        _handleSubscribeRequest(message as SubscribeMessage);
+        break;
+      case MoQMessageType.unsubscribe:
+        _handleUnsubscribeRequest(message as UnsubscribeMessage);
         break;
       default:
         _logger.w('Unhandled message type: ${message.type}');
@@ -561,12 +706,20 @@ class MoQClient {
   }
 
   void _handleGoaway(GoawayMessage message) {
-    _logger.w('Received GOAWAY');
+    _logger.w('Received GOAWAY from server');
     if (message.newUri != null) {
-      _logger.i('New URI: ${message.newUri}');
-      // TODO: Implement migration
+      _logger.i('Server provided new URI: ${message.newUri}');
     }
-    // TODO: Close and migrate connection
+
+    // Create and emit GOAWAY event
+    final event = GoawayEvent(
+      newUri: message.newUri,
+    );
+    _goawayController.add(event);
+
+    // Mark as disconnecting - the application should handle reconnection
+    _isConnected = false;
+    _connectionStateController.add(false);
   }
 
   void _handlePublishNamespaceOk(PublishNamespaceOkMessage message) {
@@ -591,10 +744,232 @@ class MoQClient {
     }
   }
 
+  void _handlePublish(PublishMessage message) {
+    _logger.i('Received PUBLISH request: ${message.namespacePath}/${message.trackNameString}');
+
+    final request = MoQPublishRequest(
+      client: this,
+      requestId: message.requestId,
+      trackNamespace: message.trackNamespace,
+      trackName: message.trackName,
+      trackAlias: message.trackAlias,
+      groupOrder: message.groupOrder,
+      contentExists: message.contentExists,
+      largestLocation: message.largestLocation,
+      forward: message.forward,
+      parameters: message.parameters,
+    );
+
+    _pendingPublishRequests[message.requestId] = request;
+    _incomingPublishController.add(request);
+  }
+
+  /// Accept a PUBLISH request (server mode)
+  ///
+  /// Sends PUBLISH_OK to the publisher to accept the subscription.
+  Future<void> acceptPublish(
+    Int64 requestId, {
+    required int forward,
+    required int subscriberPriority,
+    required GroupOrder groupOrder,
+    required FilterType filterType,
+    Location? startLocation,
+    Int64? endGroup,
+    List<KeyValuePair>? parameters,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    final request = _pendingPublishRequests.remove(requestId);
+    if (request == null) {
+      _logger.w('No pending PUBLISH request for ID: $requestId');
+      return;
+    }
+
+    final publishOk = PublishOkMessage(
+      requestId: requestId,
+      forward: forward,
+      subscriberPriority: subscriberPriority,
+      groupOrder: groupOrder,
+      filterType: filterType,
+      startLocation: startLocation,
+      endGroup: endGroup,
+      parameters: parameters ?? [],
+    );
+
+    await _transport.send(publishOk.serialize());
+
+    // Register track alias for incoming data
+    _trackAliases[request.trackAlias] = TrackInfo(
+      namespace: request.trackNamespace,
+      name: request.trackName,
+    );
+
+    _logger.i('Accepted PUBLISH request: $requestId');
+  }
+
+  /// Reject a PUBLISH request (server mode)
+  ///
+  /// Sends PUBLISH_ERROR to the publisher to reject the subscription.
+  Future<void> rejectPublish(
+    Int64 requestId, {
+    required int errorCode,
+    required String reason,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    _pendingPublishRequests.remove(requestId);
+
+    final publishError = PublishErrorMessage(
+      requestId: requestId,
+      errorCode: errorCode,
+      errorReason: ReasonPhrase(reason),
+    );
+
+    await _transport.send(publishError.serialize());
+    _logger.i('Rejected PUBLISH request: $requestId - $reason');
+  }
+
+  void _handleSubscribeRequest(SubscribeMessage message) {
+    final namespacePath = message.trackNamespace
+        .map((e) => String.fromCharCodes(e))
+        .join('/');
+    final trackName = String.fromCharCodes(message.trackName);
+    _logger.i('Received SUBSCRIBE request: $namespacePath/$trackName');
+
+    final request = MoQSubscribeRequest(
+      client: this,
+      requestId: message.requestId,
+      trackNamespace: message.trackNamespace,
+      trackName: message.trackName,
+      subscriberPriority: message.subscriberPriority,
+      groupOrder: message.groupOrder,
+      forward: message.forward,
+      filterType: message.filterType,
+      startLocation: message.startLocation,
+      endGroup: message.endGroup,
+      parameters: message.parameters,
+    );
+
+    _pendingSubscribeRequests[message.requestId] = request;
+    _incomingSubscribeController.add(request);
+  }
+
+  void _handleUnsubscribeRequest(UnsubscribeMessage message) {
+    _logger.i('Received UNSUBSCRIBE for request: ${message.requestId}');
+
+    // Remove from active subscriptions
+    final subscription = _activePublisherSubscriptions.remove(message.requestId);
+    if (subscription != null) {
+      _logger.i('Removed active subscription: ${message.requestId}');
+    }
+  }
+
+  /// Accept a SUBSCRIBE request (publisher mode)
+  ///
+  /// Sends SUBSCRIBE_OK to the subscriber to confirm the subscription.
+  Future<void> acceptSubscribe(
+    Int64 requestId, {
+    required Int64 trackAlias,
+    required Int64 expires,
+    required GroupOrder groupOrder,
+    required bool contentExists,
+    Location? largestLocation,
+    List<KeyValuePair>? parameters,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    final request = _pendingSubscribeRequests.remove(requestId);
+    if (request == null) {
+      _logger.w('No pending SUBSCRIBE request for ID: $requestId');
+      return;
+    }
+
+    final subscribeOk = SubscribeOkMessage(
+      requestId: requestId,
+      trackAlias: trackAlias,
+      expires: expires,
+      groupOrder: groupOrder,
+      contentExists: contentExists ? 1 : 0,
+      largestLocation: largestLocation,
+      parameters: parameters ?? [],
+    );
+
+    await _transport.send(subscribeOk.serialize());
+
+    // Track active subscription
+    _activePublisherSubscriptions[requestId] = request;
+
+    // Register track alias
+    _trackAliases[trackAlias] = TrackInfo(
+      namespace: request.trackNamespace,
+      name: request.trackName,
+    );
+
+    _logger.i('Accepted SUBSCRIBE request: $requestId with alias $trackAlias');
+  }
+
+  /// Reject a SUBSCRIBE request (publisher mode)
+  ///
+  /// Sends SUBSCRIBE_ERROR to the subscriber to reject the subscription.
+  Future<void> rejectSubscribe(
+    Int64 requestId, {
+    required int errorCode,
+    required String reason,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    _pendingSubscribeRequests.remove(requestId);
+
+    final subscribeError = SubscribeErrorMessage(
+      requestId: requestId,
+      errorCode: errorCode,
+      errorReason: ReasonPhrase(reason),
+    );
+
+    await _transport.send(subscribeError.serialize());
+    _logger.i('Rejected SUBSCRIBE request: $requestId - $reason');
+  }
+
+  /// Send PUBLISH_DONE to indicate publishing has completed for a subscription
+  ///
+  /// This notifies subscribers that no more objects will be published.
+  Future<void> sendPublishDone(
+    Int64 requestId, {
+    required int statusCode,
+    Int64? streamCount,
+    String? reason,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    final publishDone = PublishDoneMessage(
+      requestId: requestId,
+      statusCode: statusCode,
+      streamCount: streamCount ?? Int64(0),
+      errorReason: reason != null ? ReasonPhrase(reason) : null,
+    );
+
+    await _transport.send(publishDone.serialize());
+    _activePublisherSubscriptions.remove(requestId);
+    _logger.i('Sent PUBLISH_DONE for subscription: $requestId');
+  }
+
   void dispose() {
     disconnect();
     _messageController.close();
     _connectionStateController.close();
+    _incomingPublishController.close();
+    _incomingSubscribeController.close();
+    _goawayController.close();
     _transport.dispose();
   }
 }
@@ -769,6 +1144,183 @@ class MoQNamespaceAnnouncement {
       MoQException(errorCode: errorCode, reason: reason),
     );
   }
+}
+
+/// Incoming PUBLISH request (server mode)
+///
+/// Represents a PUBLISH request from a publisher that wants to send data.
+/// Use [accept] or [reject] to respond to the request.
+class MoQPublishRequest {
+  final MoQClient client;
+  final Int64 requestId;
+  final List<Uint8List> trackNamespace;
+  final Uint8List trackName;
+  final Int64 trackAlias;
+  final GroupOrder groupOrder;
+  final bool contentExists;
+  final Location? largestLocation;
+  final int forward;
+  final List<KeyValuePair> parameters;
+
+  MoQPublishRequest({
+    required this.client,
+    required this.requestId,
+    required this.trackNamespace,
+    required this.trackName,
+    required this.trackAlias,
+    required this.groupOrder,
+    required this.contentExists,
+    this.largestLocation,
+    required this.forward,
+    this.parameters = const [],
+  });
+
+  /// Get namespace as a string path
+  String get namespacePath {
+    return trackNamespace
+        .map((e) => String.fromCharCodes(e))
+        .join('/');
+  }
+
+  /// Get track name as a string
+  String get trackNameString => String.fromCharCodes(trackName);
+
+  /// Accept this PUBLISH request
+  ///
+  /// Sends PUBLISH_OK to the publisher.
+  Future<void> accept({
+    int forward = 1,
+    int subscriberPriority = 128,
+    GroupOrder? groupOrder,
+    FilterType filterType = FilterType.largestObject,
+    Location? startLocation,
+    Int64? endGroup,
+    List<KeyValuePair>? parameters,
+  }) async {
+    await client.acceptPublish(
+      requestId,
+      forward: forward,
+      subscriberPriority: subscriberPriority,
+      groupOrder: groupOrder ?? this.groupOrder,
+      filterType: filterType,
+      startLocation: startLocation,
+      endGroup: endGroup,
+      parameters: parameters,
+    );
+  }
+
+  /// Reject this PUBLISH request
+  ///
+  /// Sends PUBLISH_ERROR to the publisher.
+  Future<void> reject({
+    int errorCode = 0,
+    String reason = 'Rejected',
+  }) async {
+    await client.rejectPublish(
+      requestId,
+      errorCode: errorCode,
+      reason: reason,
+    );
+  }
+}
+
+/// Incoming SUBSCRIBE request (publisher mode)
+///
+/// Represents a SUBSCRIBE request from a subscriber/relay that wants to receive data.
+/// Use [accept] or [reject] to respond to the request.
+class MoQSubscribeRequest {
+  final MoQClient client;
+  final Int64 requestId;
+  final List<Uint8List> trackNamespace;
+  final Uint8List trackName;
+  final int subscriberPriority;
+  final GroupOrder groupOrder;
+  final int forward;
+  final FilterType filterType;
+  final Location? startLocation;
+  final Int64? endGroup;
+  final List<KeyValuePair> parameters;
+
+  // Track alias assigned when accepted
+  Int64? _assignedTrackAlias;
+
+  MoQSubscribeRequest({
+    required this.client,
+    required this.requestId,
+    required this.trackNamespace,
+    required this.trackName,
+    required this.subscriberPriority,
+    required this.groupOrder,
+    required this.forward,
+    required this.filterType,
+    this.startLocation,
+    this.endGroup,
+    this.parameters = const [],
+  });
+
+  /// Get assigned track alias (after acceptance)
+  Int64? get trackAlias => _assignedTrackAlias;
+
+  /// Get namespace as a string path
+  String get namespacePath {
+    return trackNamespace
+        .map((e) => String.fromCharCodes(e))
+        .join('/');
+  }
+
+  /// Get track name as a string
+  String get trackNameString => String.fromCharCodes(trackName);
+
+  /// Accept this SUBSCRIBE request
+  ///
+  /// Sends SUBSCRIBE_OK to the subscriber.
+  Future<void> accept({
+    required Int64 trackAlias,
+    Int64? expires,
+    GroupOrder? groupOrder,
+    bool contentExists = false,
+    Location? largestLocation,
+    List<KeyValuePair>? parameters,
+  }) async {
+    _assignedTrackAlias = trackAlias;
+    await client.acceptSubscribe(
+      requestId,
+      trackAlias: trackAlias,
+      expires: expires ?? Int64(0),
+      groupOrder: groupOrder ?? this.groupOrder,
+      contentExists: contentExists,
+      largestLocation: largestLocation,
+      parameters: parameters,
+    );
+  }
+
+  /// Reject this SUBSCRIBE request
+  ///
+  /// Sends SUBSCRIBE_ERROR to the subscriber.
+  Future<void> reject({
+    int errorCode = 0,
+    String reason = 'Rejected',
+  }) async {
+    await client.rejectSubscribe(
+      requestId,
+      errorCode: errorCode,
+      reason: reason,
+    );
+  }
+}
+
+/// GOAWAY event from server
+///
+/// Indicates the server is closing the connection and optionally
+/// provides a new URI to reconnect to.
+class GoawayEvent {
+  /// New URI to reconnect to (if provided by server)
+  final String? newUri;
+
+  GoawayEvent({this.newUri});
+
+  /// Whether a new URI was provided for migration
+  bool get hasMigrationUri => newUri != null && newUri!.isNotEmpty;
 }
 
 /// Subgroup header message for data streams

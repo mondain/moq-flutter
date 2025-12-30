@@ -263,6 +263,9 @@ Draft-14 implementation with:
 - State management with Riverpod
 - Platform-specific media capture (Linux, Android, iOS, macOS, Windows)
 - CMAF/fMP4 packaging for MoQ publishing
+- Server-side PUBLISH/PUBLISH_OK/PUBLISH_ERROR handling for receiving publish requests
+- Publisher-side SUBSCRIBE/SUBSCRIBE_OK/SUBSCRIBE_ERROR handling for relay subscriptions
+- GOAWAY message handling with migration URI support
 - Comprehensive test coverage for wire format (44 tests passing)
 
 ### Test Coverage
@@ -281,7 +284,6 @@ Draft-14 implementation with:
 - Complete QUIC FFI bindings (quiche or msquic) for transport layer
 - Implement data stream handling (SUBGROUP_HEADER, OBJECT_DATAGRAM reception)
 - Implement FETCH for past objects
-- Implement PUBLISH/PUBLISH_OK for server mode
 - Implement namespace discovery (SUBSCRIBE_NAMESPACE, PUBLISH_NAMESPACE)
 - Add error handling and reconnection logic
 - Add integration tests for full client/server flow

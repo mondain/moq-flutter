@@ -501,17 +501,35 @@ class FetchCancelMessage extends MoQControlMessage {
   }
 }
 
-/// PUBLISH message (0x1D)
+/// PUBLISH message (0x1D) per draft-ietf-moq-transport-14
+///
+/// Sent by publisher to initiate a subscription to a track.
+///
+/// Wire format:
+/// PUBLISH Message {
+///   Type (i) = 0x1D,
+///   Length (16),
+///   Request ID (i),
+///   Track Namespace (tuple),
+///   Track Name Length (i),
+///   Track Name (..),
+///   Track Alias (i),
+///   Group Order (8),
+///   Content Exists (8),
+///   [Largest Location (Location),]
+///   Forward (8),
+///   Number of Parameters (i),
+///   Parameters (..) ...,
+/// }
 class PublishMessage extends MoQControlMessage {
   final Int64 requestId;
   final List<Uint8List> trackNamespace;
   final Uint8List trackName;
   final Int64 trackAlias;
-  final Int64 groupId;
-  final Int64? subgroupId;
-  final Int64? objectId;
-  final Int64? expires;
-  final ObjectForwardingPreference forwardingPreference;
+  final GroupOrder groupOrder;
+  final bool contentExists;
+  final Location? largestLocation; // Only present if contentExists == true
+  final int forward; // 0 or 1
   final List<KeyValuePair> parameters;
 
   PublishMessage({
@@ -519,11 +537,10 @@ class PublishMessage extends MoQControlMessage {
     required this.trackNamespace,
     required this.trackName,
     required this.trackAlias,
-    required this.groupId,
-    this.subgroupId,
-    this.objectId,
-    this.expires,
-    required this.forwardingPreference,
+    required this.groupOrder,
+    required this.contentExists,
+    this.largestLocation,
+    required this.forward,
     this.parameters = const [],
   });
 
@@ -537,22 +554,20 @@ class PublishMessage extends MoQControlMessage {
     len += _tupleSize(trackNamespace);
     len += MoQWireFormat._varintSize(trackName.length) + trackName.length;
     len += MoQWireFormat._varintSize64(trackAlias);
-    len += MoQWireFormat._varintSize64(groupId);
-    if (subgroupId != null) {
-      len += MoQWireFormat._varintSize64(subgroupId!);
+    len += 1; // Group Order (8 bits)
+    len += 1; // Content Exists (8 bits)
+    if (contentExists && largestLocation != null) {
+      len += MoQWireFormat._varintSize64(largestLocation!.group);
+      len += MoQWireFormat._varintSize64(largestLocation!.object);
     }
-    if (objectId != null) {
-      len += MoQWireFormat._varintSize64(objectId!);
-    }
-    if (expires != null) {
-      len += MoQWireFormat._varintSize64(expires!);
-    }
-    len += 1; // Forwarding Preference
+    len += 1; // Forward (8 bits)
     len += MoQWireFormat._varintSize(parameters.length);
     for (final param in parameters) {
       len += MoQWireFormat._varintSize(param.type);
       if (param.value != null) {
         len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+      } else {
+        len += MoQWireFormat._varintSize(0);
       }
     }
     return len;
@@ -577,21 +592,15 @@ class PublishMessage extends MoQControlMessage {
     payload.setAll(offset, trackName);
     offset += trackName.length;
     offset += _writeVarint64(payload, offset, trackAlias);
-    offset += _writeVarint64(payload, offset, groupId);
+    payload[offset++] = groupOrder.value;
+    payload[offset++] = contentExists ? 1 : 0;
 
-    if (subgroupId != null) {
-      offset += _writeVarint64(payload, offset, subgroupId!);
+    if (contentExists && largestLocation != null) {
+      offset += _writeVarint64(payload, offset, largestLocation!.group);
+      offset += _writeVarint64(payload, offset, largestLocation!.object);
     }
 
-    if (objectId != null) {
-      offset += _writeVarint64(payload, offset, objectId!);
-    }
-
-    if (expires != null) {
-      offset += _writeVarint64(payload, offset, expires!);
-    }
-
-    payload[offset++] = forwardingPreference == ObjectForwardingPreference.subgroup ? 0 : 1;
+    payload[offset++] = forward;
     offset += _writeVarint(payload, offset, parameters.length);
 
     for (final param in parameters) {
@@ -600,6 +609,8 @@ class PublishMessage extends MoQControlMessage {
         offset += _writeVarint(payload, offset, param.value!.length);
         payload.setAll(offset, param.value!);
         offset += param.value!.length;
+      } else {
+        offset += _writeVarint(payload, offset, 0);
       }
     }
 
@@ -657,41 +668,27 @@ class PublishMessage extends MoQControlMessage {
     final (trackAlias, len4) = MoQWireFormat.decodeVarint64(data, offset);
     offset += len4;
 
-    final (groupId, len5) = MoQWireFormat.decodeVarint64(data, offset);
-    offset += len5;
+    // Group Order (8 bits)
+    final groupOrderValue = data[offset++];
+    final groupOrder = GroupOrder.fromValue(groupOrderValue) ?? GroupOrder.ascending;
 
-    Int64? subgroupId;
-    Int64? objectId;
-    Int64? expires;
+    // Content Exists (8 bits)
+    final contentExists = data[offset++] == 1;
 
-    // Try to parse optional fields
-    // This is simplified - in real implementation you'd need better detection
-    if (offset < data.length) {
-      try {
-        final (sg, len6) = MoQWireFormat.decodeVarint64(data, offset);
-        offset += len6;
-        subgroupId = sg;
-      } catch (_) {}
+    // Largest Location (only present if contentExists == true)
+    Location? largestLocation;
+    if (contentExists) {
+      final (groupId, len5) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += len5;
+      final (objectId, len6) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += len6;
+      largestLocation = Location(group: groupId, object: objectId);
     }
 
-    if (offset < data.length) {
-      try {
-        final (oid, len7) = MoQWireFormat.decodeVarint64(data, offset);
-        offset += len7;
-        objectId = oid;
-      } catch (_) {}
-    }
+    // Forward (8 bits)
+    final forward = data[offset++];
 
-    if (offset < data.length) {
-      try {
-        final (exp, len8) = MoQWireFormat.decodeVarint64(data, offset);
-        offset += len8;
-        expires = exp;
-      } catch (_) {}
-    }
-
-    final forwardingPref = data[offset++];
-
+    // Parameters
     final (numParams, numParamsLen) = MoQWireFormat.decodeVarint(data, offset);
     offset += numParamsLen;
 
@@ -704,7 +701,7 @@ class PublishMessage extends MoQControlMessage {
       if (offset < data.length) {
         final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
         offset += lengthLen;
-        if (length > 0) {
+        if (length > 0 && offset + length <= data.length) {
           value = data.sublist(offset, offset + length);
           offset += length;
         }
@@ -715,33 +712,48 @@ class PublishMessage extends MoQControlMessage {
     return PublishMessage(
       requestId: requestId,
       trackNamespace: namespace,
-      trackName: trackName,
+      trackName: Uint8List.fromList(trackName),
       trackAlias: trackAlias,
-      groupId: groupId,
-      subgroupId: subgroupId,
-      objectId: objectId,
-      expires: expires,
-      forwardingPreference: forwardingPref == 0 ? ObjectForwardingPreference.subgroup : ObjectForwardingPreference.datagram,
+      groupOrder: groupOrder,
+      contentExists: contentExists,
+      largestLocation: largestLocation,
+      forward: forward,
       parameters: params,
     );
   }
+
+  /// Get track namespace as a string path
+  String get namespacePath {
+    return trackNamespace
+        .map((e) => const Utf8Decoder().convert(e))
+        .join('/');
+  }
+
+  /// Get track name as a string
+  String get trackNameString => const Utf8Decoder().convert(trackName);
 }
 
-/// PUBLISH_OK message (0x1E)
+/// PUBLISH_OK message (0x1E) per draft-ietf-moq-transport-14
+///
+/// The subscriber sends PUBLISH_OK to accept a subscription initiated by PUBLISH.
 class PublishOkMessage extends MoQControlMessage {
   final Int64 requestId;
-  final Int64 trackAlias;
-  final Int64 expires;
-  final Int64? maxSubgroupTime;
-  final Int64? maxSubgroupBytes;
+  final int forward; // 0 (don't forward) or 1 (forward)
+  final int subscriberPriority;
+  final GroupOrder groupOrder;
+  final FilterType filterType;
+  final Location? startLocation; // Present for all filter types in response
+  final Int64? endGroup; // Only for AbsoluteRange (0x4)
   final List<KeyValuePair> parameters;
 
   PublishOkMessage({
     required this.requestId,
-    required this.trackAlias,
-    required this.expires,
-    this.maxSubgroupTime,
-    this.maxSubgroupBytes,
+    required this.forward,
+    required this.subscriberPriority,
+    required this.groupOrder,
+    required this.filterType,
+    this.startLocation,
+    this.endGroup,
     this.parameters = const [],
   });
 
@@ -752,20 +764,28 @@ class PublishOkMessage extends MoQControlMessage {
   int get payloadLength {
     int len = 0;
     len += MoQWireFormat._varintSize64(requestId);
-    len += MoQWireFormat._varintSize64(trackAlias);
-    len += MoQWireFormat._varintSize64(expires);
-    if (maxSubgroupTime != null) {
-      len += MoQWireFormat._varintSize64(maxSubgroupTime!);
+    len += 1; // Forward (8)
+    len += 1; // Subscriber Priority (8)
+    len += 1; // Group Order (8)
+    len += MoQWireFormat._varintSize(filterType.value);
+
+    // Start Location is present for all filter types
+    if (startLocation != null) {
+      len += MoQWireFormat._varintSize64(startLocation!.group);
+      len += MoQWireFormat._varintSize64(startLocation!.object);
     }
-    if (maxSubgroupBytes != null) {
-      len += MoQWireFormat._varintSize64(maxSubgroupBytes!);
+
+    // End Group only for AbsoluteRange
+    if (filterType == FilterType.absoluteRange && endGroup != null) {
+      len += MoQWireFormat._varintSize64(endGroup!);
     }
+
     len += MoQWireFormat._varintSize(parameters.length);
     for (final param in parameters) {
       len += MoQWireFormat._varintSize(param.type);
-      if (param.value != null) {
-        len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
-      }
+      final valueLen = param.value?.length ?? 0;
+      len += MoQWireFormat._varintSize(valueLen);
+      len += valueLen;
     }
     return len;
   }
@@ -776,25 +796,31 @@ class PublishOkMessage extends MoQControlMessage {
     int offset = 0;
 
     offset += _writeVarint64(payload, offset, requestId);
-    offset += _writeVarint64(payload, offset, trackAlias);
-    offset += _writeVarint64(payload, offset, expires);
+    payload[offset++] = forward & 0xFF;
+    payload[offset++] = subscriberPriority & 0xFF;
+    payload[offset++] = groupOrder.value & 0xFF;
+    offset += _writeVarint(payload, offset, filterType.value);
 
-    if (maxSubgroupTime != null) {
-      offset += _writeVarint64(payload, offset, maxSubgroupTime!);
+    // Start Location
+    if (startLocation != null) {
+      offset += _writeVarint64(payload, offset, startLocation!.group);
+      offset += _writeVarint64(payload, offset, startLocation!.object);
     }
 
-    if (maxSubgroupBytes != null) {
-      offset += _writeVarint64(payload, offset, maxSubgroupBytes!);
+    // End Group only for AbsoluteRange
+    if (filterType == FilterType.absoluteRange && endGroup != null) {
+      offset += _writeVarint64(payload, offset, endGroup!);
     }
 
     offset += _writeVarint(payload, offset, parameters.length);
 
     for (final param in parameters) {
       offset += _writeVarint(payload, offset, param.type);
-      if (param.value != null) {
-        offset += _writeVarint(payload, offset, param.value!.length);
+      final valueLen = param.value?.length ?? 0;
+      offset += _writeVarint(payload, offset, valueLen);
+      if (valueLen > 0) {
         payload.setAll(offset, param.value!);
-        offset += param.value!.length;
+        offset += valueLen;
       }
     }
 
@@ -815,14 +841,15 @@ class PublishOkMessage extends MoQControlMessage {
 
   Uint8List _wrapMessage(Uint8List payload) {
     final typeBytes = MoQWireFormat.encodeVarint(type.value);
-    final buffer = Uint8List(typeBytes.length + 2 + payload.length);
+    final lengthBytes = MoQWireFormat.encodeVarint(payload.length);
+    final buffer = Uint8List(typeBytes.length + lengthBytes.length + payload.length);
     int offset = 0;
 
     buffer.setAll(offset, typeBytes);
     offset += typeBytes.length;
 
-    buffer[offset++] = (payload.length >> 8) & 0xFF;
-    buffer[offset++] = payload.length & 0xFF;
+    buffer.setAll(offset, lengthBytes);
+    offset += lengthBytes.length;
 
     buffer.setAll(offset, payload);
 
@@ -832,60 +859,63 @@ class PublishOkMessage extends MoQControlMessage {
   static PublishOkMessage deserialize(Uint8List data) {
     int offset = 0;
 
-    final (requestId, len1) = MoQWireFormat.decodeVarint64(data, offset);
-    offset += len1;
+    final (requestId, reqLen) = MoQWireFormat.decodeVarint64(data, offset);
+    offset += reqLen;
 
-    final (trackAlias, len2) = MoQWireFormat.decodeVarint64(data, offset);
-    offset += len2;
+    final forward = data[offset++];
+    final subscriberPriority = data[offset++];
+    final groupOrderValue = data[offset++];
+    final groupOrder = GroupOrder.fromValue(groupOrderValue) ?? GroupOrder.ascending;
 
-    final (expires, len3) = MoQWireFormat.decodeVarint64(data, offset);
-    offset += len3;
+    final (filterTypeValue, filterLen) = MoQWireFormat.decodeVarint(data, offset);
+    offset += filterLen;
+    final filterType = FilterType.fromValue(filterTypeValue) ?? FilterType.largestObject;
 
-    Int64? maxSubgroupTime;
-    Int64? maxSubgroupBytes;
-
+    // Start Location is present for all filter types
+    Location? startLocation;
     if (offset < data.length) {
-      try {
-        final (mst, len4) = MoQWireFormat.decodeVarint64(data, offset);
-        offset += len4;
-        maxSubgroupTime = mst;
-      } catch (_) {}
+      final (group, groupLen) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += groupLen;
+      final (object, objectLen) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += objectLen;
+      startLocation = Location(group: group, object: object);
     }
 
-    if (offset < data.length) {
-      try {
-        final (msb, len5) = MoQWireFormat.decodeVarint64(data, offset);
-        offset += len5;
-        maxSubgroupBytes = msb;
-      } catch (_) {}
+    // End Group only for AbsoluteRange
+    Int64? endGroup;
+    if (filterType == FilterType.absoluteRange && offset < data.length) {
+      final (eg, egLen) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += egLen;
+      endGroup = eg;
     }
 
     final (numParams, numParamsLen) = MoQWireFormat.decodeVarint(data, offset);
     offset += numParamsLen;
 
     final params = <KeyValuePair>[];
-    for (int i = 0; i < numParams; i++) {
-      final (type, typeLen) = MoQWireFormat.decodeVarint(data, offset);
+    for (int i = 0; i < numParams && offset < data.length; i++) {
+      final (paramType, typeLen) = MoQWireFormat.decodeVarint(data, offset);
       offset += typeLen;
 
+      final (valueLen, valueLenLen) = MoQWireFormat.decodeVarint(data, offset);
+      offset += valueLenLen;
+
       Uint8List? value;
-      if (offset < data.length) {
-        final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
-        offset += lengthLen;
-        if (length > 0) {
-          value = data.sublist(offset, offset + length);
-          offset += length;
-        }
+      if (valueLen > 0 && offset + valueLen <= data.length) {
+        value = data.sublist(offset, offset + valueLen);
+        offset += valueLen;
       }
-      params.add(KeyValuePair(type: type, value: value));
+      params.add(KeyValuePair(type: paramType, value: value));
     }
 
     return PublishOkMessage(
       requestId: requestId,
-      trackAlias: trackAlias,
-      expires: expires,
-      maxSubgroupTime: maxSubgroupTime,
-      maxSubgroupBytes: maxSubgroupBytes,
+      forward: forward,
+      subscriberPriority: subscriberPriority,
+      groupOrder: groupOrder,
+      filterType: filterType,
+      startLocation: startLocation,
+      endGroup: endGroup,
       parameters: params,
     );
   }
@@ -1157,12 +1187,6 @@ class TrackStatusMessage extends MoQControlMessage {
     offset += _writeVarint64(payload, offset, statusInterval);
 
     return _wrapMessage(payload);
-  }
-
-  int _writeVarint(Uint8List buffer, int offset, int value) {
-    final bytes = MoQWireFormat.encodeVarint(value);
-    buffer.setAll(offset, bytes);
-    return bytes.length;
   }
 
   int _writeVarint64(Uint8List buffer, int offset, Int64 value) {
