@@ -310,6 +310,9 @@ class MoQWireFormat {
 
 /// Control message parser
 class MoQControlMessageParser {
+  /// Enable debug logging for message parsing
+  static bool enableDebugLogging = false;
+
   /// Parse a control message from bytes
   ///
   /// Returns (message, totalBytesRead) where totalBytesRead includes
@@ -325,12 +328,21 @@ class MoQControlMessageParser {
     final (type, typeBytes) = MoQWireFormat.decodeVarint(data, offset);
     offset += typeBytes;
 
+    if (enableDebugLogging) {
+      print('[MoQParser] Raw data: ${data.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
+      print('[MoQParser] Type value: 0x${type.toRadixString(16)} ($type), bytes: $typeBytes');
+    }
+
     // Read message length (16-bit big endian)
     if (offset + 2 > data.length) {
       throw FormatException('Unexpected end of message length');
     }
     final length = (data[offset] << 8) | data[offset + 1];
     offset += 2;
+
+    if (enableDebugLogging) {
+      print('[MoQParser] Length: $length');
+    }
 
     // Check we have enough data
     if (offset + length > data.length) {
@@ -343,6 +355,11 @@ class MoQControlMessageParser {
 
     // Parse based on message type
     final messageType = MoQMessageType.fromValue(type);
+    if (enableDebugLogging) {
+      print('[MoQParser] MessageType enum: $messageType');
+      print('[MoQParser] Payload: ${payload.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
+    }
+
     if (messageType == null) {
       return (null, totalBytesRead);
     }
@@ -350,8 +367,15 @@ class MoQControlMessageParser {
     MoQControlMessage? message;
     try {
       message = _parseMessage(messageType, payload);
-    } catch (e) {
-      // Return null for unparseable messages
+      if (enableDebugLogging) {
+        print('[MoQParser] Parsed message: ${message?.type}');
+      }
+    } catch (e, stack) {
+      // Log parsing errors for debugging
+      if (enableDebugLogging) {
+        print('[MoQParser] Failed to parse $messageType: $e');
+        print('[MoQParser] Stack: $stack');
+      }
       return (null, totalBytesRead);
     }
 

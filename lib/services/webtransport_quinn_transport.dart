@@ -43,6 +43,9 @@ class WebTransportQuinnTransport extends MoQTransport {
   _CloseFunc? _moqWtClose;
   _CleanupFunc? _moqWtCleanup;
   _GetLastErrorFunc? _moqWtGetLastError;
+  _OpenUniStreamFunc? _moqWtOpenUniStream;
+  _StreamWriteFunc? _moqWtStreamWrite;
+  _StreamFinishFunc? _moqWtStreamFinish;
 
   Timer? _pollTimer;
   bool _nativeLibraryLoaded = false;
@@ -81,6 +84,15 @@ class WebTransportQuinnTransport extends MoQTransport {
           .asFunction();
       _moqWtGetLastError = _nativeLib!
           .lookup<NativeFunction<NativeInt32 Function(Pointer<Uint8>, NativeIntPtr)>>('moq_webtransport_get_last_error')
+          .asFunction();
+      _moqWtOpenUniStream = _nativeLib!
+          .lookup<NativeFunction<NativeInt32 Function(NativeUint64, Pointer<NativeUint64>)>>('moq_webtransport_open_uni_stream')
+          .asFunction();
+      _moqWtStreamWrite = _nativeLib!
+          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, NativeUint64, Pointer<Uint8>, NativeIntPtr)>>('moq_webtransport_stream_write')
+          .asFunction();
+      _moqWtStreamFinish = _nativeLib!
+          .lookup<NativeFunction<NativeInt32 Function(NativeUint64, NativeUint64)>>('moq_webtransport_stream_finish')
           .asFunction();
 
       // Initialize the native library
@@ -302,23 +314,80 @@ class WebTransportQuinnTransport extends MoQTransport {
 
   @override
   Future<int> openStream() async {
-    // WebTransport persistent streams are not yet implemented
-    _logger.e('openStream not yet implemented for WebTransport');
-    throw UnimplementedError('WebTransport openStream not yet implemented');
+    if (!isConnected) {
+      throw StateError('Not connected');
+    }
+
+    if (!_nativeLibraryLoaded || _moqWtOpenUniStream == null) {
+      _logger.e('Cannot open stream: Native WebTransport library is not available');
+      throw StateError('Native WebTransport library not available');
+    }
+
+    final streamIdPtr = calloc<Uint64>();
+    final result = _moqWtOpenUniStream!(_sessionId, streamIdPtr);
+
+    if (result != 0) {
+      calloc.free(streamIdPtr);
+      throw Exception('Failed to open unidirectional stream: error code $result');
+    }
+
+    final streamId = streamIdPtr.value;
+    calloc.free(streamIdPtr);
+
+    _logger.d('Opened unidirectional stream $streamId');
+    return streamId;
   }
 
   @override
   Future<void> streamWrite(int streamId, Uint8List data) async {
-    // WebTransport persistent streams are not yet implemented
-    _logger.e('streamWrite not yet implemented for WebTransport');
-    throw UnimplementedError('WebTransport streamWrite not yet implemented');
+    if (!isConnected) {
+      throw StateError('Not connected');
+    }
+
+    if (!_nativeLibraryLoaded || _moqWtStreamWrite == null) {
+      _logger.e('Cannot write to stream: Native WebTransport library is not available');
+      throw StateError('Native WebTransport library not available');
+    }
+
+    final dataPtr = calloc<Uint8>(data.length);
+    final nativeData = dataPtr.asTypedList(data.length);
+    nativeData.setAll(0, data);
+
+    final result = _moqWtStreamWrite!(_sessionId, streamId, dataPtr, data.length);
+
+    calloc.free(dataPtr);
+
+    if (result < 0) {
+      throw Exception('Failed to write to stream $streamId: error code $result');
+    }
+
+    _stats = _stats.copyWith(
+      bytesSent: _stats.bytesSent + result,
+      packetsSent: _stats.packetsSent + 1,
+      lastActivity: DateTime.now(),
+    );
+
+    _logger.d('Wrote $result bytes to stream $streamId');
   }
 
   @override
   Future<void> streamFinish(int streamId) async {
-    // WebTransport persistent streams are not yet implemented
-    _logger.e('streamFinish not yet implemented for WebTransport');
-    throw UnimplementedError('WebTransport streamFinish not yet implemented');
+    if (!isConnected) {
+      throw StateError('Not connected');
+    }
+
+    if (!_nativeLibraryLoaded || _moqWtStreamFinish == null) {
+      _logger.e('Cannot finish stream: Native WebTransport library is not available');
+      throw StateError('Native WebTransport library not available');
+    }
+
+    final result = _moqWtStreamFinish!(_sessionId, streamId);
+
+    if (result != 0) {
+      throw Exception('Failed to finish stream $streamId: error code $result');
+    }
+
+    _logger.d('Finished stream $streamId');
   }
 
   @override
@@ -399,3 +468,6 @@ typedef _RecvFunc = int Function(
 typedef _CloseFunc = int Function(int sessionId);
 typedef _CleanupFunc = void Function();
 typedef _GetLastErrorFunc = int Function(Pointer<Uint8> buffer, int bufferLen);
+typedef _OpenUniStreamFunc = int Function(int sessionId, Pointer<Uint64> outStreamId);
+typedef _StreamWriteFunc = int Function(int sessionId, int streamId, Pointer<Uint8> data, int len);
+typedef _StreamFinishFunc = int Function(int sessionId, int streamId);

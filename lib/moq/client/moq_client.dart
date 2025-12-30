@@ -731,14 +731,20 @@ class MoQClient {
   }
 
   void _handleIncomingData(Uint8List data) {
+    _logger.d('_handleIncomingData: ${data.length} bytes');
     try {
       final (message, bytesRead) = MoQControlMessageParser.parse(data);
+      _logger.d('Parsed message: type=${message?.type}, bytesRead=$bytesRead');
 
       if (message != null) {
         _processControlMessage(message);
+        _logger.d('Processed control message: ${message.type}');
+      } else {
+        _logger.w('Parsed message is null');
       }
-    } catch (e) {
+    } catch (e, stack) {
       _logger.e('Failed to process incoming data: $e');
+      _logger.e('Stack: $stack');
     }
   }
 
@@ -987,7 +993,8 @@ class MoQClient {
   void _handlePublishNamespaceOk(PublishNamespaceOkMessage message) {
     final announcement = _namespaceAnnouncements[message.requestId];
     if (announcement != null) {
-      announcement.complete(parameters: message.parameters);
+      // Per draft-14, PUBLISH_NAMESPACE_OK has no parameters
+      announcement.complete();
       _logger.i('Namespace announcement successful: ${announcement.namespacePath}');
     } else {
       _logger.w('Received PUBLISH_NAMESPACE_OK for unknown request: ${message.requestId}');
@@ -1424,9 +1431,6 @@ class MoQNamespaceAnnouncement {
 
   final Completer<void> _responseCompleter = Completer<void>();
 
-  // Parameters returned by server
-  List<KeyValuePair>? serverParameters;
-
   MoQNamespaceAnnouncement({
     required this.client,
     required this.requestId,
@@ -1444,9 +1448,9 @@ class MoQNamespaceAnnouncement {
   Future<void> waitForResponse() => _responseCompleter.future;
 
   /// Complete the announcement with successful response
-  void complete({List<KeyValuePair>? parameters}) {
+  /// Per draft-14 section 9.24, PUBLISH_NAMESPACE_OK has no parameters
+  void complete() {
     if (_responseCompleter.isCompleted) return;
-    serverParameters = parameters;
     _responseCompleter.complete();
   }
 

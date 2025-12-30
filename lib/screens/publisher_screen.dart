@@ -90,12 +90,40 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
       // Create CMAF publisher
       _cmafPublisher = CmafPublisher(client: client, logger: _logger);
 
+      // Configure tracks BEFORE announce (with capture parameters)
+      // This allows catalog to be published with track info immediately after PUBLISH_NAMESPACE_OK
+      _setStatus('Configuring tracks...');
+      const videoTrackName = '1.m4s';
+      const audioTrackName = '2.m4s';
+
+      _cmafPublisher!.configureVideoTrack(
+        videoTrackName,
+        width: 1280,
+        height: 720,
+        frameRate: 30,
+        timescale: 90000,
+        priority: 128,
+        trackId: 1,
+      );
+
+      _cmafPublisher!.configureAudioTrack(
+        audioTrackName,
+        sampleRate: 48000,
+        channels: 2,
+        bitrate: 128000,
+        frameDurationMs: 20,
+        priority: 200,
+        trackId: 2,
+      );
+
+      // Announce namespace - catalog is published immediately after PUBLISH_NAMESPACE_OK
+      // Subscribe handler starts automatically
       _setStatus('Announcing namespace...');
       await _cmafPublisher!.announce([widget.namespace], initTrackName: '0.mp4');
 
-      // Add video track
-      _setStatus('Adding video track...');
-      const videoTrackName = '1.m4s';
+      _setStatus('Catalog published, awaiting subscriptions...');
+
+      // Add actual tracks (creates muxers for encoding)
       await _cmafPublisher!.addVideoTrack(
         videoTrackName,
         width: 1280,
@@ -106,9 +134,6 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
         trackId: 1,
       );
 
-      // Add audio track
-      _setStatus('Adding audio track...');
-      const audioTrackName = '2.m4s';
       await _cmafPublisher!.addAudioTrack(
         audioTrackName,
         sampleRate: 48000,
@@ -123,7 +148,7 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
       _setStatus('Initializing capture...');
 
-      // Initialize video and audio
+      // Initialize video and audio capture
       await _initializeVideoPublishing(videoTrackName);
       await _initializeAudioPublishing(audioTrackName);
 

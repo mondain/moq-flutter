@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 import 'package:fixnum/fixnum.dart';
 import 'package:logger/logger.dart';
@@ -12,12 +13,20 @@ import '../protocol/moq_messages.dart';
 ///
 /// This publisher wraps media frames in fMP4 (moof+mdat) segments
 /// suitable for CARP-compliant MoQ streaming.
+///
+/// ## Usage Flow:
+/// 1. Create publisher
+/// 2. Configure tracks with capture info (before announce)
+/// 3. Call announce() - publishes catalog after PUBLISH_NAMESPACE_OK
+/// 4. Start capturing and publishing frames
+/// 5. Handle incoming SUBSCRIBE requests automatically
 class CmafPublisher {
   final MoQClient _client;
   final Logger _logger;
 
   // Publisher state
   bool _isAnnounced = false;
+  bool _catalogPublished = false;
   List<Uint8List>? _namespace;
   String? _namespaceStr;
 
@@ -30,9 +39,10 @@ class CmafPublisher {
   String? _initTrackName;
   bool _initPublished = false;
 
-  // Track management
+  // Track management - configured before announce
   final _tracks = <String, CmafTrack>{};
   final _catalogTracks = <CatalogTrack>[];
+  final _trackConfigs = <String, TrackConfig>{};
 
   // Group/object counters
   Int64 _currentGroupId = Int64(0);
@@ -40,6 +50,10 @@ class CmafPublisher {
 
   // Active streams (streamId -> track)
   final _activeStreams = <int, CmafTrack>{};
+
+  // Subscribe handling
+  StreamSubscription<MoQSubscribeRequest>? _subscribeSubscription;
+  final _pendingSubscribes = <Int64, MoQSubscribeRequest>{};
 
   CmafPublisher({
     required MoQClient client,
@@ -50,13 +64,77 @@ class CmafPublisher {
   /// Get whether namespace is announced
   bool get isAnnounced => _isAnnounced;
 
+  /// Get whether catalog has been published
+  bool get catalogPublished => _catalogPublished;
+
   /// Get the catalog
   MoQCatalog? get catalog => _catalog;
 
   /// Get the client
   MoQClient get client => _client;
 
+  /// Get configured tracks
+  Map<String, TrackConfig> get trackConfigs => Map.unmodifiable(_trackConfigs);
+
+  /// Configure a video track (can be called before announce)
+  ///
+  /// This registers the track configuration for the catalog.
+  /// The actual muxer is created when the track is used.
+  void configureVideoTrack(
+    String trackName, {
+    required int width,
+    required int height,
+    int frameRate = 30,
+    int timescale = 90000,
+    int priority = 128,
+    int trackId = 1,
+    String? codec,
+  }) {
+    _trackConfigs[trackName] = VideoTrackConfig(
+      name: trackName,
+      width: width,
+      height: height,
+      frameRate: frameRate,
+      timescale: timescale,
+      priority: priority,
+      trackId: trackId,
+      codec: codec,
+    );
+    _logger.i('Configured video track: $trackName (${width}x$height @$frameRate fps)');
+  }
+
+  /// Configure an audio track (can be called before announce)
+  ///
+  /// This registers the track configuration for the catalog.
+  void configureAudioTrack(
+    String trackName, {
+    int sampleRate = 48000,
+    int channels = 2,
+    int bitrate = 128000,
+    int frameDurationMs = 20,
+    int priority = 200,
+    int trackId = 2,
+    String? codec,
+  }) {
+    _trackConfigs[trackName] = AudioTrackConfig(
+      name: trackName,
+      sampleRate: sampleRate,
+      channels: channels,
+      bitrate: bitrate,
+      frameDurationMs: frameDurationMs,
+      priority: priority,
+      trackId: trackId,
+      codec: codec,
+    );
+    _logger.i('Configured audio track: $trackName (${sampleRate}Hz, ${channels}ch)');
+  }
+
   /// Announce a namespace for publishing
+  ///
+  /// This sends PUBLISH_NAMESPACE, waits for PUBLISH_NAMESPACE_OK,
+  /// then publishes the catalog with configured track information.
+  ///
+  /// Tracks should be configured before calling this method.
   ///
   /// [initTrackName] is the name for the combined init track (e.g., "0.mp4")
   Future<void> announce(
@@ -68,30 +146,148 @@ class CmafPublisher {
       return;
     }
 
+    if (_trackConfigs.isEmpty) {
+      _logger.w('No tracks configured - catalog will be empty');
+    }
+
     _namespaceStr = namespaceParts.join('/');
     _namespace =
         namespaceParts.map((p) => Uint8List.fromList(p.codeUnits)).toList();
     _initTrackName = initTrackName;
 
     try {
+      // Send PUBLISH_NAMESPACE and wait for PUBLISH_NAMESPACE_OK
       await _client.announceNamespace(_namespace!);
       _isAnnounced = true;
       _logger.i('Namespace announced: $_namespaceStr');
+
+      // Build catalog tracks from configurations
+      _buildCatalogTracks();
 
       // Create the catalog with CMAF packaging
       _catalog = MoQCatalog.cmaf(
         namespace: _namespaceStr!,
         tracks: _catalogTracks,
       );
+
+      // Publish catalog immediately after PUBLISH_NAMESPACE_OK
+      await _publishCatalog();
+
+      // Start handling incoming SUBSCRIBE requests
+      _startSubscribeHandler();
+
+      _logger.i('Publisher ready - catalog published, awaiting subscriptions');
     } catch (e) {
       _logger.e('Failed to announce namespace: $e');
       rethrow;
     }
   }
 
-  /// Add an H.264 video track
+  /// Build catalog tracks from configurations
+  void _buildCatalogTracks() {
+    _catalogTracks.clear();
+
+    for (final config in _trackConfigs.values) {
+      if (config is VideoTrackConfig) {
+        _catalogTracks.add(CatalogTrack(
+          name: config.name,
+          initTrack: _initTrackName,
+          selectionParams: SelectionParams(
+            codec: config.codec ?? 'avc1.64001f', // Default H.264 High Profile
+            mimeType: 'video/mp4',
+            width: config.width,
+            height: config.height,
+            framerate: config.frameRate,
+          ),
+        ));
+      } else if (config is AudioTrackConfig) {
+        _catalogTracks.add(CatalogTrack(
+          name: config.name,
+          initTrack: _initTrackName,
+          selectionParams: SelectionParams(
+            codec: config.codec ?? 'opus', // Default Opus
+            mimeType: 'audio/mp4',
+            samplerate: config.sampleRate,
+            channelConfig: config.channels.toString(),
+            bitrate: config.bitrate,
+          ),
+        ));
+      }
+    }
+  }
+
+  /// Start handling incoming SUBSCRIBE requests
+  void _startSubscribeHandler() {
+    _subscribeSubscription?.cancel();
+    _subscribeSubscription = _client.incomingSubscribeRequests.listen(
+      _handleSubscribeRequest,
+      onError: (e) => _logger.e('Subscribe handler error: $e'),
+    );
+    _logger.i('Subscribe handler started');
+  }
+
+  /// Handle an incoming SUBSCRIBE request
+  Future<void> _handleSubscribeRequest(MoQSubscribeRequest request) async {
+    final trackName = String.fromCharCodes(request.trackName);
+    _logger.i('Received SUBSCRIBE for track: $trackName');
+
+    // Check if we have this track configured
+    final config = _trackConfigs[trackName];
+    if (config == null) {
+      // Check for catalog or init track
+      if (trackName == '.catalog' || trackName == _initTrackName) {
+        // Accept catalog/init subscriptions
+        await _acceptSubscription(request, trackName);
+        return;
+      }
+
+      _logger.w('SUBSCRIBE for unknown track: $trackName');
+      await _client.rejectSubscribe(
+        request.requestId,
+        errorCode: 0x4, // UNINTERESTED
+        reason: 'Track not found: $trackName',
+      );
+      return;
+    }
+
+    // Accept the subscription
+    await _acceptSubscription(request, trackName);
+  }
+
+  /// Accept a subscription request
+  Future<void> _acceptSubscription(MoQSubscribeRequest request, String trackName) async {
+    // Get or assign track alias
+    Int64 trackAlias;
+    final existingTrack = _tracks[trackName];
+    if (existingTrack != null) {
+      trackAlias = existingTrack.alias;
+    } else {
+      trackAlias = Int64(_tracks.length);
+    }
+
+    try {
+      await _client.acceptSubscribe(
+        request.requestId,
+        trackAlias: trackAlias,
+        expires: Int64(0), // No expiry
+        groupOrder: GroupOrder.ascending,
+        contentExists: _initPublished,
+        largestLocation: _initPublished ? Location(
+          group: _currentGroupId,
+          object: _currentObjectId,
+        ) : null,
+      );
+
+      _pendingSubscribes[request.requestId] = request;
+      _logger.i('Accepted SUBSCRIBE for $trackName (alias: $trackAlias)');
+    } catch (e) {
+      _logger.e('Failed to accept SUBSCRIBE: $e');
+    }
+  }
+
+  /// Add an H.264 video track (creates the muxer)
   ///
-  /// Returns the track name for publishing.
+  /// Call configureVideoTrack() first, then this after announce.
   Future<CmafVideoTrack> addVideoTrack(
     String trackName, {
     required int width,
@@ -126,9 +322,9 @@ class CmafPublisher {
     return track;
   }
 
-  /// Add an Opus audio track
+  /// Add an Opus audio track (creates the muxer)
   ///
-  /// Returns the track name for publishing.
+  /// Call configureAudioTrack() first, then this after announce.
   Future<CmafAudioTrack> addAudioTrack(
     String trackName, {
     int sampleRate = 48000,
@@ -181,22 +377,16 @@ class CmafPublisher {
       throw StateError('Init not ready after setting SPS/PPS');
     }
 
-    // Add to catalog
-    _catalogTracks.add(CatalogTrack(
-      name: trackName,
-      initTrack: _initTrackName,
-      selectionParams: SelectionParams(
-        codec: track.muxer.codecString,
-        width: track.muxer.width,
-        height: track.muxer.height,
-        framerate: track.muxer.frameRate,
-      ),
-    ));
+    // Update catalog with actual codec string
+    final codecString = track.muxer.codecString;
+    if (codecString != null) {
+      _updateCatalogCodec(trackName, codecString);
+    }
 
-    _logger.i('Video codec configured: ${track.muxer.codecString}');
+    _logger.i('Video codec configured: $codecString');
 
-    // Publish init and catalog if all tracks ready
-    await _maybePublishInitAndCatalog();
+    // Publish init segment when ready
+    await _maybePublishInitSegment();
   }
 
   /// Mark audio track as ready (Opus doesn't need external config)
@@ -206,26 +396,41 @@ class CmafPublisher {
       throw ArgumentError('Track $trackName is not an audio track');
     }
 
-    // Add to catalog
-    _catalogTracks.add(CatalogTrack(
-      name: trackName,
-      initTrack: _initTrackName,
-      selectionParams: SelectionParams(
-        codec: track.muxer.codecString,
-        samplerate: track.muxer.sampleRate,
-        channelConfig: track.muxer.channels.toString(),
-        bitrate: track.muxer.bitrate,
-      ),
-    ));
+    // Update catalog with actual codec string
+    _updateCatalogCodec(trackName, track.muxer.codecString);
 
     _logger.i('Audio track ready: ${track.muxer.codecString}');
 
-    // Publish init and catalog if all tracks ready
-    await _maybePublishInitAndCatalog();
+    // Publish init segment when ready
+    await _maybePublishInitSegment();
   }
 
-  /// Check if all tracks are configured and publish init/catalog
-  Future<void> _maybePublishInitAndCatalog() async {
+  /// Update catalog codec string for a track
+  void _updateCatalogCodec(String trackName, String codec) {
+    for (int i = 0; i < _catalogTracks.length; i++) {
+      if (_catalogTracks[i].name == trackName) {
+        final oldTrack = _catalogTracks[i];
+        _catalogTracks[i] = CatalogTrack(
+          name: oldTrack.name,
+          initTrack: oldTrack.initTrack,
+          selectionParams: SelectionParams(
+            codec: codec,
+            mimeType: oldTrack.selectionParams?.mimeType,
+            width: oldTrack.selectionParams?.width,
+            height: oldTrack.selectionParams?.height,
+            framerate: oldTrack.selectionParams?.framerate,
+            samplerate: oldTrack.selectionParams?.samplerate,
+            channelConfig: oldTrack.selectionParams?.channelConfig,
+            bitrate: oldTrack.selectionParams?.bitrate,
+          ),
+        );
+        break;
+      }
+    }
+  }
+
+  /// Check if all tracks are configured and publish init segment
+  Future<void> _maybePublishInitSegment() async {
     if (_initPublished) return;
 
     // Check if all tracks have init ready
@@ -241,11 +446,10 @@ class CmafPublisher {
 
     // Publish combined init segment
     await _publishInitSegment();
-
-    // Publish catalog
-    await _publishCatalog();
-
     _initPublished = true;
+
+    // Re-publish catalog with updated codec info
+    await _publishCatalog();
   }
 
   /// Publish the combined init segment
@@ -269,7 +473,6 @@ class CmafPublisher {
     if (initParts.isEmpty) return;
 
     // Use first init segment (in real world, we'd need to merge moov boxes)
-    // For now, publish the first one
     final initData = initParts.first;
 
     // Create init track
@@ -306,13 +509,15 @@ class CmafPublisher {
 
   /// Publish the catalog
   Future<void> _publishCatalog() async {
-    if (_catalog == null || !_isAnnounced) return;
+    _logger.d('_publishCatalog called, isAnnounced=$_isAnnounced');
+    if (!_isAnnounced) return;
 
     // Rebuild catalog
     _catalog = MoQCatalog.cmaf(
       namespace: _namespaceStr!,
       tracks: _catalogTracks,
     );
+    _logger.d('Catalog built with ${_catalogTracks.length} tracks');
 
     // Create catalog track if not exists
     const catalogName = '.catalog';
@@ -325,9 +530,11 @@ class CmafPublisher {
     }
 
     final catalogTrack = _tracks[catalogName]!;
+    _logger.d('About to open data stream for catalog');
 
     // Open stream and publish catalog
     final streamId = await _client.openDataStream();
+    _logger.d('Opened data stream: $streamId');
 
     await _client.writeSubgroupHeader(
       streamId,
@@ -347,6 +554,7 @@ class CmafPublisher {
 
     await _client.finishDataStream(streamId);
 
+    _catalogPublished = true;
     _logger.i('Published catalog (${catalogBytes.length} bytes)');
   }
 
@@ -370,18 +578,12 @@ class CmafPublisher {
       track.muxer.parseSpsPpsFromBitstream(frameData);
 
       if (track.muxer.isInitReady) {
-        // Add to catalog and publish
-        _catalogTracks.add(CatalogTrack(
-          name: trackName,
-          initTrack: _initTrackName,
-          selectionParams: SelectionParams(
-            codec: track.muxer.codecString,
-            width: track.muxer.width,
-            height: track.muxer.height,
-            framerate: track.muxer.frameRate,
-          ),
-        ));
-        await _maybePublishInitAndCatalog();
+        // Update catalog with actual codec
+        final codecString = track.muxer.codecString;
+        if (codecString != null) {
+          _updateCatalogCodec(trackName, codecString);
+        }
+        await _maybePublishInitSegment();
       }
     }
 
@@ -497,6 +699,10 @@ class CmafPublisher {
 
   /// Stop publishing
   Future<void> stop({String reason = 'Publisher stopped'}) async {
+    // Stop subscribe handler
+    await _subscribeSubscription?.cancel();
+    _subscribeSubscription = null;
+
     // Close all active streams
     for (final streamId in _activeStreams.keys.toList()) {
       await _closeStream(streamId);
@@ -514,14 +720,79 @@ class CmafPublisher {
 
     _isAnnounced = false;
     _initPublished = false;
+    _catalogPublished = false;
     _tracks.clear();
     _catalogTracks.clear();
+    _trackConfigs.clear();
+    _pendingSubscribes.clear();
     _logger.i('CMAF Publisher stopped');
   }
 
   void dispose() {
     stop();
   }
+}
+
+/// Track configuration (before muxer is created)
+abstract class TrackConfig {
+  String get name;
+  int get priority;
+  int get trackId;
+  String? get codec;
+}
+
+/// Video track configuration
+class VideoTrackConfig implements TrackConfig {
+  @override
+  final String name;
+  final int width;
+  final int height;
+  final int frameRate;
+  final int timescale;
+  @override
+  final int priority;
+  @override
+  final int trackId;
+  @override
+  final String? codec;
+
+  VideoTrackConfig({
+    required this.name,
+    required this.width,
+    required this.height,
+    this.frameRate = 30,
+    this.timescale = 90000,
+    this.priority = 128,
+    this.trackId = 1,
+    this.codec,
+  });
+}
+
+/// Audio track configuration
+class AudioTrackConfig implements TrackConfig {
+  @override
+  final String name;
+  final int sampleRate;
+  final int channels;
+  final int bitrate;
+  final int frameDurationMs;
+  @override
+  final int priority;
+  @override
+  final int trackId;
+  @override
+  final String? codec;
+
+  AudioTrackConfig({
+    required this.name,
+    this.sampleRate = 48000,
+    this.channels = 2,
+    this.bitrate = 128000,
+    this.frameDurationMs = 20,
+    this.priority = 200,
+    this.trackId = 2,
+    this.codec,
+  });
 }
 
 /// Base CMAF track information

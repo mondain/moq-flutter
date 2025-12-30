@@ -15,6 +15,19 @@ use std::ffi::c_char;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use log;
+use std::fs::OpenOptions;
+use std::io::Write;
+
+/// Write debug message to log file
+fn debug_log(msg: &str) {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/moq_webtransport.log")
+    {
+        let _ = writeln!(file, "{}", msg);
+    }
+}
 
 // Maximum receive buffer size per session
 const MAX_RECV_BUFFER_SIZE: usize = 64 * 1024; // 64KB
@@ -28,6 +41,10 @@ static LAST_ERROR: OnceCell<Mutex<Vec<u8>>> = OnceCell::new();
 struct ControlStream {
     send: SendStream,
 }
+
+// Data stream storage for unidirectional streams
+static WT_DATA_STREAMS: OnceCell<DashMap<(u64, u64), Arc<tokio::sync::Mutex<SendStream>>>> = OnceCell::new();
+static WT_NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
 // Receive buffer for incoming data
 struct ReceiveBuffer {
@@ -144,6 +161,9 @@ pub extern "C" fn moq_webtransport_init() {
     }
     if WT_CONTROL_STREAMS.set(DashMap::new()).is_err() {
         log::warn!("WebTransport control streams registry already initialized");
+    }
+    if WT_DATA_STREAMS.set(DashMap::new()).is_err() {
+        log::warn!("WebTransport data streams registry already initialized");
     }
     if LAST_ERROR.set(Mutex::new(Vec::new())).is_err() {
         log::warn!("WebTransport last error buffer already initialized");
@@ -561,6 +581,157 @@ pub extern "C" fn moq_webtransport_recv(
     result
 }
 
+/// Open a unidirectional stream for sending data
+///
+/// # Arguments
+/// * `session_id` - The session ID
+/// * `out_stream_id` - Output parameter for the stream ID
+///
+/// # Returns
+/// * 0 on success, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_webtransport_open_uni_stream(
+    session_id: u64,
+    out_stream_id: *mut u64,
+) -> i32 {
+    debug_log(&format!("[WT-DEBUG] open_uni_stream called for session {}", session_id));
+
+    let sessions = WT_SESSIONS.get().expect("Sessions not initialized");
+    let data_streams = WT_DATA_STREAMS.get().expect("Data streams not initialized");
+
+    debug_log(&format!("[WT-DEBUG] Looking up session {}", session_id));
+    let session = match sessions.get(&session_id) {
+        Some(s) => s.clone(),
+        None => {
+            debug_log(&format!("[WT-ERROR] Session {} not found for open_uni_stream", session_id));
+            return -1;
+        }
+    };
+    debug_log(&format!("[WT-DEBUG] Session {} found", session_id));
+
+    let runtime = get_runtime();
+    debug_log("[WT-DEBUG] Got runtime, calling block_on for open_uni");
+
+    let result = runtime.block_on(async {
+        debug_log("[WT-DEBUG] Inside async block, calling session.open_uni()");
+        match session.open_uni().await {
+            Ok(send_stream) => {
+                let stream_id = WT_NEXT_STREAM_ID.fetch_add(1, Ordering::SeqCst);
+                data_streams.insert((session_id, stream_id), Arc::new(tokio::sync::Mutex::new(send_stream)));
+                log::debug!("Opened unidirectional stream {} for session {}", stream_id, session_id);
+                Ok(stream_id)
+            }
+            Err(e) => {
+                let err_msg = format!("Failed to open uni stream: {}", e);
+                log::error!("{}", err_msg);
+                set_last_error(&err_msg);
+                Err(-2)
+            }
+        }
+    });
+
+    match result {
+        Ok(stream_id) => {
+            if !out_stream_id.is_null() {
+                unsafe { *out_stream_id = stream_id; }
+            }
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// Write data to a unidirectional stream
+///
+/// # Arguments
+/// * `session_id` - The session ID
+/// * `stream_id` - The stream ID (from open_uni_stream)
+/// * `data` - Pointer to data to send
+/// * `len` - Length of data
+///
+/// # Returns
+/// * Number of bytes written on success, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_webtransport_stream_write(
+    session_id: u64,
+    stream_id: u64,
+    data: *const u8,
+    len: usize,
+) -> i64 {
+    let data_streams = WT_DATA_STREAMS.get().expect("Data streams not initialized");
+
+    let stream_mutex = match data_streams.get(&(session_id, stream_id)) {
+        Some(s) => s.clone(),
+        None => {
+            log::error!("Stream {} not found for session {}", stream_id, session_id);
+            return -1;
+        }
+    };
+
+    let data_bytes = unsafe { slice::from_raw_parts(data, len) };
+    let data_to_send = data_bytes.to_vec();
+
+    let runtime = get_runtime();
+
+    let result = runtime.block_on(async {
+        let mut stream = stream_mutex.lock().await;
+        match stream.write_all(&data_to_send).await {
+            Ok(_) => {
+                log::trace!("Wrote {} bytes to stream {} on session {}", len, stream_id, session_id);
+                len as i64
+            }
+            Err(e) => {
+                log::error!("Failed to write to stream {}: {:?}", stream_id, e);
+                -2
+            }
+        }
+    });
+
+    result
+}
+
+/// Finish (close) a unidirectional stream
+///
+/// # Arguments
+/// * `session_id` - The session ID
+/// * `stream_id` - The stream ID
+///
+/// # Returns
+/// * 0 on success, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_webtransport_stream_finish(
+    session_id: u64,
+    stream_id: u64,
+) -> i32 {
+    let data_streams = WT_DATA_STREAMS.get().expect("Data streams not initialized");
+
+    let stream_mutex = match data_streams.remove(&(session_id, stream_id)) {
+        Some((_, s)) => s,
+        None => {
+            log::warn!("Stream {} not found for session {} during finish", stream_id, session_id);
+            return -1;
+        }
+    };
+
+    let runtime = get_runtime();
+
+    let result = runtime.block_on(async {
+        let mut stream = stream_mutex.lock().await;
+        match stream.finish() {
+            Ok(_) => {
+                log::debug!("Finished stream {} on session {}", stream_id, session_id);
+                0
+            }
+            Err(e) => {
+                log::error!("Failed to finish stream {}: {:?}", stream_id, e);
+                -2
+            }
+        }
+    });
+
+    result
+}
+
 /// Close a WebTransport session
 #[no_mangle]
 pub extern "C" fn moq_webtransport_close(session_id: u64) -> i32 {
@@ -568,6 +739,7 @@ pub extern "C" fn moq_webtransport_close(session_id: u64) -> i32 {
     let endpoints = WT_ENDPOINTS.get().expect("Endpoints not initialized");
     let recv_buffers = WT_RECV_BUFFERS.get().expect("Receive buffers not initialized");
     let control_streams = WT_CONTROL_STREAMS.get().expect("Control streams not initialized");
+    let data_streams = WT_DATA_STREAMS.get().expect("Data streams not initialized");
 
     let (_, _) = match sessions.remove(&session_id) {
         Some(s) => s,
@@ -588,6 +760,9 @@ pub extern "C" fn moq_webtransport_close(session_id: u64) -> i32 {
     recv_buffers.remove(&session_id);
     control_streams.remove(&session_id);
 
+    // Clean up any data streams for this session
+    data_streams.retain(|(sid, _), _| *sid != session_id);
+
     log::info!("WebTransport session {} closed", session_id);
     0
 }
@@ -599,11 +774,13 @@ pub extern "C" fn moq_webtransport_cleanup() {
     let endpoints = WT_ENDPOINTS.get().expect("Endpoints not initialized");
     let recv_buffers = WT_RECV_BUFFERS.get().expect("Receive buffers not initialized");
     let control_streams = WT_CONTROL_STREAMS.get().expect("Control streams not initialized");
+    let data_streams = WT_DATA_STREAMS.get().expect("Data streams not initialized");
 
     sessions.clear();
     endpoints.clear();
     recv_buffers.clear();
     control_streams.clear();
+    data_streams.clear();
 
     log::info!("MoQ WebTransport cleanup complete");
 }

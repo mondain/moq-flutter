@@ -160,66 +160,27 @@ class PublishNamespaceMessage extends MoQControlMessage {
 /// PUBLISH_NAMESPACE_OK message (0x7)
 ///
 /// Sent by relay in response to successful PUBLISH_NAMESPACE.
+/// Per draft-ietf-moq-transport-14 Section 9.24, this message contains only
+/// the Request ID - no parameters field.
 class PublishNamespaceOkMessage extends MoQControlMessage {
   final Int64 requestId;
-  final List<KeyValuePair> parameters;
 
   PublishNamespaceOkMessage({
     required this.requestId,
-    this.parameters = const [],
   });
 
   @override
   MoQMessageType get type => MoQMessageType.publishNamespaceOk;
 
   @override
-  int get payloadLength {
-    int len = 0;
-    len += MoQWireFormat._varintSize64(requestId);
-    len += MoQWireFormat._varintSize(parameters.length);
-    for (final param in parameters) {
-      len += MoQWireFormat._varintSize(param.type);
-      if (param.value != null) {
-        len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
-      } else {
-        len += MoQWireFormat._varintSize(0);
-      }
-    }
-    return len;
-  }
+  int get payloadLength => MoQWireFormat._varintSize64(requestId);
 
   @override
   Uint8List serialize() {
     final payload = Uint8List(payloadLength);
-    int offset = 0;
-
-    offset += _writeVarint64(payload, offset, requestId);
-    offset += _writeVarint(payload, offset, parameters.length);
-
-    for (final param in parameters) {
-      offset += _writeVarint(payload, offset, param.type);
-      if (param.value != null) {
-        offset += _writeVarint(payload, offset, param.value!.length);
-        payload.setAll(offset, param.value!);
-        offset += param.value!.length;
-      } else {
-        offset += _writeVarint(payload, offset, 0);
-      }
-    }
-
+    final bytes = MoQWireFormat.encodeVarint64(requestId);
+    payload.setAll(0, bytes);
     return _wrapMessage(payload);
-  }
-
-  int _writeVarint(Uint8List buffer, int offset, int value) {
-    final bytes = MoQWireFormat.encodeVarint(value);
-    buffer.setAll(offset, bytes);
-    return bytes.length;
-  }
-
-  int _writeVarint64(Uint8List buffer, int offset, Int64 value) {
-    final bytes = MoQWireFormat.encodeVarint64(value);
-    buffer.setAll(offset, bytes);
-    return bytes.length;
   }
 
   Uint8List _wrapMessage(Uint8List payload) {
@@ -239,35 +200,8 @@ class PublishNamespaceOkMessage extends MoQControlMessage {
   }
 
   static PublishNamespaceOkMessage deserialize(Uint8List data) {
-    int offset = 0;
-
-    final (requestId, len1) = MoQWireFormat.decodeVarint64(data, offset);
-    offset += len1;
-
-    final (numParams, numParamsLen) = MoQWireFormat.decodeVarint(data, offset);
-    offset += numParamsLen;
-
-    final params = <KeyValuePair>[];
-    for (int i = 0; i < numParams; i++) {
-      final (paramType, typeLen) = MoQWireFormat.decodeVarint(data, offset);
-      offset += typeLen;
-
-      Uint8List? value;
-      if (offset < data.length) {
-        final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
-        offset += lengthLen;
-        if (length > 0 && offset + length <= data.length) {
-          value = data.sublist(offset, offset + length);
-          offset += length;
-        }
-      }
-      params.add(KeyValuePair(type: paramType, value: value));
-    }
-
-    return PublishNamespaceOkMessage(
-      requestId: requestId,
-      parameters: params,
-    );
+    final (requestId, _) = MoQWireFormat.decodeVarint64(data, 0);
+    return PublishNamespaceOkMessage(requestId: requestId);
   }
 }
 
