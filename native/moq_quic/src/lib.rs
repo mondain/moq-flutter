@@ -133,6 +133,13 @@ static RECV_BUFFERS: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<ReceiveBuffer>
 // Global registry of stream writers (connection_id -> stream_id -> writer)
 static STREAM_WRITERS: OnceCell<DashMap<(u64, u64), Arc<stream_writer::StreamWriter>>> = OnceCell::new();
 
+// Global registry of incoming data stream buffers (connection_id, stream_id) -> buffer
+// Used for receiving data from unidirectional streams (SUBGROUP_HEADER + objects)
+static DATA_STREAM_BUFFERS: OnceCell<DashMap<(u64, u64), Arc<tokio::sync::Mutex<ReceiveBuffer>>>> = OnceCell::new();
+
+// Global registry of active data streams per connection (connection_id -> list of stream_ids)
+static ACTIVE_DATA_STREAMS: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<Vec<u64>>>>> = OnceCell::new();
+
 // Next connection ID counter
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -196,6 +203,16 @@ pub extern "C" fn moq_quic_init() {
     // Initialize stream writers registry
     if STREAM_WRITERS.set(DashMap::new()).is_err() {
         log::warn!("Stream writers registry already initialized");
+    }
+
+    // Initialize data stream buffers registry
+    if DATA_STREAM_BUFFERS.set(DashMap::new()).is_err() {
+        log::warn!("Data stream buffers registry already initialized");
+    }
+
+    // Initialize active data streams registry
+    if ACTIVE_DATA_STREAMS.set(DashMap::new()).is_err() {
+        log::warn!("Active data streams registry already initialized");
     }
 
     // Initialize last error buffer
@@ -363,6 +380,7 @@ pub extern "C" fn moq_quic_connect(
     let endpoints = ENDPOINTS.get().expect("Endpoint registry not initialized");
     let control_streams = CONTROL_STREAMS.get().expect("Control streams not initialized");
     let recv_buffers = RECV_BUFFERS.get().expect("Receive buffers not initialized");
+    let active_data_streams = ACTIVE_DATA_STREAMS.get().expect("Active data streams not initialized");
 
     let connection_arc = Arc::new(connection);
     let endpoint_arc = Arc::new(endpoint);
@@ -372,6 +390,7 @@ pub extern "C" fn moq_quic_connect(
     endpoints.insert(connection_id, endpoint_arc);
     control_streams.insert(connection_id, Arc::new(tokio::sync::Mutex::new(None)));
     recv_buffers.insert(connection_id, recv_buffer.clone());
+    active_data_streams.insert(connection_id, Arc::new(tokio::sync::Mutex::new(Vec::new())));
 
     // Open bidirectional control stream (required by MoQ spec)
     let connection_for_control = connection_arc.clone();
@@ -420,16 +439,26 @@ pub extern "C" fn moq_quic_connect(
 
     // Start accepting incoming unidirectional streams (data streams)
     let connection_for_streams = connection_arc.clone();
-    let recv_buffer_for_streams = recv_buffer.clone();
     runtime.spawn(async move {
         log::info!("Starting data stream acceptor for connection {}", connection_id);
+        let data_stream_buffers = DATA_STREAM_BUFFERS.get().expect("Data stream buffers not initialized");
+        let active_streams = ACTIVE_DATA_STREAMS.get().expect("Active data streams not initialized");
+
         loop {
             match connection_for_streams.accept_uni().await {
                 Ok(mut recv_stream) => {
                     let stream_id = recv_stream.id().index();
                     log::debug!("Accepted incoming unidirectional stream {} on connection {}", stream_id, connection_id);
 
-                    let recv_buffer_clone = recv_buffer_for_streams.clone();
+                    // Create a buffer for this specific data stream
+                    let stream_buffer = Arc::new(tokio::sync::Mutex::new(ReceiveBuffer::new(MAX_RECV_BUFFER_SIZE)));
+                    data_stream_buffers.insert((connection_id, stream_id), stream_buffer.clone());
+
+                    // Add to active streams list
+                    if let Some(streams_list) = active_streams.get(&connection_id) {
+                        let mut list = streams_list.lock().await;
+                        list.push(stream_id);
+                    }
 
                     // Spawn task to read from this stream
                     tokio::spawn(async move {
@@ -438,14 +467,16 @@ pub extern "C" fn moq_quic_connect(
                             match recv_stream.read(&mut buffer).await {
                                 Ok(None) => {
                                     log::debug!("Data stream {} closed on connection {}", stream_id, connection_id);
+                                    // Note: We don't remove the buffer here - let Dart poll it dry first
+                                    // Dart will call moq_quic_close_data_stream when done
                                     break;
                                 }
                                 Ok(Some(n)) => {
-                                    // Add data to receive buffer
-                                    let mut recv_buf = recv_buffer_clone.lock().await;
+                                    // Add data to this stream's buffer (not the control stream buffer)
+                                    let mut recv_buf = stream_buffer.lock().await;
                                     let pushed = recv_buf.push(&buffer[..n]);
                                     if pushed < n {
-                                        log::warn!("Receive buffer full, dropped {} bytes", n - pushed);
+                                        log::warn!("Data stream {} buffer full, dropped {} bytes", stream_id, n - pushed);
                                     }
                                     log::trace!("Received {} bytes on data stream {} for connection {}", n, stream_id, connection_id);
                                 }
@@ -610,6 +641,8 @@ pub extern "C" fn moq_quic_close(connection_id: u64) -> i32 {
     let endpoints = ENDPOINTS.get().expect("Endpoint registry not initialized");
     let control_streams = CONTROL_STREAMS.get().expect("Control streams not initialized");
     let recv_buffers = RECV_BUFFERS.get().expect("Receive buffers not initialized");
+    let data_stream_buffers = DATA_STREAM_BUFFERS.get().expect("Data stream buffers not initialized");
+    let active_data_streams = ACTIVE_DATA_STREAMS.get().expect("Active data streams not initialized");
 
     let (_, connection) = match connections.remove(&connection_id) {
         Some(conn) => conn,
@@ -634,6 +667,12 @@ pub extern "C" fn moq_quic_close(connection_id: u64) -> i32 {
     // Clean up stream writers for this connection
     let stream_writers = STREAM_WRITERS.get().expect("Stream writers not initialized");
     stream_writers.retain(|key, _| key.0 != connection_id);
+
+    // Clean up data stream buffers for this connection
+    data_stream_buffers.retain(|key, _| key.0 != connection_id);
+
+    // Clean up active data streams list
+    active_data_streams.remove(&connection_id);
 
     let runtime = get_runtime();
 
@@ -693,6 +732,12 @@ pub extern "C" fn moq_quic_cleanup() {
 
     let stream_writers = STREAM_WRITERS.get().expect("Stream writers not initialized");
     stream_writers.clear();
+
+    let data_stream_buffers = DATA_STREAM_BUFFERS.get().expect("Data stream buffers not initialized");
+    data_stream_buffers.clear();
+
+    let active_data_streams = ACTIVE_DATA_STREAMS.get().expect("Active data streams not initialized");
+    active_data_streams.clear();
 
     log::info!("MoQ QUIC transport cleanup complete");
 }
@@ -938,4 +983,134 @@ pub extern "C" fn moq_quic_stream_finish(
             -2
         }
     }
+}
+
+/// Get list of active incoming data streams for a connection
+///
+/// # Arguments
+/// * `connection_id` - The connection ID
+/// * `out_stream_ids` - Output array for stream IDs
+/// * `max_streams` - Maximum number of stream IDs to return
+///
+/// # Returns
+/// * Number of stream IDs written on success, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_quic_get_data_streams(
+    connection_id: u64,
+    out_stream_ids: *mut u64,
+    max_streams: usize,
+) -> i32 {
+    let active_streams = ACTIVE_DATA_STREAMS.get().expect("Active data streams not initialized");
+
+    let streams_list = match active_streams.get(&connection_id) {
+        Some(list) => list.clone(),
+        None => {
+            log::error!("Connection {} not found for get_data_streams", connection_id);
+            return -1;
+        }
+    };
+
+    if out_stream_ids.is_null() || max_streams == 0 {
+        return 0;
+    }
+
+    let runtime = get_runtime();
+
+    let result = runtime.block_on(async {
+        let list = streams_list.lock().await;
+        let count = list.len().min(max_streams);
+
+        unsafe {
+            let output = slice::from_raw_parts_mut(out_stream_ids, count);
+            for (i, &stream_id) in list.iter().take(count).enumerate() {
+                output[i] = stream_id;
+            }
+        }
+
+        count as i32
+    });
+
+    result
+}
+
+/// Receive data from a specific data stream (non-blocking poll)
+///
+/// # Arguments
+/// * `connection_id` - The connection ID
+/// * `stream_id` - The data stream ID
+/// * `buffer` - Pointer to buffer to store received data
+/// * `buffer_len` - Length of buffer
+///
+/// # Returns
+/// * Number of bytes received on success, 0 if no data available, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_quic_recv_data(
+    connection_id: u64,
+    stream_id: u64,
+    buffer: *mut u8,
+    buffer_len: usize,
+) -> i64 {
+    let data_stream_buffers = DATA_STREAM_BUFFERS.get().expect("Data stream buffers not initialized");
+
+    let stream_buffer = match data_stream_buffers.get(&(connection_id, stream_id)) {
+        Some(rb) => rb.clone(),
+        None => {
+            log::trace!("Data stream {} not found for connection {}", stream_id, connection_id);
+            return -1;
+        }
+    };
+
+    if buffer.is_null() || buffer_len == 0 {
+        return 0;
+    }
+
+    let runtime = get_runtime();
+
+    let result = runtime.block_on(async {
+        let mut recv_buf = stream_buffer.lock().await;
+
+        if recv_buf.is_empty() {
+            0
+        } else {
+            let output_buf = unsafe { slice::from_raw_parts_mut(buffer, buffer_len) };
+            let bytes_read = recv_buf.pop(output_buf);
+            bytes_read as i64
+        }
+    });
+
+    result
+}
+
+/// Close and clean up a data stream
+///
+/// Call this after the stream has been fully processed to free resources.
+///
+/// # Arguments
+/// * `connection_id` - The connection ID
+/// * `stream_id` - The data stream ID
+///
+/// # Returns
+/// * 0 on success, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_quic_close_data_stream(
+    connection_id: u64,
+    stream_id: u64,
+) -> i32 {
+    let data_stream_buffers = DATA_STREAM_BUFFERS.get().expect("Data stream buffers not initialized");
+    let active_streams = ACTIVE_DATA_STREAMS.get().expect("Active data streams not initialized");
+
+    // Remove the buffer
+    data_stream_buffers.remove(&(connection_id, stream_id));
+
+    // Remove from active streams list
+    if let Some(streams_list) = active_streams.get(&connection_id) {
+        let runtime = get_runtime();
+        runtime.block_on(async {
+            let mut list = streams_list.lock().await;
+            list.retain(|&id| id != stream_id);
+        });
+    }
+
+    log::debug!("Closed data stream {} for connection {}", stream_id, connection_id);
+    0
 }

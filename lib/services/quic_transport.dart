@@ -19,6 +19,7 @@ class QuicTransport extends MoQTransport {
 
   final _connectionStateController = StreamController<bool>.broadcast();
   final _incomingDataController = StreamController<Uint8List>.broadcast();
+  final _incomingDataStreamController = StreamController<DataStreamChunk>.broadcast();
 
   bool _isConnected = false;
   int _connectionId = -1;
@@ -30,6 +31,9 @@ class QuicTransport extends MoQTransport {
     packetsReceived: 0,
   );
 
+  // Track known data streams to detect new ones
+  final Set<int> _knownDataStreams = {};
+
   // Native function signatures (nullable to support stub mode)
   _InitFunc? _moqQuicInit;
   _ConnectFunc? _moqQuicConnect;
@@ -40,6 +44,9 @@ class QuicTransport extends MoQTransport {
   _StreamFinishFunc? _moqQuicStreamFinish;
   _CloseFunc? _moqQuicClose;
   _CleanupFunc? _moqQuicCleanup;
+  _GetDataStreamsFunc? _moqQuicGetDataStreams;
+  _RecvDataFunc? _moqQuicRecvData;
+  _CloseDataStreamFunc? _moqQuicCloseDataStream;
 
   Timer? _pollTimer;
   bool _nativeLibraryLoaded = false;
@@ -85,6 +92,18 @@ class QuicTransport extends MoQTransport {
           .asFunction();
       _moqQuicCleanup = _nativeLib!
           .lookup<NativeFunction<Void Function()>>('moq_quic_cleanup')
+          .asFunction();
+      _moqQuicGetDataStreams = _nativeLib!
+          .lookup<NativeFunction<NativeInt32 Function(NativeUint64, Pointer<NativeUint64>, NativeIntPtr)>>(
+              'moq_quic_get_data_streams')
+          .asFunction();
+      _moqQuicRecvData = _nativeLib!
+          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
+              'moq_quic_recv_data')
+          .asFunction();
+      _moqQuicCloseDataStream = _nativeLib!
+          .lookup<NativeFunction<NativeInt32 Function(NativeUint64, NativeUint64)>>(
+              'moq_quic_close_data_stream')
           .asFunction();
 
       // Initialize the native library
@@ -239,6 +258,7 @@ class QuicTransport extends MoQTransport {
     }
 
     _isConnected = false;
+    _knownDataStreams.clear();
     _connectionStateController.add(false);
     _logger.i('QUIC connection closed');
   }
@@ -423,6 +443,9 @@ class QuicTransport extends MoQTransport {
   Stream<Uint8List> get incomingData => _incomingDataController.stream;
 
   @override
+  Stream<DataStreamChunk> get incomingDataStreams => _incomingDataStreamController.stream;
+
+  @override
   MoQTransportStats get stats => _stats;
 
   void _startReceiving() {
@@ -431,7 +454,7 @@ class QuicTransport extends MoQTransport {
       if (!isConnected) return;
 
       try {
-        // Buffer to receive data (max 4KB per poll)
+        // Poll control stream
         final buffer = calloc<Uint8>(4096);
         final received = _moqQuicRecv(_connectionId, buffer, 4096);
 
@@ -447,18 +470,79 @@ class QuicTransport extends MoQTransport {
             lastActivity: DateTime.now(),
           );
 
-          // Control stream messages come directly without stream type prefix
-          // Data streams (unidirectional) have stream headers but are also
-          // added to the same receive buffer by the Rust layer
-          _logger.d('Received $received bytes via QUIC');
+          _logger.d('Received $received bytes via QUIC control stream');
           _incomingDataController.add(data);
         }
 
         calloc.free(buffer);
+
+        // Poll data streams
+        _pollDataStreams();
       } catch (e) {
         _logger.e('Receive error: $e');
       }
     });
+  }
+
+  void _pollDataStreams() {
+    if (!_nativeLibraryLoaded || _moqQuicGetDataStreams == null) return;
+
+    try {
+      // Get list of active data streams (up to 64)
+      final streamIdsPtr = calloc<Uint64>(64);
+      final streamCount = _moqQuicGetDataStreams!(_connectionId, streamIdsPtr, 64);
+
+      if (streamCount > 0) {
+        final streamIds = streamIdsPtr.asTypedList(streamCount);
+
+        for (int i = 0; i < streamCount; i++) {
+          final streamId = streamIds[i];
+
+          // Poll this stream for data
+          final buffer = calloc<Uint8>(4096);
+          final received = _moqQuicRecvData!(_connectionId, streamId, buffer, 4096);
+
+          if (received > 0) {
+            final data = Uint8List(received);
+            final nativeData = buffer.asTypedList(received);
+            data.setAll(0, nativeData);
+
+            _stats = _stats.copyWith(
+              bytesReceived: _stats.bytesReceived + received,
+              packetsReceived: _stats.packetsReceived + 1,
+              lastActivity: DateTime.now(),
+            );
+
+            final isNewStream = !_knownDataStreams.contains(streamId);
+            if (isNewStream) {
+              _knownDataStreams.add(streamId);
+              _logger.d('New data stream $streamId detected');
+            }
+
+            _logger.d('Received $received bytes on data stream $streamId');
+            _incomingDataStreamController.add(DataStreamChunk(
+              streamId: streamId,
+              data: data,
+            ));
+          }
+
+          calloc.free(buffer);
+        }
+      }
+
+      calloc.free(streamIdsPtr);
+    } catch (e) {
+      _logger.e('Data stream poll error: $e');
+    }
+  }
+
+  /// Close a data stream after processing is complete
+  void closeDataStream(int streamId) {
+    if (!_nativeLibraryLoaded || _moqQuicCloseDataStream == null) return;
+
+    _moqQuicCloseDataStream!(_connectionId, streamId);
+    _knownDataStreams.remove(streamId);
+    _logger.d('Closed data stream $streamId');
   }
 
   void _stopReceiving() {
@@ -488,6 +572,8 @@ class QuicTransport extends MoQTransport {
     }
     _connectionStateController.close();
     _incomingDataController.close();
+    _incomingDataStreamController.close();
+    _knownDataStreams.clear();
   }
 }
 
@@ -505,3 +591,9 @@ typedef _StreamFinishFunc = int Function(
     int connectionId, int streamId);
 typedef _CloseFunc = int Function(int connectionId);
 typedef _CleanupFunc = void Function();
+typedef _GetDataStreamsFunc = int Function(
+    int connectionId, Pointer<Uint64> outStreamIds, int maxStreams);
+typedef _RecvDataFunc = int Function(
+    int connectionId, int streamId, Pointer<Uint8> buffer, int bufferLen);
+typedef _CloseDataStreamFunc = int Function(
+    int connectionId, int streamId);

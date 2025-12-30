@@ -23,6 +23,7 @@ class WebTransportQuinnTransport extends MoQTransport {
 
   final _connectionStateController = StreamController<bool>.broadcast();
   final _incomingDataController = StreamController<Uint8List>.broadcast();
+  final _incomingDataStreamController = StreamController<DataStreamChunk>.broadcast();
 
   bool _isConnected = false;
   int _sessionId = -1;
@@ -324,6 +325,9 @@ class WebTransportQuinnTransport extends MoQTransport {
   Stream<Uint8List> get incomingData => _incomingDataController.stream;
 
   @override
+  Stream<DataStreamChunk> get incomingDataStreams => _incomingDataStreamController.stream;
+
+  @override
   MoQTransportStats get stats => _stats;
 
   void _startReceiving() {
@@ -380,6 +384,7 @@ class WebTransportQuinnTransport extends MoQTransport {
     }
     _connectionStateController.close();
     _incomingDataController.close();
+    _incomingDataStreamController.close();
   }
 }
 

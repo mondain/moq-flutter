@@ -1,6 +1,24 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+/// Event for incoming data stream chunk
+class DataStreamChunk {
+  /// The stream ID this chunk belongs to
+  final int streamId;
+
+  /// The data received
+  final Uint8List data;
+
+  /// Whether the stream has completed (FIN received)
+  final bool isComplete;
+
+  DataStreamChunk({
+    required this.streamId,
+    required this.data,
+    this.isComplete = false,
+  });
+}
+
 /// Abstract transport layer for MoQ over QUIC
 abstract class MoQTransport {
   /// Connection state
@@ -30,8 +48,13 @@ abstract class MoQTransport {
   /// Finish/close an open stream
   Future<void> streamFinish(int streamId);
 
-  /// Stream of incoming data
+  /// Stream of incoming control data (bidirectional control stream)
   Stream<Uint8List> get incomingData;
+
+  /// Stream of incoming data stream chunks (unidirectional data streams)
+  /// Each chunk contains the stream ID and data for that stream.
+  /// Used for receiving SUBGROUP_HEADER and object data.
+  Stream<DataStreamChunk> get incomingDataStreams;
 
   /// Get the underlying transport statistics
   MoQTransportStats get stats;
