@@ -16,6 +16,8 @@ lib/
 │   │   ├── camera_capture.dart    # Camera capture abstraction
 │   │   ├── linux_capture.dart     # Linux V4L2/FFmpeg video capture
 │   │   ├── video_encoder.dart     # H.264 video encoder (FFmpeg)
+│   │   ├── media_encoder.dart     # Combined audio/video encoder
+│   │   ├── native_capture_channel.dart  # Platform channel for native capture
 │   │   └── fmp4/                  # CMAF/fMP4 packaging
 │   ├── publisher/                # Publishing support
 │   │   ├── cmaf_publisher.dart    # CMAF/fMP4 publisher
@@ -25,7 +27,9 @@ lib/
 │   │   ├── moq_wire_format.dart  # Varint encoding/decoding
 │   │   ├── moq_messages_control.dart      # Control messages
 │   │   ├── moq_messages_control_extra.dart # Additional control messages
-│   │   └── moq_messages_data.dart         # Data messages (objects)
+│   │   ├── moq_messages_data.dart         # Data messages (objects)
+│   │   ├── moq_messages_publish.dart      # Publish-related messages
+│   │   └── moq_data_parser.dart           # Data stream parser
 │   └── transport/                # Transport layer abstraction
 │       └── moq_transport.dart    # MoQ transport interface
 ├── media/                        # Media playback
@@ -35,7 +39,10 @@ lib/
 ├── providers/                    # Riverpod state providers
 │   └── moq_providers.dart
 ├── screens/                      # UI screens
-│   └── moq_home_screen.dart
+│   ├── connection_screen.dart    # Server connection UI
+│   ├── publisher_screen.dart     # Media publishing UI
+│   ├── viewer_screen.dart        # Media playback UI
+│   └── settings_screen.dart      # Application settings
 ├── services/                     # Platform-specific services
 │   └── quic_transport.dart       # QUIC transport via FFI
 ├── transport/                    # Transport layer abstraction
@@ -253,6 +260,11 @@ The application supports publishing live audio and video with platform-specific 
 - **CMAF/fMP4**: CARP-compliant fragmented MP4 packaging
 - **LOC**: Raw codec data packaging (H.264 NALUs, Opus frames)
 
+### Publisher Controls
+
+- **Video Mute**: Toggle video track on/off during publishing
+- **Audio Mute**: Toggle audio track on/off during publishing
+
 ## Current Status
 
 Draft-14 implementation with:
@@ -277,11 +289,13 @@ Draft-14 implementation with:
 - Data stream handling with SUBGROUP_HEADER parser and transport separation
 - Namespace discovery with SUBSCRIBE_NAMESPACE/UNSUBSCRIBE_NAMESPACE support
 - FETCH client API for past objects (standalone and joining fetches)
-- Comprehensive test coverage for wire format (44 tests passing)
+- Video/audio mute controls for publishers
+- Multi-screen responsive layout
+- Comprehensive test coverage for protocol and client
 
 ### Test Coverage
 
-- **Wire Format Tests**: 44/44 passing
+- **Wire Format Tests**
   - Varint encoding/decoding (32-bit and 64-bit)
   - Tuple encoding/decoding
   - Location encoding/decoding
@@ -289,7 +303,7 @@ Draft-14 implementation with:
 
 - **Control Message Tests**: Round-trip serialization for all control messages
 - **Data Message Tests**: Object datagram, subgroup header, subgroup object
-- **Client Integration Tests**: 22/22 passing
+- **Client Integration Tests**
   - Connection flow (CLIENT_SETUP/SERVER_SETUP handshake, timeout, disconnect)
   - Subscription flow (SUBSCRIBE/SUBSCRIBE_OK/SUBSCRIBE_ERROR, unsubscribe)
   - FETCH flow (standalone fetch, FETCH_OK/FETCH_ERROR, cancel)

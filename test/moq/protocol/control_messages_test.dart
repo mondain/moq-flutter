@@ -254,7 +254,7 @@ void main() {
         ],
         trackName: Uint8List.fromList([118, 105, 100, 101, 111]), // 'video'
         subscriberPriority: 200,
-        groupOrder: GroupOrder.asc,
+        groupOrder: GroupOrder.ascending,
         forward: 0,
         filterType: FilterType.absoluteRange,
         startLocation: Location(group: Int64(100), object: Int64(50)),
@@ -288,7 +288,7 @@ void main() {
         requestId: Int64(1),
         trackAlias: Int64(10),
         expires: Int64(60),
-        groupOrder: GroupOrder.asc,
+        groupOrder: GroupOrder.ascending,
         contentExists: 1,
       );
       final serialized = message.serialize();
@@ -315,7 +315,7 @@ void main() {
       expect(message.requestId, equals(Int64(1)));
       expect(message.trackAlias, equals(Int64(10)));
       expect(message.expires, equals(Int64(60)));
-      expect(message.groupOrder, equals(GroupOrder.asc));
+      expect(message.groupOrder, equals(GroupOrder.ascending));
       expect(message.contentExists, equals(1));
     });
 
@@ -324,7 +324,7 @@ void main() {
         requestId: Int64(1),
         trackAlias: Int64(10),
         expires: Int64(60),
-        groupOrder: GroupOrder.asc,
+        groupOrder: GroupOrder.ascending,
         contentExists: 1,
         largestLocation: Location(group: Int64(100), object: Int64(50)),
       );
@@ -340,7 +340,7 @@ void main() {
         requestId: Int64(5),
         trackAlias: Int64(20),
         expires: Int64(120),
-        groupOrder: GroupOrder.desc,
+        groupOrder: GroupOrder.descending,
         contentExists: 1,
         largestLocation: Location(group: Int64(500), object: Int64(250)),
         parameters: [

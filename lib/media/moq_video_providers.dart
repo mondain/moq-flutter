@@ -56,17 +56,22 @@ class VideoPlayerState {
 }
 
 /// Video player state notifier
-class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
-  final MoQClient _client;
-  final Logger _logger;
+class VideoPlayerNotifier extends Notifier<VideoPlayerState> {
+  late final MoQClient _client;
+  late final Logger _logger;
 
   MoQStreamPlayer? _streamPlayer;
   StreamSubscription? _positionSubscription;
 
-  VideoPlayerNotifier({required MoQClient client, required Logger logger})
-      : _client = client,
-        _logger = logger,
-        super(const VideoPlayerState());
+  @override
+  VideoPlayerState build() {
+    _client = ref.read(moqClientProvider);
+    _logger = ref.read(loggerProvider);
+    ref.onDispose(() {
+      _cleanup();
+    });
+    return const VideoPlayerState();
+  }
 
   /// Subscribe to a track and start video playback
   Future<void> subscribeAndPlay(
@@ -123,13 +128,11 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
       const Duration(milliseconds: 100),
       (_) => player,
     ).listen((player) {
-      if (mounted) {
-        state = state.copyWith(
-          position: player.position,
-          duration: player.duration,
-          isPlaying: player.isPlaying,
-        );
-      }
+      state = state.copyWith(
+        position: player.position,
+        duration: player.duration,
+        isPlaying: player.isPlaying,
+      );
     });
   }
 
@@ -171,35 +174,23 @@ class VideoPlayerNotifier extends StateNotifier<VideoPlayerState> {
 
   /// Stop playback
   Future<void> stop() async {
+    await _cleanup();
+    state = const VideoPlayerState();
+  }
+
+  Future<void> _cleanup() async {
     await _streamPlayer?.stop();
     await _positionSubscription?.cancel();
     _streamPlayer = null;
     _positionSubscription = null;
-
-    state = const VideoPlayerState();
-  }
-
-  @override
-  void dispose() {
-    stop();
-    super.dispose();
   }
 }
 
 /// Video player provider
 final videoPlayerProvider =
-    StateNotifierProvider<VideoPlayerNotifier, VideoPlayerState>((ref) {
-  final client = ref.watch(moqClientProvider);
-  final logger = ref.watch(loggerProvider);
-
-  final notifier = VideoPlayerNotifier(client: client, logger: logger);
-
-  ref.onDispose(() {
-    notifier.dispose();
-  });
-
-  return notifier;
-});
+    NotifierProvider<VideoPlayerNotifier, VideoPlayerState>(
+  VideoPlayerNotifier.new,
+);
 
 /// Current video player state
 final currentPlayerState = Provider<VideoPlayerState>((ref) {
