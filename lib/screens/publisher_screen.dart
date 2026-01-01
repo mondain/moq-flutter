@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io' show Platform;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:camera/camera.dart' show ResolutionPreset;
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -13,6 +15,8 @@ import '../moq/media/camera_capture.dart';
 import '../moq/media/linux_capture.dart';
 import '../moq/media/video_encoder.dart';
 import '../moq/publisher/cmaf_publisher.dart';
+import '../moq/publisher/moq_publisher.dart';
+import '../moq/publisher/moq_mi_publisher.dart';
 import '../providers/moq_providers.dart';
 import '../widgets/connection_status_card.dart';
 import '../widgets/video_preview.dart';
@@ -37,7 +41,11 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   final _logger = Logger();
 
   // Publishing state
+  PackagingFormat _packagingFormat = PackagingFormat.moqMi;
+  VideoResolution _resolution = VideoResolution.r720p;
   CmafPublisher? _cmafPublisher;
+  MoQPublisher? _locPublisher;
+  MoqMiPublisher? _moqMiPublisher;
   bool _isPublishing = false;
   bool _isAudioMuted = false;
   bool _isVideoMuted = false;
@@ -83,69 +91,110 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
     _isPublishing = true;
     _publishedFrames = 0;
     _publishedAudioFrames = 0;
+    _packagingFormat = ref.read(packagingFormatProvider);
+    _resolution = ref.read(videoResolutionProvider);
     if (mounted) setState(() {});
 
     try {
       final client = ref.read(moqClientProvider);
 
-      // Create CMAF publisher
-      _cmafPublisher = CmafPublisher(client: client, logger: _logger);
+      _setStatus('Using ${_packagingFormat.label} packaging...');
 
-      // Configure tracks BEFORE announce (with capture parameters)
-      // This allows catalog to be published with track info immediately after PUBLISH_NAMESPACE_OK
-      _setStatus('Configuring tracks...');
-      const videoTrackName = '1.m4s';
-      const audioTrackName = '2.m4s';
+      // Track names vary by format
+      String videoTrackName;
+      String audioTrackName;
 
-      _cmafPublisher!.configureVideoTrack(
-        videoTrackName,
-        width: 1280,
-        height: 720,
-        frameRate: 30,
-        timescale: 90000,
-        priority: 128,
-        trackId: 1,
-      );
+      switch (_packagingFormat) {
+        case PackagingFormat.cmaf:
+          // Create CMAF publisher
+          _cmafPublisher = CmafPublisher(client: client, logger: _logger);
+          videoTrackName = '1.m4s';
+          audioTrackName = '2.m4s';
 
-      _cmafPublisher!.configureAudioTrack(
-        audioTrackName,
-        sampleRate: 48000,
-        channels: 2,
-        bitrate: 128000,
-        frameDurationMs: 20,
-        priority: 200,
-        trackId: 2,
-      );
+          _cmafPublisher!.configureVideoTrack(
+            videoTrackName,
+            width: _resolution.width,
+            height: _resolution.height,
+            frameRate: 30,
+            timescale: 90000,
+            priority: 128,
+            trackId: 1,
+          );
 
-      // Announce namespace - catalog is published immediately after PUBLISH_NAMESPACE_OK
-      // Subscribe handler starts automatically
-      _setStatus('Announcing namespace...');
-      await _cmafPublisher!.announce([widget.namespace], initTrackName: '0.mp4');
+          _cmafPublisher!.configureAudioTrack(
+            audioTrackName,
+            sampleRate: 48000,
+            channels: 2,
+            bitrate: 128000,
+            frameDurationMs: 20,
+            priority: 200,
+            trackId: 2,
+          );
 
-      _setStatus('Catalog published, awaiting subscriptions...');
+          _setStatus('Announcing namespace...');
+          await _cmafPublisher!.announce([widget.namespace], initTrackName: '0.mp4');
+          _setStatus('Catalog published, awaiting subscriptions...');
 
-      // Add actual tracks (creates muxers for encoding)
-      await _cmafPublisher!.addVideoTrack(
-        videoTrackName,
-        width: 1280,
-        height: 720,
-        frameRate: 30,
-        timescale: 90000,
-        priority: 128,
-        trackId: 1,
-      );
+          await _cmafPublisher!.addVideoTrack(
+            videoTrackName,
+            width: _resolution.width,
+            height: _resolution.height,
+            frameRate: 30,
+            timescale: 90000,
+            priority: 128,
+            trackId: 1,
+          );
 
-      await _cmafPublisher!.addAudioTrack(
-        audioTrackName,
-        sampleRate: 48000,
-        channels: 2,
-        bitrate: 128000,
-        frameDurationMs: 20,
-        priority: 200,
-        trackId: 2,
-      );
+          await _cmafPublisher!.addAudioTrack(
+            audioTrackName,
+            sampleRate: 48000,
+            channels: 2,
+            bitrate: 128000,
+            frameDurationMs: 20,
+            priority: 200,
+            trackId: 2,
+          );
 
-      await _cmafPublisher!.setAudioReady(audioTrackName);
+          await _cmafPublisher!.setAudioReady(audioTrackName);
+
+        case PackagingFormat.loc:
+          // Create LOC publisher
+          _locPublisher = MoQPublisher(client: client, logger: _logger);
+          videoTrackName = 'video';
+          audioTrackName = 'audio';
+
+          _setStatus('Announcing namespace...');
+          await _locPublisher!.announce([widget.namespace]);
+          _setStatus('Catalog published, awaiting subscriptions...');
+
+          await _locPublisher!.addVideoTrack(
+            videoTrackName,
+            priority: 128,
+            codec: 'avc1.42001f',
+            width: _resolution.width,
+            height: _resolution.height,
+            framerate: 30,
+            bitrate: _resolution.bitrateBps,
+          );
+
+          await _locPublisher!.addAudioTrack(
+            audioTrackName,
+            priority: 200,
+            codec: 'opus',
+            samplerate: 48000,
+            channelConfig: 'stereo',
+          );
+
+        case PackagingFormat.moqMi:
+          // Create MoQ-MI publisher
+          _moqMiPublisher = MoqMiPublisher(client: client, logger: _logger);
+          videoTrackName = _moqMiPublisher!.videoTrackName;
+          audioTrackName = _moqMiPublisher!.audioTrackName;
+
+          _setStatus('Announcing namespace...');
+          await _moqMiPublisher!.announce([widget.namespace], widget.trackName);
+          _setStatus('Namespace announced, ready for subscriptions...');
+      }
 
       _setStatus('Initializing capture...');
 
@@ -195,13 +244,13 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
         _videoCapture = cameraCapture;
       }
 
-      // Create H.264 encoder
+      // Create H.264 encoder with selected resolution and bitrate
       _h264Encoder = H264Encoder(
-        config: const H264EncoderConfig(
-          width: 1280,
-          height: 720,
+        config: H264EncoderConfig(
+          width: _resolution.width,
+          height: _resolution.height,
           frameRate: 30,
-          bitrate: 2000000,
+          bitrate: _resolution.bitrateBps,
           gopSize: 30,
           profile: 'baseline',
           preset: 'ultrafast',
@@ -218,14 +267,39 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
       // Subscribe to encoded frames
       _h264FrameSubscription = _h264Encoder!.frames.listen((h264Frame) async {
-        if (!_isPublishing || _cmafPublisher == null || _isVideoMuted) return;
+        if (!_isPublishing || _isVideoMuted) return;
 
         try {
-          await _cmafPublisher!.publishVideoFrame(
-            videoTrackName,
-            h264Frame.data,
-            isKeyframe: h264Frame.isKeyframe,
-          );
+          switch (_packagingFormat) {
+            case PackagingFormat.cmaf:
+              if (_cmafPublisher == null) return;
+              await _cmafPublisher!.publishVideoFrame(
+                videoTrackName,
+                h264Frame.data,
+                isKeyframe: h264Frame.isKeyframe,
+              );
+
+            case PackagingFormat.loc:
+              if (_locPublisher == null) return;
+              await _locPublisher!.publishFrame(
+                videoTrackName,
+                h264Frame.data,
+                newGroup: h264Frame.isKeyframe,
+              );
+
+            case PackagingFormat.moqMi:
+              if (_moqMiPublisher == null) return;
+              // Convert ms to microseconds for moq-mi
+              final ptsUs = Int64(h264Frame.timestampMs) * Int64(1000);
+              // Build AVC decoder config for keyframes
+              final avcConfig = h264Frame.isKeyframe ? _buildAvcDecoderConfig() : null;
+              await _moqMiPublisher!.publishVideoFrame(
+                payload: h264Frame.data,
+                pts: ptsUs,
+                isKeyframe: h264Frame.isKeyframe,
+                avcDecoderConfig: avcConfig,
+              );
+          }
 
           _publishedFrames++;
           if (_publishedFrames % 30 == 0 && mounted) {
@@ -290,10 +364,34 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
     });
 
     _opusFrameSubscription = _opusEncoder!.frames.listen((opusFrame) async {
-      if (!_isPublishing || _cmafPublisher == null || _isAudioMuted) return;
+      if (!_isPublishing || _isAudioMuted) return;
 
       try {
-        await _cmafPublisher!.publishAudioFrame(audioTrackName, opusFrame.data);
+        switch (_packagingFormat) {
+          case PackagingFormat.cmaf:
+            if (_cmafPublisher == null) return;
+            await _cmafPublisher!.publishAudioFrame(audioTrackName, opusFrame.data);
+
+          case PackagingFormat.loc:
+            if (_locPublisher == null) return;
+            await _locPublisher!.publishFrame(
+              audioTrackName,
+              opusFrame.data,
+              newGroup: true, // Audio: new group per frame
+            );
+
+          case PackagingFormat.moqMi:
+            if (_moqMiPublisher == null) return;
+            // Convert ms to microseconds for moq-mi
+            final ptsUs = Int64(opusFrame.timestampMs) * Int64(1000);
+            await _moqMiPublisher!.publishOpusFrame(
+              payload: opusFrame.data,
+              pts: ptsUs,
+              sampleRate: 48000,
+              numChannels: 2,
+            );
+        }
+
         _publishedAudioFrames++;
 
         if (_publishedAudioFrames % 50 == 0 && mounted) {
@@ -354,10 +452,18 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
       _opusEncoder = null;
     }
 
-    // Stop publisher
+    // Stop publisher (whichever is active)
     if (_cmafPublisher != null) {
       await _cmafPublisher!.stop();
       _cmafPublisher = null;
+    }
+    if (_locPublisher != null) {
+      await _locPublisher!.stop();
+      _locPublisher = null;
+    }
+    if (_moqMiPublisher != null) {
+      await _moqMiPublisher!.stop();
+      _moqMiPublisher = null;
     }
   }
 
@@ -455,9 +561,11 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
                           ),
                           SizedBox(height: 1.h),
                           _buildInfoRow('Namespace', widget.namespace),
-                          _buildInfoRow('Video Track', '1.m4s'),
-                          _buildInfoRow('Audio Track', '2.m4s'),
-                          _buildInfoRow('Resolution', '1280x720 @ 30fps'),
+                          _buildInfoRow('Packaging', _packagingFormat.label),
+                          _buildInfoRow('Video Track', _getVideoTrackName()),
+                          _buildInfoRow('Audio Track', _getAudioTrackName()),
+                          _buildInfoRow('Resolution', '${_resolution.description} @ 30fps'),
+                          _buildInfoRow('Bitrate', _resolution.bitrateLabel),
                           _buildInfoRow('Audio', '48kHz stereo Opus'),
                         ],
                       ),
@@ -470,6 +578,64 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
         ),
       ),
     );
+  }
+
+  /// Build AVCDecoderConfigurationRecord from SPS and PPS NAL units
+  /// Format per ISO 14496-15
+  Uint8List? _buildAvcDecoderConfig() {
+    final sps = _h264Encoder?.spsData;
+    final pps = _h264Encoder?.ppsData;
+    if (sps == null || pps == null || sps.length < 4) return null;
+
+    final builder = BytesBuilder();
+    // configurationVersion
+    builder.addByte(1);
+    // AVCProfileIndication (from SPS byte 1)
+    builder.addByte(sps[1]);
+    // profile_compatibility (from SPS byte 2)
+    builder.addByte(sps[2]);
+    // AVCLevelIndication (from SPS byte 3)
+    builder.addByte(sps[3]);
+    // lengthSizeMinusOne = 3 (4-byte NAL length) with reserved bits = 0xFF
+    builder.addByte(0xFF);
+    // numOfSequenceParameterSets = 1 with reserved bits = 0xE1
+    builder.addByte(0xE1);
+    // sequenceParameterSetLength (2 bytes, big-endian)
+    builder.addByte((sps.length >> 8) & 0xFF);
+    builder.addByte(sps.length & 0xFF);
+    // SPS NAL unit
+    builder.add(sps);
+    // numOfPictureParameterSets = 1
+    builder.addByte(1);
+    // pictureParameterSetLength (2 bytes, big-endian)
+    builder.addByte((pps.length >> 8) & 0xFF);
+    builder.addByte(pps.length & 0xFF);
+    // PPS NAL unit
+    builder.add(pps);
+
+    return builder.toBytes();
+  }
+
+  String _getVideoTrackName() {
+    switch (_packagingFormat) {
+      case PackagingFormat.cmaf:
+        return '1.m4s';
+      case PackagingFormat.loc:
+        return 'video';
+      case PackagingFormat.moqMi:
+        return _moqMiPublisher?.videoTrackName ?? '${widget.trackName}video0';
+    }
+  }
+
+  String _getAudioTrackName() {
+    switch (_packagingFormat) {
+      case PackagingFormat.cmaf:
+        return '2.m4s';
+      case PackagingFormat.loc:
+        return 'audio';
+      case PackagingFormat.moqMi:
+        return _moqMiPublisher?.audioTrackName ?? '${widget.trackName}audio0';
+    }
   }
 
   Widget _buildInfoRow(String label, String value) {

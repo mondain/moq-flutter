@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../providers/moq_providers.dart';
 
 /// Settings screen for app configuration
 class SettingsScreen extends ConsumerWidget {
@@ -45,34 +46,49 @@ class SettingsScreen extends ConsumerWidget {
           const Divider(),
 
           // Video Quality section
-          _buildSectionHeader(context, 'Video Quality'),
-          ListTile(
-            leading: const Icon(Icons.high_quality),
-            title: const Text('Resolution'),
-            subtitle: const Text('720p (1280x720)'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              // TODO: Show resolution picker
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.speed),
-            title: const Text('Bitrate'),
-            subtitle: const Text('2 Mbps'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              // TODO: Show bitrate picker
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.timer),
-            title: const Text('Frame Rate'),
-            subtitle: const Text('30 fps'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              // TODO: Show frame rate picker
-            },
-          ),
+          _buildSectionHeader(context, 'Video Resolution'),
+          ...VideoResolution.values.map((resolution) {
+            final currentResolution = ref.watch(videoResolutionProvider);
+            final isSelected = currentResolution == resolution;
+            return RadioListTile<VideoResolution>(
+              value: resolution,
+              groupValue: currentResolution,
+              onChanged: (value) {
+                if (value != null) {
+                  ref.read(videoResolutionProvider.notifier).setResolution(value);
+                }
+              },
+              title: Text(resolution.label),
+              subtitle: Text('${resolution.description} @ ${resolution.bitrateLabel}'),
+              secondary: Icon(
+                isSelected ? Icons.check_circle : Icons.circle_outlined,
+                color: isSelected ? Theme.of(context).colorScheme.primary : null,
+              ),
+            );
+          }),
+          const Divider(),
+
+          // Packaging Format section
+          _buildSectionHeader(context, 'Packaging Format'),
+          ...PackagingFormat.values.map((format) {
+            final currentFormat = ref.watch(packagingFormatProvider);
+            final isSelected = currentFormat == format;
+            return RadioListTile<PackagingFormat>(
+              value: format,
+              groupValue: currentFormat,
+              onChanged: (value) {
+                if (value != null) {
+                  ref.read(packagingFormatProvider.notifier).setPackagingFormat(value);
+                }
+              },
+              title: Text(format.label),
+              subtitle: Text(format.description),
+              secondary: Icon(
+                isSelected ? Icons.check_circle : Icons.circle_outlined,
+                color: isSelected ? Theme.of(context).colorScheme.primary : null,
+              ),
+            );
+          }),
           const Divider(),
 
           // About section

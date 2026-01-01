@@ -19,9 +19,12 @@ lib/
 │   │   ├── media_encoder.dart     # Combined audio/video encoder
 │   │   ├── native_capture_channel.dart  # Platform channel for native capture
 │   │   └── fmp4/                  # CMAF/fMP4 packaging
+│   ├── packager/                 # Media packaging formats
+│   │   └── moq_mi_packager.dart   # MoQ Media Interop (moq-mi) packager
 │   ├── publisher/                # Publishing support
 │   │   ├── cmaf_publisher.dart    # CMAF/fMP4 publisher
-│   │   └── moq_publisher.dart     # LOC publisher
+│   │   ├── moq_publisher.dart     # LOC publisher
+│   │   └── moq_mi_publisher.dart  # MoQ-MI publisher (LOC with extension headers)
 │   ├── protocol/                 # Protocol messages and types
 │   │   ├── moq_messages.dart     # Core message types and enums
 │   │   ├── moq_wire_format.dart  # Varint encoding/decoding
@@ -255,10 +258,15 @@ The application supports publishing live audio and video with platform-specific 
 - **Video**: H.264 encoding via FFmpeg (baseline profile, ultrafast preset)
 - **Audio**: Opus encoding via FFmpeg (48kHz stereo, 128kbps)
 
-### Packaging
+### Packaging Formats
 
 - **CMAF/fMP4**: CARP-compliant fragmented MP4 packaging
 - **LOC**: Raw codec data packaging (H.264 NALUs, Opus frames)
+- **MoQ-MI**: Media Interop format per [draft-cenzano-moq-media-interop-03](https://datatracker.ietf.org/doc/draft-cenzano-moq-media-interop/)
+  - LOC-based packaging with extension headers for metadata
+  - Video: H.264 AVCC format with PTS/DTS/duration/wallclock metadata
+  - Audio: Opus or AAC-LC with PTS/samplerate/channels metadata
+  - Track naming: `{prefix}audio0`, `{prefix}video0`
 
 ### Publisher Controls
 
@@ -281,7 +289,7 @@ Draft-14 implementation with:
 - Video player integration with media_kit
 - State management with Riverpod
 - Platform-specific media capture (Linux, Android, iOS, macOS, Windows)
-- CMAF/fMP4 packaging for MoQ publishing
+- CMAF/fMP4 and MoQ-MI packaging for MoQ publishing
 - Server-side PUBLISH/PUBLISH_OK/PUBLISH_ERROR handling for receiving publish requests
 - Publisher-side SUBSCRIBE/SUBSCRIBE_OK/SUBSCRIBE_ERROR handling for relay subscriptions
 - GOAWAY message handling with migration URI support

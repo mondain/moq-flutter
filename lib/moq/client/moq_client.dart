@@ -704,6 +704,99 @@ class MoQClient {
     _logger.d('Wrote object $objectId (${payload.length} bytes) to stream $streamId');
   }
 
+  /// Write subgroup header with extension headers to a stream
+  ///
+  /// This is used for moq-mi and other LOC-based packaging formats
+  /// that carry metadata in extension headers.
+  Future<void> writeSubgroupHeaderWithExtensions(
+    int streamId, {
+    required Int64 trackAlias,
+    required Int64 groupId,
+    required Int64 subgroupId,
+    required int publisherPriority,
+    required List<KeyValuePair> extensionHeaders,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    final header = SubgroupHeaderMessage(
+      trackAlias: trackAlias,
+      groupId: groupId,
+      subgroupId: subgroupId,
+      publisherPriority: publisherPriority,
+      extensionHeaders: extensionHeaders,
+    );
+
+    await _transport.streamWrite(streamId, header.serialize());
+    _logger.d('Wrote subgroup header with ${extensionHeaders.length} extension headers to stream $streamId');
+  }
+
+  /// Write a media object with extension headers to a stream
+  ///
+  /// This is used for moq-mi and other LOC-based packaging formats
+  /// that carry per-object metadata in extension headers.
+  Future<void> writeObjectWithExtensions(
+    int streamId, {
+    required Int64 objectId,
+    required Uint8List payload,
+    ObjectStatus status = ObjectStatus.normal,
+    required List<KeyValuePair> extensionHeaders,
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    // Build object with extension headers
+    // Format: object_id (varint) + object_status (varint) + num_headers (varint) + headers + payload
+    final objectIdBytes = MoQWireFormat.encodeVarint64(objectId);
+    final statusBytes = MoQWireFormat.encodeVarint(status.value);
+    final numHeadersBytes = MoQWireFormat.encodeVarint(extensionHeaders.length);
+
+    // Calculate extension headers size
+    int extensionSize = 0;
+    final headerParts = <Uint8List>[];
+    for (final header in extensionHeaders) {
+      final typeBytes = MoQWireFormat.encodeVarint(header.type);
+      headerParts.add(typeBytes);
+      extensionSize += typeBytes.length;
+      if (header.value != null) {
+        final lenBytes = MoQWireFormat.encodeVarint(header.value!.length);
+        headerParts.add(lenBytes);
+        headerParts.add(header.value!);
+        extensionSize += lenBytes.length + header.value!.length;
+      } else {
+        final lenBytes = MoQWireFormat.encodeVarint(0);
+        headerParts.add(lenBytes);
+        extensionSize += lenBytes.length;
+      }
+    }
+
+    final data = Uint8List(
+      objectIdBytes.length +
+      statusBytes.length +
+      numHeadersBytes.length +
+      extensionSize +
+      payload.length
+    );
+
+    int offset = 0;
+    data.setAll(offset, objectIdBytes);
+    offset += objectIdBytes.length;
+    data.setAll(offset, statusBytes);
+    offset += statusBytes.length;
+    data.setAll(offset, numHeadersBytes);
+    offset += numHeadersBytes.length;
+    for (final part in headerParts) {
+      data.setAll(offset, part);
+      offset += part.length;
+    }
+    data.setAll(offset, payload);
+
+    await _transport.streamWrite(streamId, data);
+    _logger.d('Wrote object $objectId with ${extensionHeaders.length} extension headers (${payload.length} bytes) to stream $streamId');
+  }
+
   /// Finish a data stream
   Future<void> finishDataStream(int streamId) async {
     if (!_isConnected) {
@@ -1692,18 +1785,22 @@ class GoawayEvent {
 ///   Group ID (i),
 ///   Subgroup ID (i),
 ///   Publisher Priority (8),
+///   [Number of Extension Headers (i),
+///   Extension Headers (..) ...,]
 /// }
 class SubgroupHeaderMessage {
   final Int64 trackAlias;
   final Int64 groupId;
   final Int64 subgroupId;
   final int publisherPriority;
+  final List<KeyValuePair> extensionHeaders;
 
   SubgroupHeaderMessage({
     required this.trackAlias,
     required this.groupId,
     required this.subgroupId,
     required this.publisherPriority,
+    this.extensionHeaders = const [],
   });
 
   Uint8List serialize() {
@@ -1711,14 +1808,35 @@ class SubgroupHeaderMessage {
     final groupIdBytes = MoQWireFormat.encodeVarint64(groupId);
     final subgroupIdBytes = MoQWireFormat.encodeVarint64(subgroupId);
 
-    // Stream type (0x10) + track alias + group id + subgroup id + priority (1 byte)
+    // Calculate extension headers size
+    final numHeadersBytes = MoQWireFormat.encodeVarint(extensionHeaders.length);
+    int extensionSize = numHeadersBytes.length;
+    final headerParts = <Uint8List>[];
+    for (final header in extensionHeaders) {
+      final typeBytes = MoQWireFormat.encodeVarint(header.type);
+      headerParts.add(typeBytes);
+      extensionSize += typeBytes.length;
+      if (header.value != null) {
+        final lenBytes = MoQWireFormat.encodeVarint(header.value!.length);
+        headerParts.add(lenBytes);
+        headerParts.add(header.value!);
+        extensionSize += lenBytes.length + header.value!.length;
+      } else {
+        final lenBytes = MoQWireFormat.encodeVarint(0);
+        headerParts.add(lenBytes);
+        extensionSize += lenBytes.length;
+      }
+    }
+
+    // Stream type (0x10) + track alias + group id + subgroup id + priority (1 byte) + extension headers
     final streamType = MoQWireFormat.encodeVarint(0x10);
     final buffer = Uint8List(
       streamType.length +
       trackAliasBytes.length +
       groupIdBytes.length +
       subgroupIdBytes.length +
-      1
+      1 +
+      extensionSize
     );
 
     int offset = 0;
@@ -1731,6 +1849,15 @@ class SubgroupHeaderMessage {
     buffer.setAll(offset, subgroupIdBytes);
     offset += subgroupIdBytes.length;
     buffer[offset] = publisherPriority & 0xFF;
+    offset += 1;
+
+    // Write extension headers
+    buffer.setAll(offset, numHeadersBytes);
+    offset += numHeadersBytes.length;
+    for (final part in headerParts) {
+      buffer.setAll(offset, part);
+      offset += part.length;
+    }
 
     return buffer;
   }
