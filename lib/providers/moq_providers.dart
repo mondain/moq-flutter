@@ -4,7 +4,13 @@ import 'package:logger/logger.dart';
 import '../moq/client/moq_client.dart';
 import '../moq/transport/moq_transport.dart';
 import '../services/quic_transport.dart';
+import '../services/settings_service.dart';
 import '../services/webtransport_quinn_transport.dart';
+
+/// Settings service provider (must be overridden at startup)
+final settingsServiceProvider = Provider<SettingsService>((ref) {
+  throw UnimplementedError('settingsServiceProvider must be overridden');
+});
 
 /// Transport type enum
 enum TransportType {
@@ -63,9 +69,15 @@ final loggerProvider = Provider<Logger>((ref) {
 /// Transport type provider (defaults to moqt)
 class TransportTypeNotifier extends Notifier<TransportType> {
   @override
-  TransportType build() => TransportType.moqt;
+  TransportType build() {
+    final settings = ref.watch(settingsServiceProvider);
+    return settings.transportType;
+  }
 
-  void setTransportType(TransportType type) => state = type;
+  void setTransportType(TransportType type) {
+    state = type;
+    ref.read(settingsServiceProvider).setTransportType(type);
+  }
 }
 
 final transportTypeProvider = NotifierProvider<TransportTypeNotifier, TransportType>(
@@ -75,9 +87,15 @@ final transportTypeProvider = NotifierProvider<TransportTypeNotifier, TransportT
 /// Packaging format provider (defaults to moq-mi)
 class PackagingFormatNotifier extends Notifier<PackagingFormat> {
   @override
-  PackagingFormat build() => PackagingFormat.moqMi;
+  PackagingFormat build() {
+    final settings = ref.watch(settingsServiceProvider);
+    return settings.packagingFormat;
+  }
 
-  void setPackagingFormat(PackagingFormat format) => state = format;
+  void setPackagingFormat(PackagingFormat format) {
+    state = format;
+    ref.read(settingsServiceProvider).setPackagingFormat(format);
+  }
 }
 
 final packagingFormatProvider = NotifierProvider<PackagingFormatNotifier, PackagingFormat>(
@@ -87,9 +105,15 @@ final packagingFormatProvider = NotifierProvider<PackagingFormatNotifier, Packag
 /// Video resolution provider (defaults to 720p)
 class VideoResolutionNotifier extends Notifier<VideoResolution> {
   @override
-  VideoResolution build() => VideoResolution.r720p;
+  VideoResolution build() {
+    final settings = ref.watch(settingsServiceProvider);
+    return settings.videoResolution;
+  }
 
-  void setResolution(VideoResolution resolution) => state = resolution;
+  void setResolution(VideoResolution resolution) {
+    state = resolution;
+    ref.read(settingsServiceProvider).setVideoResolution(resolution);
+  }
 }
 
 final videoResolutionProvider = NotifierProvider<VideoResolutionNotifier, VideoResolution>(
@@ -99,9 +123,15 @@ final videoResolutionProvider = NotifierProvider<VideoResolutionNotifier, VideoR
 /// Theme mode provider (defaults to system)
 class ThemeModeNotifier extends Notifier<ThemeMode> {
   @override
-  ThemeMode build() => ThemeMode.system;
+  ThemeMode build() {
+    final settings = ref.watch(settingsServiceProvider);
+    return settings.themeMode;
+  }
 
-  void setThemeMode(ThemeMode mode) => state = mode;
+  void setThemeMode(ThemeMode mode) {
+    state = mode;
+    ref.read(settingsServiceProvider).setThemeMode(mode);
+  }
 }
 
 final themeModeProvider = NotifierProvider<ThemeModeNotifier, ThemeMode>(

@@ -23,11 +23,11 @@ class ConnectionScreen extends ConsumerStatefulWidget {
 }
 
 class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
-  final _hostController = TextEditingController(text: 'localhost');
-  final _portController = TextEditingController(text: '8443');
-  final _urlController = TextEditingController(text: 'https://localhost:4433/moq');
-  final _namespaceController = TextEditingController(text: 'demo');
-  final _trackNameController = TextEditingController(text: 'video');
+  late final TextEditingController _hostController;
+  late final TextEditingController _portController;
+  late final TextEditingController _urlController;
+  late final TextEditingController _namespaceController;
+  late final TextEditingController _trackNameController;
 
   bool _isLoading = false;
   bool _insecureMode = false;
@@ -38,11 +38,38 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
   @override
   void initState() {
     super.initState();
+    final settings = ref.read(settingsServiceProvider);
+
+    // Load saved settings
+    _hostController = TextEditingController(text: settings.host);
+    _portController = TextEditingController(text: settings.port);
+    _urlController = TextEditingController(text: settings.url);
+    _namespaceController = TextEditingController(text: settings.namespace);
+    _trackNameController = TextEditingController(text: settings.trackName);
+    _insecureMode = settings.insecureMode;
     _transportType = ref.read(transportTypeProvider);
+
+    // Add listeners to save on change
+    _hostController.addListener(_saveHost);
+    _portController.addListener(_savePort);
+    _urlController.addListener(_saveUrl);
+    _namespaceController.addListener(_saveNamespace);
+    _trackNameController.addListener(_saveTrackName);
   }
+
+  void _saveHost() => ref.read(settingsServiceProvider).setHost(_hostController.text);
+  void _savePort() => ref.read(settingsServiceProvider).setPort(_portController.text);
+  void _saveUrl() => ref.read(settingsServiceProvider).setUrl(_urlController.text);
+  void _saveNamespace() => ref.read(settingsServiceProvider).setNamespace(_namespaceController.text);
+  void _saveTrackName() => ref.read(settingsServiceProvider).setTrackName(_trackNameController.text);
 
   @override
   void dispose() {
+    _hostController.removeListener(_saveHost);
+    _portController.removeListener(_savePort);
+    _urlController.removeListener(_saveUrl);
+    _namespaceController.removeListener(_saveNamespace);
+    _trackNameController.removeListener(_saveTrackName);
     _hostController.dispose();
     _portController.dispose();
     _urlController.dispose();
@@ -228,7 +255,10 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                   urlController: _urlController,
                   transportType: _transportType,
                   insecureMode: _insecureMode,
-                  onInsecureModeChanged: (value) => setState(() => _insecureMode = value),
+                  onInsecureModeChanged: (value) {
+                    setState(() => _insecureMode = value);
+                    ref.read(settingsServiceProvider).setInsecureMode(value);
+                  },
                   enabled: !isConnected && !_isLoading,
                 ),
                 SizedBox(height: 2.h),
