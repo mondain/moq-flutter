@@ -3,6 +3,7 @@
 The subscribe sequence in the MoQ protocol involves a series of message exchanges between a subscriber and the MoQ server (relay or original publisher) to establish a subscription and receive media data. Below is a detailed description of the subscribe sequence per draft-ietf-moq-transport-14.
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e8f4fc', 'primaryTextColor': '#000000', 'primaryBorderColor': '#2266aa', 'lineColor': '#333333', 'secondaryColor': '#f0f0f0', 'tertiaryColor': '#ffffff', 'noteBkgColor': '#fff8dc', 'noteTextColor': '#000000', 'actorTextColor': '#000000', 'actorBkg': '#ddeeff', 'actorBorder': '#2266aa', 'signalColor': '#333333', 'signalTextColor': '#000000'}}}%%
 sequenceDiagram
     participant Sub as MoQ Subscriber
     participant Relay as MoQ Relay
