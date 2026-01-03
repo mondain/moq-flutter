@@ -91,6 +91,29 @@ class SettingsScreen extends ConsumerWidget {
           }),
           const Divider(),
 
+          // Appearance section
+          _buildSectionHeader(context, 'Appearance'),
+          ...ThemeMode.values.map((mode) {
+            final currentMode = ref.watch(themeModeProvider);
+            final isSelected = currentMode == mode;
+            return RadioListTile<ThemeMode>(
+              value: mode,
+              groupValue: currentMode,
+              onChanged: (value) {
+                if (value != null) {
+                  ref.read(themeModeProvider.notifier).setThemeMode(value);
+                }
+              },
+              title: Text(_themeModeLabel(mode)),
+              subtitle: Text(_themeModeDescription(mode)),
+              secondary: Icon(
+                _themeModeIcon(mode),
+                color: isSelected ? Theme.of(context).colorScheme.primary : null,
+              ),
+            );
+          }),
+          const Divider(),
+
           // About section
           _buildSectionHeader(context, 'About'),
           ListTile(
@@ -126,5 +149,38 @@ class SettingsScreen extends ConsumerWidget {
             ),
       ),
     );
+  }
+
+  String _themeModeLabel(ThemeMode mode) {
+    switch (mode) {
+      case ThemeMode.system:
+        return 'System';
+      case ThemeMode.light:
+        return 'Light';
+      case ThemeMode.dark:
+        return 'Dark';
+    }
+  }
+
+  String _themeModeDescription(ThemeMode mode) {
+    switch (mode) {
+      case ThemeMode.system:
+        return 'Follow device settings';
+      case ThemeMode.light:
+        return 'Always use light theme';
+      case ThemeMode.dark:
+        return 'Always use dark theme';
+    }
+  }
+
+  IconData _themeModeIcon(ThemeMode mode) {
+    switch (mode) {
+      case ThemeMode.system:
+        return Icons.brightness_auto;
+      case ThemeMode.light:
+        return Icons.light_mode;
+      case ThemeMode.dark:
+        return Icons.dark_mode;
+    }
   }
 }

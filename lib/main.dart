@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sizer/sizer.dart';
+import 'providers/moq_providers.dart';
 import 'router.dart';
 
 void main() {
@@ -11,11 +12,13 @@ void main() {
   );
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends ConsumerWidget {
   const MyApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final themeMode = ref.watch(themeModeProvider);
+
     return Sizer(
       builder: (context, orientation, deviceType) {
         return MaterialApp.router(
@@ -32,7 +35,7 @@ class MyApp extends StatelessWidget {
             ),
             useMaterial3: true,
           ),
-          themeMode: ThemeMode.system,
+          themeMode: themeMode,
           routerConfig: appRouter,
         );
       },

@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart';
 import '../moq/client/moq_client.dart';
@@ -93,6 +94,18 @@ class VideoResolutionNotifier extends Notifier<VideoResolution> {
 
 final videoResolutionProvider = NotifierProvider<VideoResolutionNotifier, VideoResolution>(
   VideoResolutionNotifier.new,
+);
+
+/// Theme mode provider (defaults to system)
+class ThemeModeNotifier extends Notifier<ThemeMode> {
+  @override
+  ThemeMode build() => ThemeMode.system;
+
+  void setThemeMode(ThemeMode mode) => state = mode;
+}
+
+final themeModeProvider = NotifierProvider<ThemeModeNotifier, ThemeMode>(
+  ThemeModeNotifier.new,
 );
 
 /// QUIC Transport provider
