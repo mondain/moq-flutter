@@ -34,7 +34,7 @@ sequenceDiagram
     Pub-->>Relay: SUBSCRIBE_OK (Request ID, Track Alias, Expires, Group Order, Largest Location)
 
     Note over Pub, Relay: Data Transmission (Unidirectional Streams)
-    rect rgb(240, 240, 240)
+    rect rgb(173, 216, 230)
     Note over Pub, Relay: SUBGROUP_HEADER (type 0x10-0x17)
     Pub->>Relay: SUBGROUP_HEADER (Track Alias, Group ID, Subgroup ID, Priority)
     Pub->>Relay: OBJECT (Object ID Delta, Payload Length, Payload)

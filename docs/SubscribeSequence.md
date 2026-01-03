@@ -17,7 +17,7 @@ sequenceDiagram
     Relay-->>Sub: SUBSCRIBE_OK (Request ID, Track Alias, Expires, Group Order, Largest Location)
 
     Note over Sub, Relay: Data Reception (Unidirectional Streams)
-    rect rgb(240, 240, 240)
+    rect rgb(173, 216, 230)
     Note over Sub, Relay: Stream-per-Subgroup (type 0x10-0x17)
     Relay->>Sub: SUBGROUP_HEADER (Track Alias, Group ID, Subgroup ID, Priority)
     Relay->>Sub: OBJECT (Object ID Delta, Payload Length, Payload)
