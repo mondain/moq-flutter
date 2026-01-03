@@ -3,7 +3,7 @@
 The publish sequence in the MoQ protocol involves a series of message exchanges between a publisher and the MoQ relay to establish a publishing session and transmit media data. Below is a detailed description of the publish sequence per draft-ietf-moq-transport-14.
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e8f4fc', 'primaryTextColor': '#000000', 'primaryBorderColor': '#2266aa', 'lineColor': '#333333', 'secondaryColor': '#f0f0f0', 'tertiaryColor': '#ffffff', 'noteBkgColor': '#fff8dc', 'noteTextColor': '#000000', 'actorTextColor': '#000000', 'actorBkg': '#ddeeff', 'actorBorder': '#2266aa', 'signalColor': '#333333', 'signalTextColor': '#000000'}}}%%
+%%{init: {'theme': 'neutral'}}%%
 sequenceDiagram
     participant Pub as MoQ Publisher
     participant Relay as MoQ Relay
