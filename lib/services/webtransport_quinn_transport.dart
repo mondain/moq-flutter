@@ -40,6 +40,7 @@ class WebTransportQuinnTransport extends MoQTransport {
   _ConnectFunc? _moqWtConnect;
   _SendFunc? _moqWtSend;
   _RecvFunc? _moqWtRecv;
+  _RecvDataFunc? _moqWtRecvData;
   _CloseFunc? _moqWtClose;
   _CleanupFunc? _moqWtCleanup;
   _GetLastErrorFunc? _moqWtGetLastError;
@@ -75,6 +76,10 @@ class WebTransportQuinnTransport extends MoQTransport {
       _moqWtRecv = _nativeLib!
           .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
               'moq_webtransport_recv')
+          .asFunction();
+      _moqWtRecvData = _nativeLib!
+          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<NativeUint64>, Pointer<Uint8>, NativeIntPtr, Pointer<NativeInt32>)>>(
+              'moq_webtransport_recv_data')
           .asFunction();
       _moqWtClose = _nativeLib!
           .lookup<NativeFunction<NativeInt32 Function(NativeUint64)>>('moq_webtransport_close')
@@ -404,17 +409,68 @@ class WebTransportQuinnTransport extends MoQTransport {
     _pollTimer = Timer.periodic(const Duration(milliseconds: 10), (_) {
       if (!isConnected) return;
 
-      if (_moqWtRecv == null) {
-        _logger.e('WebTransport recv function not available');
-        return;
+      // Poll control stream (bidirectional)
+      _pollControlStream();
+
+      // Poll data streams (incoming unidirectional)
+      _pollDataStreams();
+    });
+  }
+
+  void _pollControlStream() {
+    if (_moqWtRecv == null) {
+      return;
+    }
+
+    try {
+      // Buffer to receive data (max 4KB per poll)
+      final buffer = calloc<Uint8>(4096);
+      final received = _moqWtRecv!(_sessionId, buffer, 4096);
+
+      if (received > 0) {
+        // Copy received data
+        final data = Uint8List(received.toInt());
+        final nativeData = buffer.asTypedList(received.toInt());
+        data.setAll(0, nativeData);
+
+        _stats = _stats.copyWith(
+          bytesReceived: _stats.bytesReceived + received.toInt(),
+          packetsReceived: _stats.packetsReceived + 1,
+          lastActivity: DateTime.now(),
+        );
+
+        // For bidirectional control stream, there is NO stream type prefix.
+        // Control messages are sent directly (raw wire format).
+        _logger.d('Received $received bytes on WebTransport control stream');
+        _incomingDataController.add(data);
       }
 
-      try {
-        // Buffer to receive data (max 4KB per poll)
-        final buffer = calloc<Uint8>(4096);
-        final received = _moqWtRecv!(_sessionId, buffer, 4096);
+      calloc.free(buffer);
+    } catch (e) {
+      _logger.e('Control stream receive error: $e');
+    }
+  }
+
+  void _pollDataStreams() {
+    if (_moqWtRecvData == null) {
+      return;
+    }
+
+    try {
+      // Keep polling while there is data available
+      while (true) {
+        // Allocate buffers for data stream reception
+        // Use larger buffer for media data
+        final buffer = calloc<Uint8>(65536);
+        final streamIdPtr = calloc<Uint64>();
+        final isCompletePtr = calloc<Int32>();
+
+        final received = _moqWtRecvData!(_sessionId, streamIdPtr, buffer, 65536, isCompletePtr);
 
         if (received > 0) {
+          final streamId = streamIdPtr.value;
+          final isComplete = isCompletePtr.value != 0;
+
           // Copy received data
           final data = Uint8List(received.toInt());
           final nativeData = buffer.asTypedList(received.toInt());
@@ -426,18 +482,33 @@ class WebTransportQuinnTransport extends MoQTransport {
             lastActivity: DateTime.now(),
           );
 
-          // For bidirectional control stream, there is NO stream type prefix.
-          // Control messages are sent directly (raw wire format).
-          // Only unidirectional data streams have stream type prefixes.
-          _logger.d('Received $received bytes on WebTransport control stream');
-          _incomingDataController.add(data);
+          _logger.d('Received $received bytes on data stream $streamId (complete: $isComplete)');
+
+          // Emit as DataStreamChunk
+          _incomingDataStreamController.add(DataStreamChunk(
+            streamId: streamId,
+            data: data,
+            isComplete: isComplete,
+          ));
+
+          calloc.free(buffer);
+          calloc.free(streamIdPtr);
+          calloc.free(isCompletePtr);
+
+          // Continue polling if we got data
+          continue;
         }
 
         calloc.free(buffer);
-      } catch (e) {
-        _logger.e('Receive error: $e');
+        calloc.free(streamIdPtr);
+        calloc.free(isCompletePtr);
+
+        // No more data available, exit loop
+        break;
       }
-    });
+    } catch (e) {
+      _logger.e('Data stream receive error: $e');
+    }
   }
 
   void _stopReceiving() {
@@ -465,6 +536,8 @@ typedef _SendFunc = int Function(
     int sessionId, Pointer<Uint8> data, int len);
 typedef _RecvFunc = int Function(
     int sessionId, Pointer<Uint8> buffer, int bufferLen);
+typedef _RecvDataFunc = int Function(
+    int sessionId, Pointer<Uint64> outStreamId, Pointer<Uint8> buffer, int bufferLen, Pointer<Int32> outIsComplete);
 typedef _CloseFunc = int Function(int sessionId);
 typedef _CleanupFunc = void Function();
 typedef _GetLastErrorFunc = int Function(Pointer<Uint8> buffer, int bufferLen);

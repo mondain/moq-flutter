@@ -45,10 +45,14 @@ class ClientSetupMessage extends MoQControlMessage {
     }
     // Number of parameters
     len += MoQWireFormat._varintSize(parameters.length);
-    // Each parameter
+    // Each parameter - encoding depends on type (even = varint, odd = buffer)
     for (final param in parameters) {
       len += MoQWireFormat._varintSize(param.type);
-      if (param.value != null) {
+      if (param.isVarintType) {
+        // Even types: value is direct varint
+        len += MoQWireFormat._varintSize(param.intValue ?? 0);
+      } else if (param.value != null) {
+        // Odd types: value is length-prefixed buffer
         len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
       }
     }
@@ -71,10 +75,14 @@ class ClientSetupMessage extends MoQControlMessage {
     // Write number of parameters
     offset += _writeVarint(payload, offset, parameters.length);
 
-    // Write parameters
+    // Write parameters - encoding depends on type (even = varint, odd = buffer)
     for (final param in parameters) {
       offset += _writeVarint(payload, offset, param.type);
-      if (param.value != null) {
+      if (param.isVarintType) {
+        // Even types: value is direct varint
+        offset += _writeVarint(payload, offset, param.intValue ?? 0);
+      } else if (param.value != null) {
+        // Odd types: value is length-prefixed buffer
         offset += _writeVarint(payload, offset, param.value!.length);
         payload.setAll(offset, param.value!);
         offset += param.value!.length;
@@ -105,23 +113,30 @@ class ClientSetupMessage extends MoQControlMessage {
     final (numParams, paramsLen) = MoQWireFormat.decodeVarint(data, offset);
     offset += paramsLen;
 
-    // Read parameters
+    // Read parameters - encoding depends on type (even = varint, odd = buffer)
     final params = <KeyValuePair>[];
     for (int i = 0; i < numParams; i++) {
       final (type, typeLen) = MoQWireFormat.decodeVarint(data, offset);
       offset += typeLen;
 
-      Uint8List? value;
-      // Check if there's a value (length varint + data)
-      if (offset < data.length) {
-        final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
-        offset += lengthLen;
-        if (length > 0) {
-          value = data.sublist(offset, offset + length);
-          offset += length;
+      if (type % 2 == 0) {
+        // Even types: value is direct varint
+        final (intValue, intLen) = MoQWireFormat.decodeVarint(data, offset);
+        offset += intLen;
+        params.add(KeyValuePair(type: type, intValue: intValue));
+      } else {
+        // Odd types: value is length-prefixed buffer
+        Uint8List? value;
+        if (offset < data.length) {
+          final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
+          offset += lengthLen;
+          if (length > 0) {
+            value = data.sublist(offset, offset + length);
+            offset += length;
+          }
         }
+        params.add(KeyValuePair(type: type, value: value));
       }
-      params.add(KeyValuePair(type: type, value: value));
     }
 
     return ClientSetupMessage(
@@ -229,22 +244,30 @@ class ServerSetupMessage extends MoQControlMessage {
     final (numParams, paramsLen) = MoQWireFormat.decodeVarint(data, offset);
     offset += paramsLen;
 
-    // Read parameters
+    // Read parameters - encoding depends on type (even = varint, odd = buffer)
     final params = <KeyValuePair>[];
     for (int i = 0; i < numParams; i++) {
       final (type, typeLen) = MoQWireFormat.decodeVarint(data, offset);
       offset += typeLen;
 
-      Uint8List? value;
-      if (offset < data.length) {
-        final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
-        offset += lengthLen;
-        if (length > 0) {
-          value = data.sublist(offset, offset + length);
-          offset += length;
+      if (type % 2 == 0) {
+        // Even types: value is direct varint
+        final (intValue, intLen) = MoQWireFormat.decodeVarint(data, offset);
+        offset += intLen;
+        params.add(KeyValuePair(type: type, intValue: intValue));
+      } else {
+        // Odd types: value is length-prefixed buffer
+        Uint8List? value;
+        if (offset < data.length) {
+          final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
+          offset += lengthLen;
+          if (length > 0) {
+            value = data.sublist(offset, offset + length);
+            offset += length;
+          }
         }
+        params.add(KeyValuePair(type: type, value: value));
       }
-      params.add(KeyValuePair(type: type, value: value));
     }
 
     return ServerSetupMessage(

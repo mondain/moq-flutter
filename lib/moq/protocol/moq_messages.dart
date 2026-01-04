@@ -146,15 +146,46 @@ class Location {
   String toString() => 'Location(group: $group, object: $object)';
 }
 
-/// Key-Value-Pair structure
+/// Key-Value-Pair structure for MoQ parameters
+///
+/// Per draft-ietf-moq-transport-14 section 9.2.1:
+/// - Even parameter types: value is encoded as a direct varint (use intValue)
+/// - Odd parameter types: value is encoded as length-prefixed bytes (use value)
 class KeyValuePair {
   final int type;
   final Uint8List? value;
+  final int? intValue; // For even-type parameters (direct varint value)
 
   KeyValuePair({
     required this.type,
     this.value,
+    this.intValue,
   });
+
+  /// Returns true if this parameter type uses varint encoding (even types)
+  bool get isVarintType => type % 2 == 0;
+
+  /// Create a KeyValuePair for a varint parameter (even type)
+  factory KeyValuePair.varint(int type, int value) {
+    assert(type % 2 == 0, 'Varint parameters must have even type');
+    return KeyValuePair(type: type, intValue: value);
+  }
+
+  /// Create a KeyValuePair for a buffer parameter (odd type)
+  factory KeyValuePair.buffer(int type, Uint8List value) {
+    assert(type % 2 == 1, 'Buffer parameters must have odd type');
+    return KeyValuePair(type: type, value: value);
+  }
+}
+
+/// Setup parameter types per draft-ietf-moq-transport-14 section 9.3.1
+class SetupParameterType {
+  /// PATH parameter (type 0x1, odd = buffer) - WebTransport path
+  static const int path = 0x1;
+  /// MAX_REQUEST_ID parameter (type 0x2, even = varint)
+  static const int maxRequestId = 0x2;
+  /// MAX_AUTH_TOKEN_CACHE_SIZE parameter (type 0x4, even = varint)
+  static const int maxAuthTokenCacheSize = 0x4;
 }
 
 /// Reason Phrase structure

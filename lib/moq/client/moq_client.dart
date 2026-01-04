@@ -49,6 +49,9 @@ class MoQClient {
   // Data stream subscription
   StreamSubscription<DataStreamChunk>? _dataStreamSubscription;
 
+  // Control message buffer for incomplete messages
+  final _controlBuffer = <int>[];
+
   // Message controllers
   final _messageController = StreamController<MoQMessage>.broadcast();
   final _connectionStateController = StreamController<bool>.broadcast();
@@ -188,12 +191,19 @@ class MoQClient {
     // Draft versions use 0xff000000 + draft number format per spec section 9.3.1
     // Draft-14 = 0xff00000E (confirmed by moqt.js reference implementation)
     final versions = supportedVersions ?? [0xff00000e]; // Draft-14
+
+    // MAX_REQUEST_ID parameter is required per FB reference implementation
+    // Value of 128 matches moqt.js MOQ_MAX_REQUEST_ID_NUM
     final setupMessage = ClientSetupMessage(
       supportedVersions: versions,
-      // TODO: Add setup parameters
+      parameters: [
+        KeyValuePair.varint(SetupParameterType.maxRequestId, 128),
+      ],
     );
 
-    await _transport.send(setupMessage.serialize());
+    final setupBytes = setupMessage.serialize();
+    _logger.d('CLIENT_SETUP bytes (${setupBytes.length}): ${setupBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
+    await _transport.send(setupBytes);
     _logger.d('Sent CLIENT_SETUP with versions: $versions');
 
     // Wait for SERVER_SETUP response (with timeout)
@@ -824,20 +834,57 @@ class MoQClient {
   }
 
   void _handleIncomingData(Uint8List data) {
-    _logger.d('_handleIncomingData: ${data.length} bytes');
-    try {
-      final (message, bytesRead) = MoQControlMessageParser.parse(data);
-      _logger.d('Parsed message: type=${message?.type}, bytesRead=$bytesRead');
+    _logger.d('_handleIncomingData: ${data.length} bytes (control stream)');
+    if (data.isEmpty) return;
 
-      if (message != null) {
-        _processControlMessage(message);
-        _logger.d('Processed control message: ${message.type}');
-      } else {
-        _logger.w('Parsed message is null');
+    // Add new data to buffer
+    _controlBuffer.addAll(data);
+
+    // Process all complete messages in buffer
+    while (_controlBuffer.isNotEmpty) {
+      final bufferData = Uint8List.fromList(_controlBuffer);
+
+      try {
+        // Parse as control message
+        // Note: Data streams (SUBGROUP_HEADER) now come via incomingDataStreams,
+        // not through the control stream, so no need to detect them here.
+        final (message, bytesRead) = MoQControlMessageParser.parse(bufferData);
+
+        if (message != null && bytesRead > 0) {
+          // Remove parsed bytes from buffer
+          _controlBuffer.removeRange(0, bytesRead);
+          _logger.d('Parsed message: type=${message.type}, bytesRead=$bytesRead, remaining=${_controlBuffer.length}');
+
+          _processControlMessage(message);
+          _logger.d('Processed control message: ${message.type}');
+        } else if (bytesRead == 0) {
+          // Need more data
+          _logger.d('Incomplete message, waiting for more data (buffer: ${_controlBuffer.length} bytes)');
+          break;
+        } else {
+          // Unknown message, skip the parsed bytes
+          _controlBuffer.removeRange(0, bytesRead);
+          _logger.w('Skipped unknown message, bytesRead=$bytesRead');
+        }
+      } on FormatException catch (e) {
+        // Check if it's an incomplete message error
+        if (e.message.contains('Incomplete') || e.message.contains('need')) {
+          _logger.d('Incomplete message: $e, waiting for more data');
+          break; // Wait for more data
+        }
+        // Other format errors - skip a byte and try again
+        _logger.e('Format error: $e, skipping byte');
+        if (_controlBuffer.isNotEmpty) {
+          _controlBuffer.removeAt(0);
+        }
+      } catch (e, stack) {
+        _logger.e('Failed to process incoming data: $e');
+        _logger.e('Stack: $stack');
+        // Skip a byte and try again
+        if (_controlBuffer.isNotEmpty) {
+          _controlBuffer.removeAt(0);
+        }
       }
-    } catch (e, stack) {
-      _logger.e('Failed to process incoming data: $e');
-      _logger.e('Stack: $stack');
     }
   }
 

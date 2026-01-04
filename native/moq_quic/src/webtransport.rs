@@ -87,13 +87,54 @@ impl ReceiveBuffer {
     }
 }
 
+// Data chunk with stream metadata for incoming unidirectional streams
+#[repr(C)]
+pub struct DataStreamChunk {
+    pub stream_id: u64,
+    pub data_len: usize,
+    pub is_complete: bool,  // true if stream was closed after this data
+}
+
+// Queue of received data stream chunks (each entry is stream_id + data)
+struct DataStreamQueue {
+    chunks: VecDeque<(u64, Vec<u8>, bool)>,  // (stream_id, data, is_complete)
+    max_chunks: usize,
+}
+
+impl DataStreamQueue {
+    fn new(max_chunks: usize) -> Self {
+        Self {
+            chunks: VecDeque::with_capacity(32),
+            max_chunks,
+        }
+    }
+
+    fn push(&mut self, stream_id: u64, data: Vec<u8>, is_complete: bool) -> bool {
+        if self.chunks.len() >= self.max_chunks {
+            return false;
+        }
+        self.chunks.push_back((stream_id, data, is_complete));
+        true
+    }
+
+    fn pop(&mut self) -> Option<(u64, Vec<u8>, bool)> {
+        self.chunks.pop_front()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+}
+
 // Global registry for WebTransport sessions
 static WT_SESSIONS: OnceCell<DashMap<u64, Arc<Session>>> = OnceCell::new();
 static WT_ENDPOINTS: OnceCell<DashMap<u64, Arc<Endpoint>>> = OnceCell::new();
 static WT_RECV_BUFFERS: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<ReceiveBuffer>>>> = OnceCell::new();
+static WT_DATA_QUEUES: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<DataStreamQueue>>>> = OnceCell::new();
 static WT_CONTROL_STREAMS: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<Option<ControlStream>>>>> = OnceCell::new();
 static WT_RUNTIME: OnceCell<Runtime> = OnceCell::new();
 static WT_NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+static WT_NEXT_INCOMING_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
 /// No certificate verification for testing
 #[derive(Debug)]
@@ -158,6 +199,9 @@ pub extern "C" fn moq_webtransport_init() {
     }
     if WT_RECV_BUFFERS.set(DashMap::new()).is_err() {
         log::warn!("WebTransport receive buffers registry already initialized");
+    }
+    if WT_DATA_QUEUES.set(DashMap::new()).is_err() {
+        log::warn!("WebTransport data queues registry already initialized");
     }
     if WT_CONTROL_STREAMS.set(DashMap::new()).is_err() {
         log::warn!("WebTransport control streams registry already initialized");
@@ -343,15 +387,18 @@ pub extern "C" fn moq_webtransport_connect(
     let sessions = WT_SESSIONS.get().expect("Sessions not initialized");
     let endpoints = WT_ENDPOINTS.get().expect("Endpoints not initialized");
     let recv_buffers = WT_RECV_BUFFERS.get().expect("Receive buffers not initialized");
+    let data_queues = WT_DATA_QUEUES.get().expect("Data queues not initialized");
     let control_streams = WT_CONTROL_STREAMS.get().expect("Control streams not initialized");
 
     let session_arc = Arc::new(session);
     let endpoint_arc = Arc::new(endpoint);
     let recv_buffer = Arc::new(tokio::sync::Mutex::new(ReceiveBuffer::new(MAX_RECV_BUFFER_SIZE)));
+    let data_queue = Arc::new(tokio::sync::Mutex::new(DataStreamQueue::new(1024)));  // Queue up to 1024 chunks
 
     sessions.insert(session_id, session_arc.clone());
     endpoints.insert(session_id, endpoint_arc);
     recv_buffers.insert(session_id, recv_buffer.clone());
+    data_queues.insert(session_id, data_queue.clone());
     control_streams.insert(session_id, Arc::new(tokio::sync::Mutex::new(None)));
 
     // Open bidirectional control stream (required by MoQ spec)
@@ -402,35 +449,59 @@ pub extern "C" fn moq_webtransport_connect(
 
     // Start background task to accept incoming unidirectional streams (data streams)
     let session_for_task = session_arc.clone();
-    let recv_buffer_for_task = recv_buffer.clone();
+    let data_queue_for_task = data_queue.clone();
     runtime.spawn(async move {
         log::info!("Starting WebTransport data stream acceptor for session {}", session_id);
         loop {
             match session_for_task.accept_uni().await {
                 Ok(mut recv_stream) => {
-                    log::debug!("Accepted incoming unidirectional stream on session {}", session_id);
-                    // Read all data from this stream
-                    let mut buffer = vec![0u8; 4096];
+                    // Each incoming unidirectional stream gets a unique ID
+                    let stream_id = WT_NEXT_INCOMING_STREAM_ID.fetch_add(1, Ordering::SeqCst);
+                    log::debug!("Accepted incoming unidirectional stream {} on session {}", stream_id, session_id);
+
+                    // Collect all data from this stream, then push as a complete chunk
+                    let mut stream_data = Vec::new();
+                    let mut buffer = vec![0u8; 8192];  // Larger buffer for data streams
+                    let mut is_complete = false;
+
                     loop {
                         match recv_stream.read(&mut buffer).await {
                             Ok(None) => {
-                                // Stream closed
-                                log::debug!("Incoming stream closed on session {}", session_id);
+                                // Stream closed - mark as complete
+                                is_complete = true;
+                                log::debug!("Incoming stream {} closed on session {} ({} bytes total)",
+                                    stream_id, session_id, stream_data.len());
                                 break;
                             }
                             Ok(Some(n)) => {
-                                // Add data to receive buffer
-                                let mut recv_buf = recv_buffer_for_task.lock().await;
-                                let pushed = recv_buf.push(&buffer[..n]);
-                                if pushed < n {
-                                    log::warn!("Receive buffer full, dropped {} bytes", n - pushed);
+                                // Accumulate data from this stream
+                                stream_data.extend_from_slice(&buffer[..n]);
+                                log::trace!("Received {} bytes on stream {} session {} (total: {})",
+                                    n, stream_id, session_id, stream_data.len());
+
+                                // Push intermediate chunks if we have enough data
+                                // This allows processing to start while stream is still open
+                                if stream_data.len() >= 4096 {
+                                    let mut queue = data_queue_for_task.lock().await;
+                                    let chunk = std::mem::take(&mut stream_data);
+                                    if !queue.push(stream_id, chunk, false) {
+                                        log::warn!("Data queue full for session {}, dropping chunk", session_id);
+                                    }
                                 }
-                                log::trace!("Received {} bytes on WebTransport session {}", n, session_id);
                             }
                             Err(e) => {
-                                log::error!("Error reading from stream: {:?}", e);
+                                log::error!("Error reading from stream {}: {:?}", stream_id, e);
+                                is_complete = true;  // Consider stream done on error
                                 break;
                             }
+                        }
+                    }
+
+                    // Push final chunk with remaining data
+                    if !stream_data.is_empty() || is_complete {
+                        let mut queue = data_queue_for_task.lock().await;
+                        if !queue.push(stream_id, stream_data, is_complete) {
+                            log::warn!("Data queue full for session {}, dropping final chunk", session_id);
                         }
                     }
                 }
@@ -575,6 +646,85 @@ pub extern "C" fn moq_webtransport_recv(
             let output_buf = unsafe { slice::from_raw_parts_mut(buffer, buffer_len) };
             let bytes_read = recv_buf.pop(output_buf);
             bytes_read as i64
+        }
+    });
+
+    result
+}
+
+/// Receive data from incoming unidirectional data streams (non-blocking poll)
+///
+/// This returns data from incoming unidirectional streams, separate from the
+/// bidirectional control stream. Each chunk includes the stream ID and completion status.
+///
+/// # Arguments
+/// * `session_id` - The session ID
+/// * `out_stream_id` - Output parameter for the stream ID that this data came from
+/// * `buffer` - Pointer to buffer to store received data
+/// * `buffer_len` - Length of buffer
+/// * `out_is_complete` - Output parameter: 1 if stream is complete, 0 otherwise
+///
+/// # Returns
+/// * Number of bytes received on success, 0 if no data available, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_webtransport_recv_data(
+    session_id: u64,
+    out_stream_id: *mut u64,
+    buffer: *mut u8,
+    buffer_len: usize,
+    out_is_complete: *mut i32,
+) -> i64 {
+    let data_queues = WT_DATA_QUEUES.get().expect("Data queues not initialized");
+
+    let data_queue = match data_queues.get(&session_id) {
+        Some(dq) => dq.clone(),
+        None => {
+            log::error!("Session {} not found for recv_data", session_id);
+            return -1;
+        }
+    };
+
+    if buffer.is_null() || buffer_len == 0 {
+        return 0;
+    }
+
+    let runtime = get_runtime();
+
+    let result = runtime.block_on(async {
+        let mut queue = data_queue.lock().await;
+
+        match queue.pop() {
+            Some((stream_id, data, is_complete)) => {
+                // Set output stream ID
+                if !out_stream_id.is_null() {
+                    unsafe { *out_stream_id = stream_id; }
+                }
+
+                // Set completion flag
+                if !out_is_complete.is_null() {
+                    unsafe { *out_is_complete = if is_complete { 1 } else { 0 }; }
+                }
+
+                // Copy data to output buffer
+                let to_copy = data.len().min(buffer_len);
+                if to_copy > 0 {
+                    unsafe {
+                        let dst = slice::from_raw_parts_mut(buffer, to_copy);
+                        dst.copy_from_slice(&data[..to_copy]);
+                    }
+                }
+
+                if to_copy < data.len() {
+                    log::warn!("Data truncated: {} bytes available but only {} buffer space",
+                        data.len(), buffer_len);
+                }
+
+                log::trace!("recv_data: stream {} returned {} bytes (complete: {})",
+                    stream_id, to_copy, is_complete);
+
+                to_copy as i64
+            }
+            None => 0,
         }
     });
 
@@ -738,6 +888,7 @@ pub extern "C" fn moq_webtransport_close(session_id: u64) -> i32 {
     let sessions = WT_SESSIONS.get().expect("Sessions not initialized");
     let endpoints = WT_ENDPOINTS.get().expect("Endpoints not initialized");
     let recv_buffers = WT_RECV_BUFFERS.get().expect("Receive buffers not initialized");
+    let data_queues = WT_DATA_QUEUES.get().expect("Data queues not initialized");
     let control_streams = WT_CONTROL_STREAMS.get().expect("Control streams not initialized");
     let data_streams = WT_DATA_STREAMS.get().expect("Data streams not initialized");
 
@@ -758,6 +909,7 @@ pub extern "C" fn moq_webtransport_close(session_id: u64) -> i32 {
     };
 
     recv_buffers.remove(&session_id);
+    data_queues.remove(&session_id);
     control_streams.remove(&session_id);
 
     // Clean up any data streams for this session
@@ -773,10 +925,12 @@ pub extern "C" fn moq_webtransport_cleanup() {
     let sessions = WT_SESSIONS.get().expect("Sessions not initialized");
     let endpoints = WT_ENDPOINTS.get().expect("Endpoints not initialized");
     let recv_buffers = WT_RECV_BUFFERS.get().expect("Receive buffers not initialized");
+    let data_queues = WT_DATA_QUEUES.get().expect("Data queues not initialized");
     let control_streams = WT_CONTROL_STREAMS.get().expect("Control streams not initialized");
     let data_streams = WT_DATA_STREAMS.get().expect("Data streams not initialized");
 
     sessions.clear();
+    data_queues.clear();
     endpoints.clear();
     recv_buffers.clear();
     control_streams.clear();
