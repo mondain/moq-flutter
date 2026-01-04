@@ -23,7 +23,8 @@ final appRouter = GoRouter(
         return ViewerScreen(
           namespace: extra['namespace'] as String? ?? '',
           trackName: extra['trackName'] as String? ?? '',
-          trackAlias: extra['trackAlias'] as String? ?? '',
+          videoTrackAlias: extra['videoTrackAlias'] as String? ?? '',
+          audioTrackAlias: extra['audioTrackAlias'] as String? ?? '',
         );
       },
     ),

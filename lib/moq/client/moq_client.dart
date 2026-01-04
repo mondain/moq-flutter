@@ -116,6 +116,10 @@ class MoQClient {
   Map<Int64, MoQSubscribeRequest> get activePublisherSubscriptions =>
       Map.unmodifiable(_activePublisherSubscriptions);
 
+  /// Get active subscriber subscriptions (tracks we're subscribed to)
+  Map<Int64, MoQSubscription> get subscriptions =>
+      Map.unmodifiable(_subscriptions);
+
   /// Stream of GOAWAY events
   ///
   /// Listen to this stream to receive GOAWAY messages from the server.
@@ -917,35 +921,58 @@ class MoQClient {
 
   /// Deliver a parsed object to the appropriate subscription
   void _deliverObject(SubgroupHeader header, SubgroupObject obj) {
-    // Find track info by alias
-    final trackInfo = _trackAliases[header.trackAlias];
-    if (trackInfo == null) {
+    // Find matching subscription(s) by track alias
+    // Note: Multiple subscriptions might share the same track alias if server
+    // doesn't assign unique aliases, so we need to find all matches
+    final matchingSubscriptions = _subscriptions.values
+        .where((sub) => sub.assignedTrackAlias == header.trackAlias)
+        .toList();
+
+    if (matchingSubscriptions.isEmpty) {
       _logger.w('Received object for unknown track alias: ${header.trackAlias}');
       return;
     }
 
-    // Find matching subscription
-    for (final sub in _subscriptions.values) {
-      if (_tracksMatch(sub, trackInfo)) {
-        final moqObject = MoQObject(
-          trackNamespace: trackInfo.namespace,
-          trackName: trackInfo.name,
-          groupId: header.groupId,
-          subgroupId: header.subgroupId,
-          objectId: obj.objectId ?? Int64(0),
-          publisherPriority: obj.publisherPriority,
-          forwardingPreference: ObjectForwardingPreference.subgroup,
-          status: obj.status ?? ObjectStatus.normal,
-          extensionHeaders: obj.extensionHeaders,
-          payload: obj.payload,
-        );
-        sub._objectController.add(moqObject);
-        _logger.d('Delivered object ${obj.objectId} to subscription ${sub.id}');
-        return;
-      }
+    // If there's exactly one matching subscription, deliver to it
+    if (matchingSubscriptions.length == 1) {
+      final sub = matchingSubscriptions.first;
+      final moqObject = MoQObject(
+        trackNamespace: sub.trackNamespace,
+        trackName: sub.trackName,
+        groupId: header.groupId,
+        subgroupId: header.subgroupId,
+        objectId: obj.objectId ?? Int64(0),
+        publisherPriority: obj.publisherPriority,
+        forwardingPreference: ObjectForwardingPreference.subgroup,
+        status: obj.status ?? ObjectStatus.normal,
+        extensionHeaders: obj.extensionHeaders,
+        payload: obj.payload,
+      );
+      sub._objectController.add(moqObject);
+      _logger.d('Delivered object ${obj.objectId} to subscription ${sub.id}');
+      return;
     }
 
-    _logger.w('No subscription found for track alias: ${header.trackAlias}');
+    // Multiple subscriptions with same alias - deliver to all (best effort)
+    // In practice, the server should assign unique aliases, but if not,
+    // we deliver to all matching subscriptions and let them filter
+    _logger.w('Multiple subscriptions (${matchingSubscriptions.length}) share track alias ${header.trackAlias}, delivering to all');
+    for (final sub in matchingSubscriptions) {
+      final moqObject = MoQObject(
+        trackNamespace: sub.trackNamespace,
+        trackName: sub.trackName,
+        groupId: header.groupId,
+        subgroupId: header.subgroupId,
+        objectId: obj.objectId ?? Int64(0),
+        publisherPriority: obj.publisherPriority,
+        forwardingPreference: ObjectForwardingPreference.subgroup,
+        status: obj.status ?? ObjectStatus.normal,
+        extensionHeaders: obj.extensionHeaders,
+        payload: obj.payload,
+      );
+      sub._objectController.add(moqObject);
+      _logger.d('Delivered object ${obj.objectId} to subscription ${sub.id}');
+    }
   }
 
   /// Check if subscription matches track info
@@ -1079,13 +1106,19 @@ class MoQClient {
         largestLocation: message.largestLocation,
       );
 
-      // Register track alias
+      // Store track alias in the subscription for direct lookup
+      subscription.assignedTrackAlias = message.trackAlias;
+
+      // Also register in track aliases map (may have collisions if server reuses aliases)
+      final trackNameStr = String.fromCharCodes(subscription.trackName);
+      _logger.i('SUBSCRIBE_OK: requestId=${message.requestId}, trackAlias=${message.trackAlias}, trackName=$trackNameStr');
+
       _trackAliases[message.trackAlias] = TrackInfo(
         namespace: subscription.trackNamespace,
         name: subscription.trackName,
       );
 
-      _logger.i('Subscription successful: ${message.trackAlias}');
+      _logger.i('Subscription successful for $trackNameStr: trackAlias=${message.trackAlias}');
     }
   }
 
@@ -1457,6 +1490,9 @@ class MoQSubscription {
   final Int64 id;
   final List<Uint8List> trackNamespace;
   final Uint8List trackName;
+
+  /// Track alias assigned by server in SUBSCRIBE_OK
+  Int64? assignedTrackAlias;
 
   final Completer<SubscribeResult> _responseCompleter =
       Completer<SubscribeResult>();

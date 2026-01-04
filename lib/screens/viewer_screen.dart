@@ -1,21 +1,25 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:sizer/sizer.dart';
 import '../providers/moq_providers.dart';
 import '../widgets/connection_status_card.dart';
+import '../moq/protocol/moq_messages.dart';
 
 /// Screen for viewing subscribed MoQ streams
 class ViewerScreen extends ConsumerStatefulWidget {
   final String namespace;
   final String trackName;
-  final String trackAlias;
+  final String videoTrackAlias;
+  final String audioTrackAlias;
 
   const ViewerScreen({
     super.key,
     required this.namespace,
     required this.trackName,
-    required this.trackAlias,
+    required this.videoTrackAlias,
+    required this.audioTrackAlias,
   });
 
   @override
@@ -24,12 +28,86 @@ class ViewerScreen extends ConsumerStatefulWidget {
 
 class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   String _statusMessage = '';
-  final int _receivedObjects = 0;
+  int _videoObjectsReceived = 0;
+  int _audioObjectsReceived = 0;
+  int _totalBytesReceived = 0;
+  final List<StreamSubscription<MoQObject>> _objectSubscriptions = [];
 
   @override
   void initState() {
     super.initState();
     _statusMessage = 'Subscribed to ${widget.namespace}/${widget.trackName}';
+    // Delay slightly to allow the widget to fully initialize with ref
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _startListeningToObjects();
+    });
+  }
+
+  @override
+  void dispose() {
+    for (final sub in _objectSubscriptions) {
+      sub.cancel();
+    }
+    _objectSubscriptions.clear();
+    super.dispose();
+  }
+
+  void _startListeningToObjects() {
+    final client = ref.read(moqClientProvider);
+
+    debugPrint('ViewerScreen: Starting to listen to objects');
+    debugPrint('ViewerScreen: Found ${client.subscriptions.length} subscriptions');
+
+    // Listen to all subscriptions' object streams
+    for (final entry in client.subscriptions.entries) {
+      final subscriptionId = entry.key;
+      final subscription = entry.value;
+      debugPrint('ViewerScreen: Listening to subscription $subscriptionId');
+
+      final sub = subscription.objectStream.listen((object) {
+        debugPrint('ViewerScreen: Received object from subscription $subscriptionId');
+        _onObjectReceived(object);
+      }, onError: (e) {
+        debugPrint('ViewerScreen: Error on subscription $subscriptionId: $e');
+      }, onDone: () {
+        debugPrint('ViewerScreen: Subscription $subscriptionId stream closed');
+      });
+      _objectSubscriptions.add(sub);
+    }
+
+    if (client.subscriptions.isEmpty) {
+      _statusMessage = 'No active subscriptions';
+    } else {
+      _statusMessage = 'Listening to ${client.subscriptions.length} tracks';
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _onObjectReceived(MoQObject object) {
+    if (!mounted) return;
+
+    final trackName = String.fromCharCodes(object.trackName);
+    final payloadLen = object.payload?.length ?? 0;
+    debugPrint('ViewerScreen: Object received - track=$trackName, bytes=$payloadLen');
+
+    setState(() {
+      _totalBytesReceived += payloadLen;
+
+      // Determine if video or audio based on track name
+      if (trackName.contains('video')) {
+        _videoObjectsReceived++;
+        debugPrint('ViewerScreen: Video object $_videoObjectsReceived');
+      } else if (trackName.contains('audio')) {
+        _audioObjectsReceived++;
+        debugPrint('ViewerScreen: Audio object $_audioObjectsReceived');
+      } else {
+        // Count as video if name doesn't match
+        _videoObjectsReceived++;
+        debugPrint('ViewerScreen: Unknown track "$trackName", counting as video');
+      }
+
+      _statusMessage = 'Receiving: video=$_videoObjectsReceived, audio=$_audioObjectsReceived';
+    });
   }
 
   Future<void> _disconnect() async {
@@ -47,6 +125,12 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         );
       }
     }
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(2)} MB';
   }
 
   @override
@@ -99,13 +183,33 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                     ),
                     SizedBox(height: 1.h),
                     Text(
-                      'Track alias: ${widget.trackAlias}',
+                      'Video: ${widget.videoTrackAlias} | Audio: ${widget.audioTrackAlias}',
                       style: TextStyle(color: Colors.white54, fontSize: 10.sp),
                     ),
-                    SizedBox(height: 1.h),
-                    Text(
-                      '$_receivedObjects objects received',
-                      style: TextStyle(color: Colors.white54, fontSize: 10.sp),
+                    SizedBox(height: 2.h),
+                    // Stats display
+                    Container(
+                      padding: EdgeInsets.all(2.w),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        children: [
+                          Text(
+                            'Video Objects: $_videoObjectsReceived',
+                            style: TextStyle(color: Colors.greenAccent, fontSize: 11.sp),
+                          ),
+                          Text(
+                            'Audio Objects: $_audioObjectsReceived',
+                            style: TextStyle(color: Colors.blueAccent, fontSize: 11.sp),
+                          ),
+                          Text(
+                            'Total Data: ${_formatBytes(_totalBytesReceived)}',
+                            style: TextStyle(color: Colors.white70, fontSize: 11.sp),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -138,8 +242,10 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                             ),
                             SizedBox(height: 1.h),
                             _buildInfoRow('Namespace', widget.namespace),
-                            _buildInfoRow('Track Name', widget.trackName),
-                            _buildInfoRow('Track Alias', widget.trackAlias),
+                            _buildInfoRow('Video Track', 'video0'),
+                            _buildInfoRow('Audio Track', 'audio0'),
+                            _buildInfoRow('Video Alias', widget.videoTrackAlias),
+                            _buildInfoRow('Audio Alias', widget.audioTrackAlias),
                           ],
                         ),
                       ),
