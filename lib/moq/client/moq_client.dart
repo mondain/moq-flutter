@@ -5,6 +5,7 @@ import 'package:logger/logger.dart';
 import '../protocol/moq_messages.dart';
 import '../protocol/moq_data_parser.dart';
 import '../transport/moq_transport.dart';
+import '../packager/moq_mi_packager.dart';
 
 /// MoQ Client implementation per draft-ietf-moq-transport-14
 class MoQClient {
@@ -920,59 +921,85 @@ class MoQClient {
   }
 
   /// Deliver a parsed object to the appropriate subscription
+  ///
+  /// Uses moq-mi extension headers to determine media type (video/audio)
+  /// and routes to the correct subscription. This approach is more robust
+  /// than relying on server-provided trackAlias which may be incorrect.
   void _deliverObject(SubgroupHeader header, SubgroupObject obj) {
-    // Find matching subscription(s) by track alias
-    // Note: Multiple subscriptions might share the same track alias if server
-    // doesn't assign unique aliases, so we need to find all matches
-    final matchingSubscriptions = _subscriptions.values
-        .where((sub) => sub.assignedTrackAlias == header.trackAlias)
-        .toList();
+    // First, try to determine media type from moq-mi extension headers
+    // This is the FB approach - use media type for routing, not trackAlias
+    MoqMiMediaType? mediaType;
+    for (final extHeader in obj.extensionHeaders) {
+      if (extHeader.type == MoqMiExtensionHeaders.mediaType &&
+          extHeader.value != null &&
+          extHeader.value!.isNotEmpty) {
+        try {
+          mediaType = MoqMiMediaType.fromValue(extHeader.value![0]);
+        } catch (e) {
+          _logger.w('Failed to parse media type: $e');
+        }
+        break;
+      }
+    }
 
-    if (matchingSubscriptions.isEmpty) {
-      _logger.w('Received object for unknown track alias: ${header.trackAlias}');
+    // Determine if this is video or audio based on media type
+    final bool isVideo = mediaType == MoqMiMediaType.videoH264Avcc;
+    final bool isAudio = mediaType == MoqMiMediaType.audioOpusBitstream ||
+        mediaType == MoqMiMediaType.audioAacLcMpeg4;
+
+    // Find the subscription that matches the media type
+    MoQSubscription? targetSubscription;
+
+    if (isVideo || isAudio) {
+      // Use moq-mi media type to find the correct subscription
+      for (final sub in _subscriptions.values) {
+        final trackNameStr = String.fromCharCodes(sub.trackName);
+        if (isVideo && trackNameStr.contains('video')) {
+          targetSubscription = sub;
+          break;
+        } else if (isAudio && trackNameStr.contains('audio')) {
+          targetSubscription = sub;
+          break;
+        }
+      }
+    }
+
+    // Fallback: if media type routing didn't work, try trackAlias
+    if (targetSubscription == null) {
+      final matchingByAlias = _subscriptions.values
+          .where((sub) => sub.assignedTrackAlias == header.trackAlias)
+          .toList();
+
+      if (matchingByAlias.length == 1) {
+        targetSubscription = matchingByAlias.first;
+      } else if (matchingByAlias.isNotEmpty) {
+        // Multiple subscriptions with same alias - use first one
+        // The MoqMediaPipeline will filter by media type anyway
+        targetSubscription = matchingByAlias.first;
+        _logger.d('Multiple subscriptions share trackAlias ${header.trackAlias}, using first');
+      }
+    }
+
+    if (targetSubscription == null) {
+      _logger.w('No matching subscription for object (trackAlias=${header.trackAlias}, mediaType=$mediaType)');
       return;
     }
 
-    // If there's exactly one matching subscription, deliver to it
-    if (matchingSubscriptions.length == 1) {
-      final sub = matchingSubscriptions.first;
-      final moqObject = MoQObject(
-        trackNamespace: sub.trackNamespace,
-        trackName: sub.trackName,
-        groupId: header.groupId,
-        subgroupId: header.subgroupId,
-        objectId: obj.objectId ?? Int64(0),
-        publisherPriority: obj.publisherPriority,
-        forwardingPreference: ObjectForwardingPreference.subgroup,
-        status: obj.status ?? ObjectStatus.normal,
-        extensionHeaders: obj.extensionHeaders,
-        payload: obj.payload,
-      );
-      sub._objectController.add(moqObject);
-      _logger.d('Delivered object ${obj.objectId} to subscription ${sub.id}');
-      return;
-    }
-
-    // Multiple subscriptions with same alias - deliver to all (best effort)
-    // In practice, the server should assign unique aliases, but if not,
-    // we deliver to all matching subscriptions and let them filter
-    _logger.w('Multiple subscriptions (${matchingSubscriptions.length}) share track alias ${header.trackAlias}, delivering to all');
-    for (final sub in matchingSubscriptions) {
-      final moqObject = MoQObject(
-        trackNamespace: sub.trackNamespace,
-        trackName: sub.trackName,
-        groupId: header.groupId,
-        subgroupId: header.subgroupId,
-        objectId: obj.objectId ?? Int64(0),
-        publisherPriority: obj.publisherPriority,
-        forwardingPreference: ObjectForwardingPreference.subgroup,
-        status: obj.status ?? ObjectStatus.normal,
-        extensionHeaders: obj.extensionHeaders,
-        payload: obj.payload,
-      );
-      sub._objectController.add(moqObject);
-      _logger.d('Delivered object ${obj.objectId} to subscription ${sub.id}');
-    }
+    // Deliver the object to the target subscription
+    final moqObject = MoQObject(
+      trackNamespace: targetSubscription.trackNamespace,
+      trackName: targetSubscription.trackName,
+      groupId: header.groupId,
+      subgroupId: header.subgroupId,
+      objectId: obj.objectId ?? Int64(0),
+      publisherPriority: obj.publisherPriority,
+      forwardingPreference: ObjectForwardingPreference.subgroup,
+      status: obj.status ?? ObjectStatus.normal,
+      extensionHeaders: obj.extensionHeaders,
+      payload: obj.payload,
+    );
+    targetSubscription._objectController.add(moqObject);
+    _logger.d('Delivered ${isVideo ? "video" : isAudio ? "audio" : "unknown"} object ${obj.objectId} to subscription ${targetSubscription.id}');
   }
 
   /// Check if subscription matches track info

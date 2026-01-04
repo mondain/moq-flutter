@@ -392,7 +392,7 @@ class _MoQVideoPlayerScreenState extends ConsumerState<MoQVideoPlayerScreen> {
         children: [
           Text('Objects: ${player.objectsReceived}'),
           Text('Bytes: ${_formatBytes(player.bytesReceived)}'),
-          Text('Buffer: ${_formatBytes(player.bufferedBytes)}'),
+          Text('V:${player.videoFramesReceived} A:${player.audioFramesReceived}'),
         ],
       ),
     );

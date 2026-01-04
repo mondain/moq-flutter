@@ -7,24 +7,29 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:logger/logger.dart';
 import '../moq/protocol/moq_messages.dart';
 import '../moq/client/moq_client.dart';
+import '../moq/media/streaming_playback.dart';
 
 /// Video player service for MoQ media streams
+///
+/// Uses StreamingPlaybackPipeline to decode moq-mi format and mux to fMP4
+/// for playback with media_kit
 class MoQVideoPlayer {
   final Logger _logger;
   final Player _player;
   late final VideoController _controller;
 
-  // Stream subscription
-  StreamSubscription<MoQObject>? _objectSubscription;
+  // Streaming playback pipeline
+  StreamingPlaybackPipeline? _playbackPipeline;
 
-  // Buffer for incoming media data
-  final _mediaBuffer = StreamController<Uint8List>();
-  int _bufferedBytes = 0;
-  static const int _maxBufferSize = 10 * 1024 * 1024; // 10MB
+  // Stream subscriptions
+  final List<StreamSubscription<MoQObject>> _objectSubscriptions = [];
+  StreamSubscription<String>? _videoReadySubscription;
+  StreamSubscription<String>? _audioReadySubscription;
 
   // Playback state
   bool _isInitialized = false;
   bool _isPlaying = false;
+  bool _mediaOpened = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
 
@@ -82,6 +87,9 @@ class MoQVideoPlayer {
   /// Check if player is currently playing
   bool get isPlaying => _isPlaying;
 
+  /// Check if media is ready for playback
+  bool get isMediaReady => _mediaOpened;
+
   /// Get current playback position
   Duration get position => _position;
 
@@ -91,55 +99,96 @@ class MoQVideoPlayer {
   /// Get statistics
   int get objectsReceived => _objectsReceived;
   int get bytesReceived => _bytesReceived;
-  int get bufferedBytes => _bufferedBytes;
 
-  /// Initialize the player with a MoQ subscription
-  Future<void> initialize(MoQSubscription subscription) async {
+  /// Get pipeline statistics
+  int get videoFramesReceived =>
+      _playbackPipeline?.mediaPipeline.videoFramesReceived ?? 0;
+  int get audioFramesReceived =>
+      _playbackPipeline?.mediaPipeline.audioFramesReceived ?? 0;
+  int get videoSegmentsWritten => _playbackPipeline?.videoSegmentsWritten ?? 0;
+  int get audioSegmentsWritten => _playbackPipeline?.audioSegmentsWritten ?? 0;
+
+  /// Initialize the player with MoQ subscriptions
+  Future<void> initialize(List<MoQSubscription> subscriptions) async {
     if (_isInitialized) {
       _logger.w('Player already initialized');
       return;
     }
 
-    _logger.i('Initializing player with subscription: ${subscription.id}');
+    _logger.i('Initializing player with ${subscriptions.length} subscriptions');
 
-    // Subscribe to incoming objects
-    _objectSubscription = subscription.objectStream.listen(
-      _handleMediaObject,
-      onError: (error) => _logger.e('Object stream error: $error'),
-      onDone: () => _logger.i('Object stream closed'),
-    );
+    // Create and initialize the playback pipeline
+    _playbackPipeline = StreamingPlaybackPipeline();
+    await _playbackPipeline!.initialize();
+
+    // Listen for video ready notification
+    _videoReadySubscription =
+        _playbackPipeline!.onVideoReady.listen(_handleVideoReady);
+    _audioReadySubscription =
+        _playbackPipeline!.onAudioReady.listen(_handleAudioReady);
+
+    // Subscribe to incoming objects from all subscriptions
+    for (final subscription in subscriptions) {
+      final sub = subscription.objectStream.listen(
+        _handleMediaObject,
+        onError: (error) => _logger.e('Object stream error: $error'),
+        onDone: () => _logger.i('Object stream closed'),
+      );
+      _objectSubscriptions.add(sub);
+    }
 
     _isInitialized = true;
-    _logger.i('Player initialized');
+    _logger.i('Player initialized with streaming pipeline');
+  }
+
+  /// Initialize the player with a single MoQ subscription (legacy API)
+  Future<void> initializeSingle(MoQSubscription subscription) async {
+    await initialize([subscription]);
   }
 
   void _handleMediaObject(MoQObject object) {
     if (object.status != ObjectStatus.normal || object.payload == null) {
       if (object.status == ObjectStatus.endOfTrack) {
         _logger.i('Received end of track');
-        // Optionally stop playback or seek to beginning
       }
       return;
     }
 
     _objectsReceived++;
     _bytesReceived += object.payload!.length;
-    _bufferedBytes += object.payload!.length;
 
-    // Add payload to media buffer
-    _mediaBuffer.add(object.payload!);
+    // Process through the streaming pipeline
+    _playbackPipeline?.processObject(object);
 
-    // Trim buffer if it exceeds max size
-    if (_bufferedBytes > _maxBufferSize) {
-      _logger.w('Buffer exceeds max size, dropping oldest data');
-      _bufferedBytes = 0; // Reset for simplicity
-      // In production, implement proper sliding window
+    _logger.d(
+        'Processed object: ${object.objectId}, ${object.payload!.length} bytes');
+  }
+
+  void _handleVideoReady(String videoPath) {
+    _logger.i('Video file ready at: $videoPath');
+
+    if (!_mediaOpened) {
+      _openMedia(videoPath);
     }
+  }
 
-    _logger.d('Received object: ${object.objectId}, ${object.payload!.length} bytes');
+  void _handleAudioReady(String audioPath) {
+    _logger.i('Audio file ready at: $audioPath');
+    // For now, we only play video. Audio could be mixed later.
+  }
 
-    // TODO: Detect media format and initialize player if needed
-    // For now, we'll assume the stream is in a playable format
+  Future<void> _openMedia(String path) async {
+    try {
+      _logger.i('Opening media file: $path');
+
+      // Open the fMP4 file
+      await _player.open(Media(path));
+      _mediaOpened = true;
+
+      _logger.i('Media opened successfully');
+    } catch (e) {
+      _logger.e('Failed to open media: $e');
+    }
   }
 
   /// Start playback
@@ -149,12 +198,6 @@ class MoQVideoPlayer {
     }
 
     _logger.i('Starting playback');
-
-    // In a real implementation, you would:
-    // 1. Feed buffered data to the player
-    // 2. Handle codec initialization
-    // 3. Start playback
-
     await _player.play();
   }
 
@@ -189,21 +232,28 @@ class MoQVideoPlayer {
       throw ArgumentError('Volume must be between 0.0 and 1.0');
     }
     _logger.d('Setting volume: $volume');
-    await _player.setVolume(volume);
+    await _player.setVolume(volume * 100); // media_kit uses 0-100
   }
 
   /// Release resources
   Future<void> dispose() async {
     _logger.i('Disposing player');
 
-    await _objectSubscription?.cancel();
-    _objectSubscription = null;
+    for (final sub in _objectSubscriptions) {
+      await sub.cancel();
+    }
+    _objectSubscriptions.clear();
 
-    await _mediaBuffer.close();
+    await _videoReadySubscription?.cancel();
+    await _audioReadySubscription?.cancel();
+
+    await _playbackPipeline?.dispose();
+    _playbackPipeline = null;
+
     await _player.dispose();
 
     _isInitialized = false;
-    _bufferedBytes = 0;
+    _mediaOpened = false;
   }
 }
 
@@ -443,11 +493,28 @@ class MoQStreamPlayer {
   final MoQClient _client;
   final Logger _logger;
   MoQVideoPlayer? _videoPlayer;
-  Int64? _subscriptionId;
+  final List<Int64> _subscriptionIds = [];
 
   MoQStreamPlayer({required MoQClient client, Logger? logger})
       : _client = client,
         _logger = logger ?? Logger();
+
+  /// Initialize player with existing subscriptions from MoQClient
+  ///
+  /// This should be called after the subscriptions are established
+  Future<MoQVideoPlayer> initializeWithSubscriptions() async {
+    _logger.i('Initializing player with existing subscriptions');
+
+    final subscriptions = _client.subscriptions.values.toList();
+    if (subscriptions.isEmpty) {
+      throw StateError('No active subscriptions');
+    }
+
+    _videoPlayer = MoQVideoPlayer(logger: _logger);
+    await _videoPlayer!.initialize(subscriptions);
+
+    return _videoPlayer!;
+  }
 
   /// Subscribe to a track and start video playback
   Future<MoQVideoPlayer> subscribeAndPlay(
@@ -477,9 +544,7 @@ class MoQStreamPlayer {
       endGroup: endGroup,
     );
 
-    // Note: We're bypassing the subscribe() method to get access to the subscription
-    // In production, you'd want to refactor the client to expose the subscription properly
-    _subscriptionId = requestId;
+    _subscriptionIds.add(requestId);
 
     // Create video player (will be initialized when SUBSCRIBE_OK arrives)
     _videoPlayer = MoQVideoPlayer(logger: _logger);
@@ -503,10 +568,10 @@ class MoQStreamPlayer {
 
   /// Stop playback and unsubscribe
   Future<void> stop() async {
-    if (_subscriptionId != null) {
-      await _client.unsubscribe(_subscriptionId!);
-      _subscriptionId = null;
+    for (final subscriptionId in _subscriptionIds) {
+      await _client.unsubscribe(subscriptionId);
     }
+    _subscriptionIds.clear();
 
     if (_videoPlayer != null) {
       await _videoPlayer!.dispose();
