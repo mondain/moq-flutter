@@ -178,14 +178,26 @@ class MoQDataStreamParser {
             final (headerType, typeLen) = MoQWireFormat.decodeVarint(data, offset);
             offset += typeLen;
 
-            final (valueLen, valueLenLen) = MoQWireFormat.decodeVarint(data, offset);
-            offset += valueLenLen;
-
             Uint8List? value;
-            if (valueLen > 0) {
-              if (offset + valueLen > data.length) return null;
-              value = data.sublist(offset, offset + valueLen);
-              offset += valueLen;
+            // Even types have varint value, odd types have length-prefixed buffer
+            // Per moq-mi spec: "Even types indicate value coded by a single varint.
+            // Odd types indicates value is byte buffer with prefixed varint to indicate length"
+            if (headerType % 2 == 0) {
+              // Even type: value is a single varint
+              final (varintValue, varintLen) = MoQWireFormat.decodeVarint(data, offset);
+              offset += varintLen;
+              // Store varint as single-byte array for consistency
+              value = Uint8List.fromList([varintValue & 0xFF]);
+            } else {
+              // Odd type: value is length-prefixed buffer
+              final (valueLen, valueLenLen) = MoQWireFormat.decodeVarint(data, offset);
+              offset += valueLenLen;
+
+              if (valueLen > 0) {
+                if (offset + valueLen > data.length) return null;
+                value = data.sublist(offset, offset + valueLen);
+                offset += valueLen;
+              }
             }
 
             extensionHeaders.add(KeyValuePair(type: headerType, value: value));

@@ -20,6 +20,7 @@ class QuicTransport extends MoQTransport {
   final _connectionStateController = StreamController<bool>.broadcast();
   final _incomingDataController = StreamController<Uint8List>.broadcast();
   final _incomingDataStreamController = StreamController<DataStreamChunk>.broadcast();
+  final _incomingDatagramController = StreamController<Uint8List>.broadcast();
 
   bool _isConnected = false;
   int _connectionId = -1;
@@ -47,6 +48,8 @@ class QuicTransport extends MoQTransport {
   _GetDataStreamsFunc? _moqQuicGetDataStreams;
   _RecvDataFunc? _moqQuicRecvData;
   _CloseDataStreamFunc? _moqQuicCloseDataStream;
+  _SendDatagramFunc? _moqQuicSendDatagram;
+  _RecvDatagramFunc? _moqQuicRecvDatagram;
 
   Timer? _pollTimer;
   bool _nativeLibraryLoaded = false;
@@ -104,6 +107,14 @@ class QuicTransport extends MoQTransport {
       _moqQuicCloseDataStream = _nativeLib!
           .lookup<NativeFunction<NativeInt32 Function(NativeUint64, NativeUint64)>>(
               'moq_quic_close_data_stream')
+          .asFunction();
+      _moqQuicSendDatagram = _nativeLib!
+          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
+              'moq_quic_send_datagram')
+          .asFunction();
+      _moqQuicRecvDatagram = _nativeLib!
+          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
+              'moq_quic_recv_datagram')
           .asFunction();
 
       // Initialize the native library
@@ -440,10 +451,51 @@ class QuicTransport extends MoQTransport {
   }
 
   @override
+  Future<void> sendDatagram(Uint8List data) async {
+    if (!isConnected) {
+      throw StateError('Not connected');
+    }
+
+    if (!_nativeLibraryLoaded || _moqQuicSendDatagram == null) {
+      _logger.e('Cannot send datagram: Native QUIC library is not available');
+      throw StateError('Native QUIC library not available');
+    }
+
+    try {
+      final dataPtr = calloc<Uint8>(data.length);
+      final nativeData = dataPtr.asTypedList(data.length);
+      nativeData.setAll(0, data);
+
+      final sent = _moqQuicSendDatagram!(_connectionId, dataPtr, data.length);
+
+      calloc.free(dataPtr);
+
+      final sentInt = sent.toInt();
+      if (sentInt < 0) {
+        throw Exception('SendDatagram failed with error code: $sentInt');
+      }
+
+      _stats = _stats.copyWith(
+        bytesSent: _stats.bytesSent + sentInt,
+        packetsSent: _stats.packetsSent + 1,
+        lastActivity: DateTime.now(),
+      );
+
+      _logger.d('Sent datagram ($sentInt bytes)');
+    } catch (e) {
+      _logger.e('SendDatagram failed: $e');
+      rethrow;
+    }
+  }
+
+  @override
   Stream<Uint8List> get incomingData => _incomingDataController.stream;
 
   @override
   Stream<DataStreamChunk> get incomingDataStreams => _incomingDataStreamController.stream;
+
+  @override
+  Stream<Uint8List> get incomingDatagrams => _incomingDatagramController.stream;
 
   @override
   MoQTransportStats get stats => _stats;
@@ -478,6 +530,9 @@ class QuicTransport extends MoQTransport {
 
         // Poll data streams
         _pollDataStreams();
+
+        // Poll datagrams
+        _pollDatagrams();
       } catch (e) {
         _logger.e('Receive error: $e');
       }
@@ -536,6 +591,40 @@ class QuicTransport extends MoQTransport {
     }
   }
 
+  void _pollDatagrams() {
+    if (!_nativeLibraryLoaded || _moqQuicRecvDatagram == null) return;
+
+    try {
+      // Keep polling until no more datagrams available
+      while (true) {
+        final buffer = calloc<Uint8>(65536); // Max datagram size
+        final received = _moqQuicRecvDatagram!(_connectionId, buffer, 65536);
+
+        if (received > 0) {
+          final data = Uint8List(received);
+          final nativeData = buffer.asTypedList(received);
+          data.setAll(0, nativeData);
+
+          _stats = _stats.copyWith(
+            bytesReceived: _stats.bytesReceived + received,
+            packetsReceived: _stats.packetsReceived + 1,
+            lastActivity: DateTime.now(),
+          );
+
+          _logger.d('Received datagram ($received bytes)');
+          _incomingDatagramController.add(data);
+
+          calloc.free(buffer);
+        } else {
+          calloc.free(buffer);
+          break; // No more datagrams
+        }
+      }
+    } catch (e) {
+      _logger.e('Datagram poll error: $e');
+    }
+  }
+
   /// Close a data stream after processing is complete
   void closeDataStream(int streamId) {
     if (!_nativeLibraryLoaded || _moqQuicCloseDataStream == null) return;
@@ -573,6 +662,7 @@ class QuicTransport extends MoQTransport {
     _connectionStateController.close();
     _incomingDataController.close();
     _incomingDataStreamController.close();
+    _incomingDatagramController.close();
     _knownDataStreams.clear();
   }
 }
@@ -597,3 +687,7 @@ typedef _RecvDataFunc = int Function(
     int connectionId, int streamId, Pointer<Uint8> buffer, int bufferLen);
 typedef _CloseDataStreamFunc = int Function(
     int connectionId, int streamId);
+typedef _SendDatagramFunc = int Function(
+    int connectionId, Pointer<Uint8> data, int len);
+typedef _RecvDatagramFunc = int Function(
+    int connectionId, Pointer<Uint8> buffer, int bufferLen);

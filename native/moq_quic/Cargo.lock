@@ -677,6 +677,7 @@ dependencies = [
 name = "moq_quic"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "cbindgen",
  "dashmap",
  "futures",

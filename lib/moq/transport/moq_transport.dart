@@ -56,6 +56,14 @@ abstract class MoQTransport {
   /// Used for receiving SUBGROUP_HEADER and object data.
   Stream<DataStreamChunk> get incomingDataStreams;
 
+  /// Send a datagram (unreliable, unordered)
+  /// Used for low-latency audio frames that fit within MTU
+  Future<void> sendDatagram(Uint8List data);
+
+  /// Stream of incoming datagrams
+  /// Each datagram contains a complete OBJECT_DATAGRAM message
+  Stream<Uint8List> get incomingDatagrams;
+
   /// Get the underlying transport statistics
   MoQTransportStats get stats;
 

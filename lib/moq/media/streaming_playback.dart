@@ -844,7 +844,7 @@ class StreamingPlaybackPipeline {
       if (initSegment != null) {
         _videoSink!.add(initSegment);
         _videoInitWritten = true;
-        debugPrint('StreamingPlayback: Video init segment written');
+        debugPrint('StreamingPlayback: Video init segment written (${initSegment.length} bytes)');
       }
     }
 
@@ -854,10 +854,16 @@ class StreamingPlaybackPipeline {
       _videoSink!.add(segment);
       _videoSegmentsWritten++;
 
-      // Notify when first segment is written
-      if (_videoSegmentsWritten == 1) {
+      // Notify when enough segments are written for playback to start
+      // Wait for at least 5 segments to ensure player has enough data
+      if (_videoSegmentsWritten == 5) {
         _videoReadyController.add(_videoFile!.path);
-        debugPrint('StreamingPlayback: Video ready at ${_videoFile!.path}');
+        debugPrint('StreamingPlayback: Video ready at ${_videoFile!.path} (5 segments buffered)');
+      }
+
+      // Log progress periodically
+      if (_videoSegmentsWritten % 30 == 0) {
+        debugPrint('StreamingPlayback: Video segments written: $_videoSegmentsWritten');
       }
     }
   }
@@ -874,10 +880,10 @@ class StreamingPlaybackPipeline {
       Uint8List initSegment;
       if (_detectedAudioType == MediaFrameType.audioAac) {
         initSegment = _aacMuxer.initSegment;
-        debugPrint('StreamingPlayback: AAC audio init segment written');
+        debugPrint('StreamingPlayback: AAC audio init segment written (${initSegment.length} bytes)');
       } else {
         initSegment = _opusMuxer.initSegment;
-        debugPrint('StreamingPlayback: Opus audio init segment written');
+        debugPrint('StreamingPlayback: Opus audio init segment written (${initSegment.length} bytes)');
       }
       _audioSink!.add(initSegment);
       _audioInitWritten = true;
@@ -898,10 +904,15 @@ class StreamingPlaybackPipeline {
     _audioSink!.add(segment);
     _audioSegmentsWritten++;
 
-    // Notify when first segment is written
+    // Notify when first segment is written (no await - let OS buffer)
     if (_audioSegmentsWritten == 1) {
       _audioReadyController.add(_audioFile!.path);
       debugPrint('StreamingPlayback: Audio ready at ${_audioFile!.path}');
+    }
+
+    // Log progress periodically
+    if (_audioSegmentsWritten % 50 == 0) {
+      debugPrint('StreamingPlayback: Audio segments written: $_audioSegmentsWritten');
     }
   }
 

@@ -50,6 +50,9 @@ class MoQClient {
   // Data stream subscription
   StreamSubscription<DataStreamChunk>? _dataStreamSubscription;
 
+  // Datagram subscription
+  StreamSubscription<Uint8List>? _datagramSubscription;
+
   // Control message buffer for incomplete messages
   final _controlBuffer = <int>[];
 
@@ -174,6 +177,14 @@ class MoQClient {
           _logger.e('Data stream error: $error');
         },
       );
+
+      // Listen for incoming datagrams (OBJECT_DATAGRAM messages)
+      _datagramSubscription = _transport.incomingDatagrams.listen(
+        _handleDatagram,
+        onError: (error) {
+          _logger.e('Datagram error: $error');
+        },
+      );
     } catch (e) {
       _logger.e('Failed to listen to transport: $e');
       _setupCompleter!.completeError(
@@ -254,6 +265,10 @@ class MoQClient {
     await _dataStreamSubscription?.cancel();
     _dataStreamSubscription = null;
     _dataStreamParsers.clear();
+
+    // Cancel datagram subscription
+    await _datagramSubscription?.cancel();
+    _datagramSubscription = null;
 
     for (final sub in _subscriptions.values) {
       await sub.close();
@@ -895,16 +910,20 @@ class MoQClient {
 
   /// Handle incoming data stream chunk (SUBGROUP_HEADER + objects)
   void _handleDataStreamChunk(DataStreamChunk chunk) {
+    _logger.d('Data stream chunk: streamId=${chunk.streamId}, ${chunk.data.length} bytes, complete=${chunk.isComplete}');
+
     var parser = _dataStreamParsers[chunk.streamId];
 
     if (parser == null) {
       // New stream - create parser
       parser = MoQDataStreamParser(logger: _logger);
       _dataStreamParsers[chunk.streamId] = parser;
+      _logger.d('Created new parser for stream ${chunk.streamId}');
     }
 
     // Parse the chunk - may return header and/or objects
     final objects = parser.parseChunk(chunk.data);
+    _logger.d('Parsed ${objects.length} objects from stream ${chunk.streamId}');
 
     // If we have a header and objects, deliver them
     if (parser.hasHeader) {
@@ -918,6 +937,100 @@ class MoQClient {
       _dataStreamParsers.remove(chunk.streamId);
       _logger.d('Data stream ${chunk.streamId} complete');
     }
+  }
+
+  /// Handle incoming datagram (OBJECT_DATAGRAM message)
+  void _handleDatagram(Uint8List data) {
+    if (data.isEmpty) return;
+
+    try {
+      // Parse as OBJECT_DATAGRAM
+      final datagram = ObjectDatagram.deserialize(data);
+
+      _logger.d('Received datagram: trackAlias=${datagram.trackAlias}, '
+          'group=${datagram.groupId}, object=${datagram.objectId}, '
+          'payload=${datagram.payload?.length ?? 0} bytes');
+
+      // Route to subscription using the same media type logic as stream objects
+      _deliverDatagram(datagram);
+    } catch (e, stack) {
+      _logger.e('Failed to parse datagram: $e');
+      _logger.d('Stack: $stack');
+    }
+  }
+
+  /// Deliver a parsed datagram to the appropriate subscription
+  void _deliverDatagram(ObjectDatagram datagram) {
+    // First, try to determine media type from moq-mi extension headers
+    MoqMiMediaType? mediaType;
+    for (final extHeader in datagram.extensionHeaders) {
+      if (extHeader.type == MoqMiExtensionHeaders.mediaType &&
+          extHeader.value != null &&
+          extHeader.value!.isNotEmpty) {
+        try {
+          mediaType = MoqMiMediaType.fromValue(extHeader.value![0]);
+        } catch (e) {
+          _logger.w('Failed to parse media type: $e');
+        }
+        break;
+      }
+    }
+
+    // Determine if this is video or audio based on media type
+    final bool isVideo = mediaType == MoqMiMediaType.videoH264Avcc;
+    final bool isAudio = mediaType == MoqMiMediaType.audioOpusBitstream ||
+        mediaType == MoqMiMediaType.audioAacLcMpeg4;
+
+    // Find the subscription that matches the media type
+    MoQSubscription? targetSubscription;
+
+    if (isVideo || isAudio) {
+      // Use moq-mi media type to find the correct subscription
+      for (final sub in _subscriptions.values) {
+        final trackNameStr = String.fromCharCodes(sub.trackName);
+        if (isVideo && trackNameStr.contains('video')) {
+          targetSubscription = sub;
+          break;
+        } else if (isAudio && trackNameStr.contains('audio')) {
+          targetSubscription = sub;
+          break;
+        }
+      }
+    }
+
+    // Fallback: if media type routing didn't work, try trackAlias
+    if (targetSubscription == null) {
+      final matchingByAlias = _subscriptions.values
+          .where((sub) => sub.assignedTrackAlias == datagram.trackAlias)
+          .toList();
+
+      if (matchingByAlias.length == 1) {
+        targetSubscription = matchingByAlias.first;
+      } else if (matchingByAlias.isNotEmpty) {
+        targetSubscription = matchingByAlias.first;
+        _logger.d('Multiple subscriptions share trackAlias ${datagram.trackAlias}, using first');
+      }
+    }
+
+    if (targetSubscription == null) {
+      _logger.w('No matching subscription for datagram (trackAlias=${datagram.trackAlias}, mediaType=$mediaType)');
+      return;
+    }
+
+    // Convert datagram to MoQObject and deliver
+    final moqObject = MoQObject(
+      trackNamespace: targetSubscription.trackNamespace,
+      trackName: targetSubscription.trackName,
+      groupId: datagram.groupId,
+      objectId: datagram.objectId ?? Int64(0),
+      publisherPriority: datagram.publisherPriority,
+      forwardingPreference: ObjectForwardingPreference.datagram,
+      status: datagram.status ?? ObjectStatus.normal,
+      extensionHeaders: datagram.extensionHeaders,
+      payload: datagram.payload,
+    );
+    targetSubscription._objectController.add(moqObject);
+    _logger.d('Delivered ${isVideo ? "video" : isAudio ? "audio" : "unknown"} datagram ${datagram.objectId} to subscription ${targetSubscription.id}');
   }
 
   /// Deliver a parsed object to the appropriate subscription

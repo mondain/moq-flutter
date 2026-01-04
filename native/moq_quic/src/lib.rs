@@ -140,6 +140,9 @@ static DATA_STREAM_BUFFERS: OnceCell<DashMap<(u64, u64), Arc<tokio::sync::Mutex<
 // Global registry of active data streams per connection (connection_id -> list of stream_ids)
 static ACTIVE_DATA_STREAMS: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<Vec<u64>>>>> = OnceCell::new();
 
+// Global registry of datagram receive buffers (connection_id -> buffer of complete datagrams)
+static DATAGRAM_BUFFERS: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<VecDeque<Vec<u8>>>>>> = OnceCell::new();
+
 // Next connection ID counter
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -215,6 +218,11 @@ pub extern "C" fn moq_quic_init() {
         log::warn!("Active data streams registry already initialized");
     }
 
+    // Initialize datagram buffers registry
+    if DATAGRAM_BUFFERS.set(DashMap::new()).is_err() {
+        log::warn!("Datagram buffers registry already initialized");
+    }
+
     // Initialize last error buffer
     if LAST_ERROR.set(Mutex::new(Vec::new())).is_err() {
         log::warn!("Last error buffer already initialized");
@@ -284,6 +292,9 @@ pub extern "C" fn moq_quic_connect(
         transport.keep_alive_interval(Some(time::Duration::from_secs(4)));
         transport.max_concurrent_bidi_streams(100u32.into());
         transport.max_concurrent_uni_streams(100u32.into());
+        // Enable datagrams with max size (for low-latency audio)
+        transport.datagram_receive_buffer_size(Some(65536));
+        transport.datagram_send_buffer_size(65536);
 
         // Create client configuration with ALPN protocols
         let client_crypto = if insecure != 0 {
@@ -392,6 +403,10 @@ pub extern "C" fn moq_quic_connect(
     recv_buffers.insert(connection_id, recv_buffer.clone());
     active_data_streams.insert(connection_id, Arc::new(tokio::sync::Mutex::new(Vec::new())));
 
+    // Initialize datagram buffer for this connection
+    let datagram_buffers = DATAGRAM_BUFFERS.get().expect("Datagram buffers not initialized");
+    datagram_buffers.insert(connection_id, Arc::new(tokio::sync::Mutex::new(VecDeque::new())));
+
     // Open bidirectional control stream (required by MoQ spec)
     let connection_for_control = connection_arc.clone();
     let recv_buffer_for_control = recv_buffer.clone();
@@ -496,6 +511,39 @@ pub extern "C" fn moq_quic_connect(
             }
         }
         log::info!("Data stream acceptor stopped for connection {}", connection_id);
+    });
+
+    // Start datagram receiver task
+    let connection_for_datagrams = connection_arc.clone();
+    runtime.spawn(async move {
+        log::info!("Starting datagram receiver for connection {}", connection_id);
+        let datagram_buffers = DATAGRAM_BUFFERS.get().expect("Datagram buffers not initialized");
+
+        loop {
+            match connection_for_datagrams.read_datagram().await {
+                Ok(datagram) => {
+                    log::trace!("Received datagram ({} bytes) on connection {}", datagram.len(), connection_id);
+
+                    // Store the complete datagram in the buffer
+                    if let Some(buffer) = datagram_buffers.get(&connection_id) {
+                        let mut buf = buffer.lock().await;
+                        // Limit buffer size to prevent unbounded growth
+                        const MAX_DATAGRAM_BUFFER: usize = 1000;
+                        if buf.len() < MAX_DATAGRAM_BUFFER {
+                            buf.push_back(datagram.to_vec());
+                        } else {
+                            log::warn!("Datagram buffer full, dropping datagram");
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Error receiving datagram: {:?}", e);
+                    // Connection might be closed
+                    break;
+                }
+            }
+        }
+        log::info!("Datagram receiver stopped for connection {}", connection_id);
     });
 
     unsafe {
@@ -674,6 +722,10 @@ pub extern "C" fn moq_quic_close(connection_id: u64) -> i32 {
     // Clean up active data streams list
     active_data_streams.remove(&connection_id);
 
+    // Clean up datagram buffer
+    let datagram_buffers = DATAGRAM_BUFFERS.get().expect("Datagram buffers not initialized");
+    datagram_buffers.remove(&connection_id);
+
     let runtime = get_runtime();
 
     // Close connection within runtime context
@@ -738,6 +790,9 @@ pub extern "C" fn moq_quic_cleanup() {
 
     let active_data_streams = ACTIVE_DATA_STREAMS.get().expect("Active data streams not initialized");
     active_data_streams.clear();
+
+    let datagram_buffers = DATAGRAM_BUFFERS.get().expect("Datagram buffers not initialized");
+    datagram_buffers.clear();
 
     log::info!("MoQ QUIC transport cleanup complete");
 }
@@ -1113,4 +1168,100 @@ pub extern "C" fn moq_quic_close_data_stream(
 
     log::debug!("Closed data stream {} for connection {}", stream_id, connection_id);
     0
+}
+
+/// Send a datagram (unreliable, unordered)
+///
+/// Datagrams are used for low-latency data that doesn't require
+/// reliable delivery (e.g., audio frames in MoQ).
+///
+/// # Arguments
+/// * `connection_id` - The connection ID
+/// * `data` - Pointer to data to send
+/// * `len` - Length of data
+///
+/// # Returns
+/// * Number of bytes sent on success, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_quic_send_datagram(
+    connection_id: u64,
+    data: *const u8,
+    len: usize,
+) -> i64 {
+    let connections = CONNECTIONS.get().expect("Connection registry not initialized");
+
+    let connection = match connections.get(&connection_id) {
+        Some(conn) => conn.clone(),
+        None => {
+            log::error!("Connection {} not found for send_datagram", connection_id);
+            return -1;
+        }
+    };
+
+    let data_bytes = unsafe { slice::from_raw_parts(data, len) };
+
+    match connection.send_datagram(bytes::Bytes::copy_from_slice(data_bytes)) {
+        Ok(()) => {
+            log::trace!("Sent datagram ({} bytes) on connection {}", len, connection_id);
+            len as i64
+        }
+        Err(e) => {
+            log::error!("Failed to send datagram: {:?}", e);
+            -2
+        }
+    }
+}
+
+/// Receive a datagram (non-blocking poll)
+///
+/// Returns the next complete datagram from the buffer, if available.
+///
+/// # Arguments
+/// * `connection_id` - The connection ID
+/// * `buffer` - Pointer to buffer to store received datagram
+/// * `buffer_len` - Length of buffer
+///
+/// # Returns
+/// * Number of bytes received on success, 0 if no datagram available, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_quic_recv_datagram(
+    connection_id: u64,
+    buffer: *mut u8,
+    buffer_len: usize,
+) -> i64 {
+    let datagram_buffers = DATAGRAM_BUFFERS.get().expect("Datagram buffers not initialized");
+
+    let datagram_buffer = match datagram_buffers.get(&connection_id) {
+        Some(buf) => buf.clone(),
+        None => {
+            log::error!("Connection {} not found for recv_datagram", connection_id);
+            return -1;
+        }
+    };
+
+    if buffer.is_null() || buffer_len == 0 {
+        return 0;
+    }
+
+    let runtime = get_runtime();
+
+    let result = runtime.block_on(async {
+        let mut buf = datagram_buffer.lock().await;
+
+        if let Some(datagram) = buf.pop_front() {
+            let copy_len = datagram.len().min(buffer_len);
+            unsafe {
+                let output = slice::from_raw_parts_mut(buffer, copy_len);
+                output.copy_from_slice(&datagram[..copy_len]);
+            }
+            if datagram.len() > buffer_len {
+                log::warn!("Datagram truncated: {} bytes available, {} bytes buffer", datagram.len(), buffer_len);
+            }
+            copy_len as i64
+        } else {
+            0
+        }
+    });
+
+    result
 }

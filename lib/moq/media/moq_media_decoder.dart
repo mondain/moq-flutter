@@ -368,9 +368,17 @@ class MoqMediaPipeline {
     if (frame.type == MediaFrameType.videoH264) {
       _videoFramesReceived++;
       _videoBuffer.addFrame(frame);
+      if (_videoFramesReceived % 30 == 1) {
+        debugPrint('MoqMediaPipeline: Video frame ${frame.seqId}, keyframe=${frame.isKeyframe}, '
+            'size=${frame.data.length}, total=$_videoFramesReceived');
+      }
     } else {
       _audioFramesReceived++;
       _audioBuffer.addFrame(frame);
+      if (_audioFramesReceived % 50 == 1) {
+        debugPrint('MoqMediaPipeline: Audio frame ${frame.seqId}, '
+            'type=${frame.type}, total=$_audioFramesReceived');
+      }
     }
   }
 

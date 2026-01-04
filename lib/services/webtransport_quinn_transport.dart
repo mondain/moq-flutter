@@ -24,6 +24,7 @@ class WebTransportQuinnTransport extends MoQTransport {
   final _connectionStateController = StreamController<bool>.broadcast();
   final _incomingDataController = StreamController<Uint8List>.broadcast();
   final _incomingDataStreamController = StreamController<DataStreamChunk>.broadcast();
+  final _incomingDatagramController = StreamController<Uint8List>.broadcast();
 
   bool _isConnected = false;
   int _sessionId = -1;
@@ -402,6 +403,16 @@ class WebTransportQuinnTransport extends MoQTransport {
   Stream<DataStreamChunk> get incomingDataStreams => _incomingDataStreamController.stream;
 
   @override
+  Future<void> sendDatagram(Uint8List data) async {
+    // WebTransport datagrams not yet implemented
+    _logger.w('sendDatagram not yet implemented for WebTransport');
+    throw UnimplementedError('WebTransport datagrams not yet implemented');
+  }
+
+  @override
+  Stream<Uint8List> get incomingDatagrams => _incomingDatagramController.stream;
+
+  @override
   MoQTransportStats get stats => _stats;
 
   void _startReceiving() {
@@ -525,6 +536,7 @@ class WebTransportQuinnTransport extends MoQTransport {
     _connectionStateController.close();
     _incomingDataController.close();
     _incomingDataStreamController.close();
+    _incomingDatagramController.close();
   }
 }
 

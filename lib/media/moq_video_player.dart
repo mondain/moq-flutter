@@ -37,12 +37,41 @@ class MoQVideoPlayer {
   int _objectsReceived = 0;
   int _bytesReceived = 0;
 
+  // Media paths
+  String? _videoPath;
+  String? _audioPath;
+
   MoQVideoPlayer({Logger? logger})
       : _logger = logger ?? Logger(),
         _player = Player() {
     _controller = VideoController(_player);
     _logger.i('MoQVideoPlayer created');
     _setupPlayerListeners();
+    _configureLivePlayback();
+  }
+
+  /// Configure mpv for live/growing file playback
+  Future<void> _configureLivePlayback() async {
+    try {
+      // Access the native player to set mpv properties
+      final nativePlayer = _player.platform;
+      if (nativePlayer is NativePlayer) {
+        // Tell demuxer this is a live/untimed stream
+        await nativePlayer.setProperty('demuxer-lavf-o', 'live=1');
+        // Use low-latency profile
+        await nativePlayer.setProperty('profile', 'low-latency');
+        // Reduce cache for live playback
+        await nativePlayer.setProperty('cache', 'no');
+        await nativePlayer.setProperty('cache-pause', 'no');
+        // Don't wait for full file
+        await nativePlayer.setProperty('demuxer-readahead-secs', '1');
+        // Force continuous reading
+        await nativePlayer.setProperty('stream-buffer-size', '4k');
+        _logger.i('Configured mpv for live playback');
+      }
+    } catch (e) {
+      _logger.w('Could not configure live playback options: $e');
+    }
   }
 
   void _setupPlayerListeners() {
@@ -147,6 +176,11 @@ class MoQVideoPlayer {
   }
 
   void _handleMediaObject(MoQObject object) {
+    final trackName = String.fromCharCodes(object.trackName);
+    _logger.d('Received object on track $trackName: objectId=${object.objectId}, '
+        'status=${object.status}, payloadSize=${object.payload?.length ?? 0}, '
+        'headers=${object.extensionHeaders.length}');
+
     if (object.status != ObjectStatus.normal || object.payload == null) {
       if (object.status == ObjectStatus.endOfTrack) {
         _logger.i('Received end of track');
@@ -166,6 +200,7 @@ class MoQVideoPlayer {
 
   void _handleVideoReady(String videoPath) {
     _logger.i('Video file ready at: $videoPath');
+    _videoPath = videoPath;
 
     if (!_mediaOpened) {
       _openMedia(videoPath);
@@ -174,18 +209,28 @@ class MoQVideoPlayer {
 
   void _handleAudioReady(String audioPath) {
     _logger.i('Audio file ready at: $audioPath');
-    // For now, we only play video. Audio could be mixed later.
+    _audioPath = audioPath;
+
+    // If video isn't ready yet but audio is, start playing audio
+    // This helps diagnose if audio is working even when video isn't
+    if (!_mediaOpened && _videoPath == null) {
+      _logger.i('Video not ready yet, playing audio only');
+      _openMedia(audioPath);
+    }
   }
 
   Future<void> _openMedia(String path) async {
     try {
       _logger.i('Opening media file: $path');
 
-      // Open the fMP4 file
-      await _player.open(Media(path));
+      // Open the fMP4 file with options for streaming
+      await _player.open(
+        Media(path),
+        play: true, // Auto-play when opened
+      );
       _mediaOpened = true;
 
-      _logger.i('Media opened successfully');
+      _logger.i('Media opened successfully, playback started');
     } catch (e) {
       _logger.e('Failed to open media: $e');
     }
