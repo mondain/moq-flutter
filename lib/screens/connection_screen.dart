@@ -123,19 +123,21 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
       final trackName = _trackNameController.text;
 
       if (_clientRole == ClientRole.subscriber) {
-        // Subscribe to both video and audio tracks (like FB src-player)
-        // FB uses fixed track names: "video0" and "audio0"
+        // Subscribe to both video and audio tracks
+        // Track names are configurable in settings
         final namespaceBytes = [Uint8List.fromList(namespace.codeUnits)];
 
-        // Subscribe to video track - use "video0" as FB does
-        const videoTrackName = 'video0';
+        // Get track names from settings
+        final videoTrackName = ref.read(videoTrackNameProvider);
+        final audioTrackName = ref.read(audioTrackNameProvider);
+
+        // Subscribe to video track
         _setStatus('Subscribing to $namespace/$videoTrackName...');
         final videoTrackNameBytes = Uint8List.fromList(videoTrackName.codeUnits);
         final videoResult = await client.subscribe(namespaceBytes, videoTrackNameBytes);
         _setStatus('Video subscribed! Track alias: ${videoResult.trackAlias}');
 
-        // Subscribe to audio track - use "audio0" as FB does
-        const audioTrackName = 'audio0';
+        // Subscribe to audio track
         _setStatus('Subscribing to $namespace/$audioTrackName...');
         final audioTrackNameBytes = Uint8List.fromList(audioTrackName.codeUnits);
         final audioResult = await client.subscribe(namespaceBytes, audioTrackNameBytes);
@@ -144,7 +146,7 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
         if (mounted) {
           context.go('/viewer', extra: {
             'namespace': namespace,
-            'trackName': 'video0',  // Fixed track name
+            'trackName': videoTrackName,
             'videoTrackAlias': videoResult.trackAlias.toString(),
             'audioTrackAlias': audioResult.trackAlias.toString(),
           });

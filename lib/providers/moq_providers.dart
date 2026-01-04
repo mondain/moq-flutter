@@ -138,6 +138,42 @@ final themeModeProvider = NotifierProvider<ThemeModeNotifier, ThemeMode>(
   ThemeModeNotifier.new,
 );
 
+/// Video track name provider (defaults to video0)
+class VideoTrackNameNotifier extends Notifier<String> {
+  @override
+  String build() {
+    final settings = ref.watch(settingsServiceProvider);
+    return settings.videoTrackName;
+  }
+
+  void setVideoTrackName(String name) {
+    state = name;
+    ref.read(settingsServiceProvider).setVideoTrackName(name);
+  }
+}
+
+final videoTrackNameProvider = NotifierProvider<VideoTrackNameNotifier, String>(
+  VideoTrackNameNotifier.new,
+);
+
+/// Audio track name provider (defaults to audio0)
+class AudioTrackNameNotifier extends Notifier<String> {
+  @override
+  String build() {
+    final settings = ref.watch(settingsServiceProvider);
+    return settings.audioTrackName;
+  }
+
+  void setAudioTrackName(String name) {
+    state = name;
+    ref.read(settingsServiceProvider).setAudioTrackName(name);
+  }
+}
+
+final audioTrackNameProvider = NotifierProvider<AudioTrackNameNotifier, String>(
+  AudioTrackNameNotifier.new,
+);
+
 /// QUIC Transport provider
 final quicTransportProvider = Provider<MoQTransport>((ref) {
   final logger = ref.watch(loggerProvider);

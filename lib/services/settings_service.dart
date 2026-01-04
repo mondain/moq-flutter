@@ -73,6 +73,8 @@ class SettingsService {
   static const _keyInsecureMode = 'insecure_mode';
   static const _keyNamespace = 'namespace';
   static const _keyTrackName = 'track_name';
+  static const _keyVideoTrackName = 'video_track_name';
+  static const _keyAudioTrackName = 'audio_track_name';
 
   // Host
   String get host => _prefs.getString(_keyHost) ?? 'localhost';
@@ -109,10 +111,24 @@ class SettingsService {
     await _prefs.setString(_keyNamespace, namespace);
   }
 
-  // Track name
+  // Track name (legacy, for publisher)
   String get trackName => _prefs.getString(_keyTrackName) ?? 'video';
 
   Future<void> setTrackName(String trackName) async {
     await _prefs.setString(_keyTrackName, trackName);
+  }
+
+  // Video track name (for subscriber)
+  String get videoTrackName => _prefs.getString(_keyVideoTrackName) ?? 'video0';
+
+  Future<void> setVideoTrackName(String trackName) async {
+    await _prefs.setString(_keyVideoTrackName, trackName);
+  }
+
+  // Audio track name (for subscriber)
+  String get audioTrackName => _prefs.getString(_keyAudioTrackName) ?? 'audio0';
+
+  Future<void> setAudioTrackName(String trackName) async {
+    await _prefs.setString(_keyAudioTrackName, trackName);
   }
 }

@@ -94,7 +94,10 @@ class MoqMediaDecoder {
     );
 
     if (moqMiData == null) {
-      debugPrint('MoqMediaDecoder: Failed to parse moq-mi headers');
+      // Log more details about what we received
+      final headerTypes = extensionHeaders.map((h) => '0x${h.type.toRadixString(16)}').join(', ');
+      debugPrint('MoqMediaDecoder: Failed to parse moq-mi headers. '
+          'Headers: [$headerTypes], payload size: ${object.payload!.length}');
       return null;
     }
 

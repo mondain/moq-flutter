@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../providers/moq_providers.dart';
 
 /// Card for track configuration (namespace and track name)
-class TrackConfigCard extends StatelessWidget {
+class TrackConfigCard extends ConsumerWidget {
   final TextEditingController namespaceController;
   final TextEditingController trackNameController;
   final bool isPublisher;
@@ -16,7 +18,10 @@ class TrackConfigCard extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final videoTrackName = ref.watch(videoTrackNameProvider);
+    final audioTrackName = ref.watch(audioTrackNameProvider);
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -79,7 +84,7 @@ class TrackConfigCard extends StatelessWidget {
                         ),
                         const SizedBox(width: 4),
                         Text(
-                          'video0',
+                          videoTrackName,
                           style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                             fontWeight: FontWeight.w500,
                           ),
@@ -92,7 +97,7 @@ class TrackConfigCard extends StatelessWidget {
                         ),
                         const SizedBox(width: 4),
                         Text(
-                          'audio0',
+                          audioTrackName,
                           style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                             fontWeight: FontWeight.w500,
                           ),

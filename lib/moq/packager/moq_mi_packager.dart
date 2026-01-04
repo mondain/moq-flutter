@@ -1,5 +1,5 @@
-import 'dart:typed_data';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import '../protocol/moq_messages.dart';
 
 /// MoQ Media Interop (moq-mi) Packager
@@ -53,10 +53,10 @@ enum MoqMiMediaType {
   const MoqMiMediaType(this.value);
 
   static MoqMiMediaType? fromValue(int value) {
-    return MoqMiMediaType.values.firstWhere(
-      (type) => type.value == value,
-      orElse: () => throw ArgumentError('Unknown media type: $value'),
-    );
+    for (final type in MoqMiMediaType.values) {
+      if (type.value == value) return type;
+    }
+    return null; // Unknown media type
   }
 }
 
@@ -447,12 +447,20 @@ class MoqMiPackager {
       switch (header.type) {
         case MoqMiExtensionHeaders.mediaType:
           if (header.value!.isNotEmpty) {
-            mediaType = MoqMiMediaType.fromValue(header.value![0]);
+            final typeValue = header.value![0];
+            mediaType = MoqMiMediaType.fromValue(typeValue);
+            if (mediaType == null) {
+              debugPrint('MoqMiPackager: Unknown media type value: 0x${typeValue.toRadixString(16)}');
+            }
           }
           break;
 
         case MoqMiExtensionHeaders.videoH264AvccMetadata:
-          videoMetadata = VideoH264AvccMetadata.fromBytes(header.value!);
+          try {
+            videoMetadata = VideoH264AvccMetadata.fromBytes(header.value!);
+          } catch (e) {
+            debugPrint('MoqMiPackager: Failed to parse video metadata: $e');
+          }
           break;
 
         case MoqMiExtensionHeaders.videoH264AvccExtradata:
@@ -461,14 +469,25 @@ class MoqMiPackager {
 
         case MoqMiExtensionHeaders.audioOpusMetadata:
         case MoqMiExtensionHeaders.audioAacLcMetadata:
-          audioMetadata = AudioMetadata.fromBytes(header.value!);
+          try {
+            audioMetadata = AudioMetadata.fromBytes(header.value!);
+          } catch (e) {
+            debugPrint('MoqMiPackager: Failed to parse audio metadata: $e');
+          }
           break;
       }
     }
 
-    if (mediaType == null) return null;
+    if (mediaType == null) {
+      debugPrint('MoqMiPackager: No media type header (0x0A) found');
+      return null;
+    }
 
-    if (mediaType == MoqMiMediaType.videoH264Avcc && videoMetadata != null) {
+    if (mediaType == MoqMiMediaType.videoH264Avcc) {
+      if (videoMetadata == null) {
+        debugPrint('MoqMiPackager: Video media type but missing video metadata header (0x15)');
+        return null;
+      }
       return MoqMiData(
         mediaType: mediaType,
         seqId: videoMetadata.seqId,
@@ -482,9 +501,13 @@ class MoqMiPackager {
       );
     }
 
-    if ((mediaType == MoqMiMediaType.audioOpusBitstream ||
-            mediaType == MoqMiMediaType.audioAacLcMpeg4) &&
-        audioMetadata != null) {
+    if (mediaType == MoqMiMediaType.audioOpusBitstream ||
+        mediaType == MoqMiMediaType.audioAacLcMpeg4) {
+      if (audioMetadata == null) {
+        final expectedHeader = mediaType == MoqMiMediaType.audioOpusBitstream ? '0x0F' : '0x13';
+        debugPrint('MoqMiPackager: Audio media type but missing audio metadata header ($expectedHeader)');
+        return null;
+      }
       return MoqMiData(
         mediaType: mediaType,
         seqId: audioMetadata.seqId,
@@ -498,6 +521,7 @@ class MoqMiPackager {
       );
     }
 
+    debugPrint('MoqMiPackager: Unhandled media type: $mediaType');
     return null;
   }
 

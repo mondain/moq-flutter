@@ -4,11 +4,42 @@ import 'package:go_router/go_router.dart';
 import '../providers/moq_providers.dart';
 
 /// Settings screen for app configuration
-class SettingsScreen extends ConsumerWidget {
+class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  late TextEditingController _videoTrackController;
+  late TextEditingController _audioTrackController;
+
+  @override
+  void initState() {
+    super.initState();
+    final settings = ref.read(settingsServiceProvider);
+    _videoTrackController = TextEditingController(text: settings.videoTrackName);
+    _audioTrackController = TextEditingController(text: settings.audioTrackName);
+  }
+
+  @override
+  void dispose() {
+    _videoTrackController.dispose();
+    _audioTrackController.dispose();
+    super.dispose();
+  }
+
+  void _saveVideoTrackName() {
+    ref.read(videoTrackNameProvider.notifier).setVideoTrackName(_videoTrackController.text);
+  }
+
+  void _saveAudioTrackName() {
+    ref.read(audioTrackNameProvider.notifier).setAudioTrackName(_audioTrackController.text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Settings'),
@@ -89,6 +120,38 @@ class SettingsScreen extends ConsumerWidget {
               ),
             );
           }),
+          const Divider(),
+
+          // Track Names section (for subscriber)
+          _buildSectionHeader(context, 'Track Names (Subscriber)'),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: TextField(
+              controller: _videoTrackController,
+              decoration: const InputDecoration(
+                labelText: 'Video Track Name',
+                hintText: 'e.g., video0',
+                prefixIcon: Icon(Icons.videocam),
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onChanged: (_) => _saveVideoTrackName(),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: TextField(
+              controller: _audioTrackController,
+              decoration: const InputDecoration(
+                labelText: 'Audio Track Name',
+                hintText: 'e.g., audio0',
+                prefixIcon: Icon(Icons.audiotrack),
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onChanged: (_) => _saveAudioTrackName(),
+            ),
+          ),
           const Divider(),
 
           // Appearance section

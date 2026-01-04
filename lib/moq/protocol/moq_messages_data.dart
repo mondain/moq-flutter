@@ -71,7 +71,14 @@ class ObjectDatagram {
     for (final param in extensionHeaders) {
       len += MoQWireFormat._varintSize(param.type);
       if (param.value != null) {
-        len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+        // Even types have varint value, odd types have length-prefixed buffer
+        if (param.type % 2 == 0) {
+          // Even type: value is a single varint (stored as first byte of value array)
+          len += MoQWireFormat._varintSize(param.value![0]);
+        } else {
+          // Odd type: length-prefixed buffer
+          len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+        }
       }
     }
     // Status (conditional - omit if normal)
@@ -108,9 +115,16 @@ class ObjectDatagram {
     for (final param in extensionHeaders) {
       offset += _writeVarint(buffer, offset, param.type);
       if (param.value != null) {
-        offset += _writeVarint(buffer, offset, param.value!.length);
-        buffer.setAll(offset, param.value!);
-        offset += param.value!.length;
+        // Even types have varint value, odd types have length-prefixed buffer
+        if (param.type % 2 == 0) {
+          // Even type: value is a single varint
+          offset += _writeVarint(buffer, offset, param.value![0]);
+        } else {
+          // Odd type: length-prefixed buffer
+          offset += _writeVarint(buffer, offset, param.value!.length);
+          buffer.setAll(offset, param.value!);
+          offset += param.value!.length;
+        }
       }
     }
 
@@ -178,11 +192,21 @@ class ObjectDatagram {
 
       Uint8List? value;
       if (offset < data.length) {
-        final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
-        offset += lengthLen;
-        if (length > 0 && offset + length <= data.length) {
-          value = data.sublist(offset, offset + length);
-          offset += length;
+        // Even types have varint value, odd types have length-prefixed buffer
+        if (headerType % 2 == 0) {
+          // Even type: value is a single varint
+          final (varintValue, varintLen) = MoQWireFormat.decodeVarint(data, offset);
+          offset += varintLen;
+          // Store varint as single-byte array for consistency
+          value = Uint8List.fromList([varintValue & 0xFF]);
+        } else {
+          // Odd type: value is length-prefixed buffer
+          final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
+          offset += lengthLen;
+          if (length > 0 && offset + length <= data.length) {
+            value = data.sublist(offset, offset + length);
+            offset += length;
+          }
         }
       }
       headers.add(KeyValuePair(type: headerType, value: value));
@@ -282,7 +306,12 @@ class SubgroupHeader {
     for (final param in extensionHeaders) {
       len += MoQWireFormat._varintSize(param.type);
       if (param.value != null) {
-        len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+        // Even types have varint value, odd types have length-prefixed buffer
+        if (param.type % 2 == 0) {
+          len += MoQWireFormat._varintSize(param.value![0]);
+        } else {
+          len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+        }
       }
     }
 
@@ -304,9 +333,14 @@ class SubgroupHeader {
     for (final param in extensionHeaders) {
       offset += _writeVarint(buffer, offset, param.type);
       if (param.value != null) {
-        offset += _writeVarint(buffer, offset, param.value!.length);
-        buffer.setAll(offset, param.value!);
-        offset += param.value!.length;
+        // Even types have varint value, odd types have length-prefixed buffer
+        if (param.type % 2 == 0) {
+          offset += _writeVarint(buffer, offset, param.value![0]);
+        } else {
+          offset += _writeVarint(buffer, offset, param.value!.length);
+          buffer.setAll(offset, param.value!);
+          offset += param.value!.length;
+        }
       }
     }
 
@@ -371,11 +405,21 @@ class SubgroupHeader {
 
       Uint8List? value;
       if (offset < data.length) {
-        final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
-        offset += lengthLen;
-        if (length > 0 && offset + length <= data.length) {
-          value = data.sublist(offset, offset + length);
-          offset += length;
+        // Even types have varint value, odd types have length-prefixed buffer
+        if (headerType % 2 == 0) {
+          // Even type: value is a single varint
+          final (varintValue, varintLen) = MoQWireFormat.decodeVarint(data, offset);
+          offset += varintLen;
+          // Store varint as single-byte array for consistency
+          value = Uint8List.fromList([varintValue & 0xFF]);
+        } else {
+          // Odd type: value is length-prefixed buffer
+          final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
+          offset += lengthLen;
+          if (length > 0 && offset + length <= data.length) {
+            value = data.sublist(offset, offset + length);
+            offset += length;
+          }
         }
       }
       headers.add(KeyValuePair(type: headerType, value: value));
@@ -430,7 +474,12 @@ class SubgroupObject {
     for (final param in extensionHeaders) {
       len += MoQWireFormat._varintSize(param.type);
       if (param.value != null) {
-        len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+        // Even types have varint value, odd types have length-prefixed buffer
+        if (param.type % 2 == 0) {
+          len += MoQWireFormat._varintSize(param.value![0]);
+        } else {
+          len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+        }
       }
     }
     if (status != null && status != ObjectStatus.normal) {
@@ -453,9 +502,14 @@ class SubgroupObject {
     for (final param in extensionHeaders) {
       offset += _writeVarint(buffer, offset, param.type);
       if (param.value != null) {
-        offset += _writeVarint(buffer, offset, param.value!.length);
-        buffer.setAll(offset, param.value!);
-        offset += param.value!.length;
+        // Even types have varint value, odd types have length-prefixed buffer
+        if (param.type % 2 == 0) {
+          offset += _writeVarint(buffer, offset, param.value![0]);
+        } else {
+          offset += _writeVarint(buffer, offset, param.value!.length);
+          buffer.setAll(offset, param.value!);
+          offset += param.value!.length;
+        }
       }
     }
 
@@ -506,11 +560,21 @@ class SubgroupObject {
 
       Uint8List? value;
       if (offset < data.length) {
-        final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
-        offset += lengthLen;
-        if (length > 0 && offset + length <= data.length) {
-          value = data.sublist(offset, offset + length);
-          offset += length;
+        // Even types have varint value, odd types have length-prefixed buffer
+        if (headerType % 2 == 0) {
+          // Even type: value is a single varint
+          final (varintValue, varintLen) = MoQWireFormat.decodeVarint(data, offset);
+          offset += varintLen;
+          // Store varint as single-byte array for consistency
+          value = Uint8List.fromList([varintValue & 0xFF]);
+        } else {
+          // Odd type: value is length-prefixed buffer
+          final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
+          offset += lengthLen;
+          if (length > 0 && offset + length <= data.length) {
+            value = data.sublist(offset, offset + length);
+            offset += length;
+          }
         }
       }
       headers.add(KeyValuePair(type: headerType, value: value));
