@@ -463,7 +463,7 @@ pub extern "C" fn moq_quic_connect(
             match connection_for_streams.accept_uni().await {
                 Ok(mut recv_stream) => {
                     let stream_id = recv_stream.id().index();
-                    log::debug!("Accepted incoming unidirectional stream {} on connection {}", stream_id, connection_id);
+                    log::info!("*** ACCEPTED INCOMING UNI STREAM {} on connection {} ***", stream_id, connection_id);
 
                     // Create a buffer for this specific data stream
                     let stream_buffer = Arc::new(tokio::sync::Mutex::new(ReceiveBuffer::new(MAX_RECV_BUFFER_SIZE)));
@@ -493,7 +493,7 @@ pub extern "C" fn moq_quic_connect(
                                     if pushed < n {
                                         log::warn!("Data stream {} buffer full, dropped {} bytes", stream_id, n - pushed);
                                     }
-                                    log::trace!("Received {} bytes on data stream {} for connection {}", n, stream_id, connection_id);
+                                    log::info!("*** STREAM DATA: {} bytes on stream {} for conn {} ***", n, stream_id, connection_id);
                                 }
                                 Err(e) => {
                                     log::error!("Error reading from data stream {}: {:?}", stream_id, e);
