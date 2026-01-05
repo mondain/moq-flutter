@@ -436,6 +436,11 @@ class MoqMiPackager {
     List<KeyValuePair> extensionHeaders,
     Uint8List payload,
   ) {
+    // Debug: log all received extension headers
+    final headerInfo = extensionHeaders.map((h) =>
+        '0x${h.type.toRadixString(16)}:${h.value?.length ?? 0}b').join(', ');
+    debugPrint('MoqMiPackager: Extension headers: [$headerInfo], payload: ${payload.length}b');
+
     MoqMiMediaType? mediaType;
     VideoH264AvccMetadata? videoMetadata;
     AudioMetadata? audioMetadata;
@@ -487,6 +492,10 @@ class MoqMiPackager {
       if (videoMetadata == null) {
         debugPrint('MoqMiPackager: Video media type but missing video metadata header (0x15)');
         return null;
+      }
+      // Log extradata presence for debugging
+      if (avcDecoderConfig != null) {
+        debugPrint('MoqMiPackager: Video has extradata (${avcDecoderConfig.length} bytes)');
       }
       return MoqMiData(
         mediaType: mediaType,

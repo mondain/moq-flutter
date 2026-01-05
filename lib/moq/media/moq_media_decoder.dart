@@ -119,17 +119,21 @@ class MoqMediaDecoder {
       _lastVideoCodecConfig = codecConfig;
       _hasReceivedKeyframe = true;
       isKeyframe = true;
+      debugPrint('MoqMediaDecoder: Got extradata (${codecConfig.length} bytes) - KEYFRAME');
     } else {
       // Check if this is a keyframe by looking at NAL unit type
       isKeyframe = _isH264Keyframe(data.data);
       if (isKeyframe) {
         _hasReceivedKeyframe = true;
+        debugPrint('MoqMediaDecoder: Detected IDR NAL - KEYFRAME');
       }
     }
 
     // Don't output frames until we have a keyframe
     if (!_hasReceivedKeyframe) {
-      debugPrint('MoqMediaDecoder: Waiting for keyframe');
+      // Log first 16 bytes of video data to understand format
+      final preview = data.data.take(16).map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ');
+      debugPrint('MoqMediaDecoder: Waiting for keyframe. Data preview: $preview (${data.data.length} bytes)');
       return null;
     }
 
@@ -162,11 +166,22 @@ class MoqMediaDecoder {
     );
   }
 
-  /// Check if H.264 AVCC data contains a keyframe (IDR NAL)
+  /// Check if H.264 data contains a keyframe (IDR NAL)
+  /// Handles both AVCC format (length-prefixed) and Annex-B format (start codes)
   bool _isH264Keyframe(Uint8List data) {
     if (data.length < 5) return false;
 
-    // AVCC format: 4-byte length prefix + NAL unit
+    // First try AVCC format (4-byte length prefix)
+    if (_isAvccKeyframe(data)) {
+      return true;
+    }
+
+    // Try Annex-B format (start codes 0x00 0x00 0x00 0x01 or 0x00 0x00 0x01)
+    return _isAnnexBKeyframe(data);
+  }
+
+  /// Check AVCC format (4-byte big-endian length prefix)
+  bool _isAvccKeyframe(Uint8List data) {
     int offset = 0;
     while (offset + 4 < data.length) {
       // Read 4-byte big-endian length
@@ -175,7 +190,10 @@ class MoqMediaDecoder {
           (data[offset + 2] << 8) |
           data[offset + 3];
 
-      if (nalLength <= 0 || offset + 4 + nalLength > data.length) break;
+      // Sanity check - if length looks unreasonable, this isn't AVCC format
+      if (nalLength <= 0 || nalLength > data.length - offset - 4) {
+        return false;
+      }
 
       // NAL unit type is in bits 0-4 of the first byte after length
       final nalType = data[offset + 4] & 0x1F;
@@ -188,6 +206,39 @@ class MoqMediaDecoder {
       offset += 4 + nalLength;
     }
 
+    return false;
+  }
+
+  /// Check Annex-B format (start codes)
+  bool _isAnnexBKeyframe(Uint8List data) {
+    int offset = 0;
+    while (offset < data.length - 4) {
+      // Look for 4-byte start code (0x00 0x00 0x00 0x01)
+      if (data[offset] == 0x00 && data[offset + 1] == 0x00 &&
+          data[offset + 2] == 0x00 && data[offset + 3] == 0x01) {
+        if (offset + 4 < data.length) {
+          final nalType = data[offset + 4] & 0x1F;
+          if (nalType == 5 || nalType == 7 || nalType == 8) {
+            return true;
+          }
+        }
+        offset += 4;
+      }
+      // Look for 3-byte start code (0x00 0x00 0x01)
+      else if (data[offset] == 0x00 && data[offset + 1] == 0x00 &&
+               data[offset + 2] == 0x01) {
+        if (offset + 3 < data.length) {
+          final nalType = data[offset + 3] & 0x1F;
+          if (nalType == 5 || nalType == 7 || nalType == 8) {
+            return true;
+          }
+        }
+        offset += 3;
+      }
+      else {
+        offset++;
+      }
+    }
     return false;
   }
 

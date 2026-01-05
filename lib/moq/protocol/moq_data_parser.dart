@@ -20,6 +20,9 @@ class MoQDataStreamParser {
   /// Current object ID (used for delta calculations)
   Int64 _currentObjectId = Int64(0);
 
+  /// Whether we've successfully parsed the first object
+  bool _parsedFirstObject = false;
+
   /// Whether the header has been parsed
   bool get hasHeader => header != null;
 
@@ -71,6 +74,11 @@ class MoQDataStreamParser {
     final data = Uint8List.fromList(_buffer);
     int offset = 0;
 
+    // Debug: log first 20 bytes of the buffer
+    final previewLen = data.length < 20 ? data.length : 20;
+    final preview = data.sublist(0, previewLen).map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ');
+    _logger.d('Header parse: first $previewLen bytes: $preview');
+
     try {
       // Read type (varint)
       final (type, typeLen) = MoQWireFormat.decodeVarint(data, offset);
@@ -87,6 +95,9 @@ class MoQDataStreamParser {
       _containsEndOfGroup = _hasEndOfGroup(type);
       final hasSubgroupIdField = _hasSubgroupIdField(type);
       final subgroupIdIsFirstObjectId = _subgroupIdIsFirstObjectId(type);
+
+      _logger.d('Header type 0x${type.toRadixString(16)}: extensions=$_extensionsPresent, '
+          'hasSubgroupId=$hasSubgroupIdField, subgroupIdIsFirstObjectId=$subgroupIdIsFirstObjectId');
 
       // Read Track Alias
       final (trackAlias, aliasLen) = MoQWireFormat.decodeVarint64(data, offset);
@@ -149,26 +160,36 @@ class MoQDataStreamParser {
     final data = Uint8List.fromList(_buffer);
     int offset = 0;
 
+    // Debug: log first 10 bytes of object data
+    final previewLen = data.length < 10 ? data.length : 10;
+    final preview = data.sublist(0, previewLen).map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ');
+    _logger.d('Object parse: first $previewLen bytes: $preview, currentObjId=$_currentObjectId');
+
     try {
       // Read Object ID Delta (varint)
       final (objectIdDelta, deltaLen) = MoQWireFormat.decodeVarint64(data, offset);
       offset += deltaLen;
 
+      _logger.d('Read delta=$objectIdDelta (deltaLen=$deltaLen), offset now=$offset');
+
       // Calculate actual Object ID
       // Per spec: Object ID = previous Object ID + delta + 1 (if not first)
       // For first object, Object ID = delta
       final Int64 objectId;
-      if (_currentObjectId == Int64(0)) {
+      final bool isFirstObject = _currentObjectId == Int64(0) && !_parsedFirstObject;
+      if (isFirstObject) {
         objectId = objectIdDelta;
+        _logger.d('First object: objectId = delta = $objectIdDelta');
       } else {
         objectId = _currentObjectId + objectIdDelta + Int64(1);
+        _logger.d('Subsequent object: objectId = $_currentObjectId + $objectIdDelta + 1 = $objectId');
       }
-      _currentObjectId = objectId;
 
       // Read Extension Headers Length if extensions present
       final extensionHeaders = <KeyValuePair>[];
       if (_extensionsPresent) {
         final (extLen, extLenLen) = MoQWireFormat.decodeVarint(data, offset);
+        _logger.d('Extension headers: len=$extLen (lenLen=$extLenLen), offset before=$offset');
         offset += extLenLen;
 
         // Parse extension headers if length > 0
@@ -202,11 +223,13 @@ class MoQDataStreamParser {
 
             extensionHeaders.add(KeyValuePair(type: headerType, value: value));
           }
+          _logger.d('Extension headers parsed, offset now=$offset (extEnd was $extEnd)');
         }
       }
 
       // Read Object Payload Length
       final (payloadLen, payloadLenLen) = MoQWireFormat.decodeVarint(data, offset);
+      _logger.d('Payload: len=$payloadLen (lenLen=$payloadLenLen), offset before=$offset');
       offset += payloadLenLen;
 
       // Determine if this is a status object (zero-length payload)
@@ -234,11 +257,20 @@ class MoQDataStreamParser {
         payload: payload,
       );
 
+      // Only update state after fully successful parse
+      _currentObjectId = objectId;
+      if (!_parsedFirstObject) {
+        _parsedFirstObject = true;
+      }
+
+      _logger.d('Object parsed: consumed $offset bytes, '
+          'objectId=$objectId, payloadLen=${payload?.length ?? 0}, '
+          'bufferLen before=${_buffer.length}');
+
       // Remove parsed bytes from buffer
       _buffer.removeRange(0, offset);
 
-      _logger.d('Parsed object: objectId=$objectId, '
-          'payloadLen=${payload?.length ?? 0}, status=${status.name}');
+      _logger.d('Buffer after remove: ${_buffer.length} bytes remaining');
 
       return obj;
     } catch (e) {

@@ -9,6 +9,7 @@
 
 mod stream_writer;
 pub mod webtransport;
+pub mod media_player;
 
 use quinn::{Endpoint, ClientConfig, Connection, SendStream, VarInt, TokioRuntime, EndpointConfig, TransportConfig};
 use quinn::crypto::rustls::QuicClientConfig;
@@ -26,7 +27,8 @@ use std::slice;
 use std::ffi::c_char;
 
 // Maximum receive buffer size per connection
-const MAX_RECV_BUFFER_SIZE: usize = 64 * 1024; // 64KB
+// Increased from 64KB to 2MB to handle video streaming without flow control backpressure
+const MAX_RECV_BUFFER_SIZE: usize = 2 * 1024 * 1024; // 2MB
 
 // No certificate verification for testing (DANGER: only use for development!)
 #[derive(Debug)]
@@ -82,8 +84,9 @@ struct ReceiveBuffer {
 
 impl ReceiveBuffer {
     fn new(max_size: usize) -> Self {
+        // Pre-allocate buffer with larger initial capacity for video streaming
         Self {
-            data: VecDeque::with_capacity(1024),
+            data: VecDeque::with_capacity(64 * 1024), // 64KB initial
             max_size,
         }
     }
@@ -423,7 +426,8 @@ pub extern "C" fn moq_quic_connect(
                 }
 
                 // Start reading from the control stream's receive side
-                let mut buffer = vec![0u8; 4096];
+                // Use larger buffer for video streaming
+                let mut buffer = vec![0u8; 64 * 1024]; // 64KB
                 loop {
                     match recv.read(&mut buffer).await {
                         Ok(None) => {
@@ -476,8 +480,9 @@ pub extern "C" fn moq_quic_connect(
                     }
 
                     // Spawn task to read from this stream
+                    // Use larger buffer for video streaming to reduce syscalls
                     tokio::spawn(async move {
-                        let mut buffer = vec![0u8; 4096];
+                        let mut buffer = vec![0u8; 64 * 1024]; // 64KB
                         loop {
                             match recv_stream.read(&mut buffer).await {
                                 Ok(None) => {

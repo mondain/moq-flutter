@@ -501,14 +501,14 @@ class QuicTransport extends MoQTransport {
   MoQTransportStats get stats => _stats;
 
   void _startReceiving() {
-    // Poll for incoming data every 10ms
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 10), (_) {
+    // Poll for incoming data every 5ms for lower latency
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 5), (_) {
       if (!isConnected) return;
 
       try {
-        // Poll control stream
-        final buffer = calloc<Uint8>(4096);
-        final received = _moqQuicRecv(_connectionId, buffer, 4096);
+        // Poll control stream - use larger buffer for video streaming
+        final buffer = calloc<Uint8>(65536); // 64KB
+        final received = _moqQuicRecv(_connectionId, buffer, 65536);
 
         if (received > 0) {
           // Copy received data
@@ -553,11 +553,15 @@ class QuicTransport extends MoQTransport {
         for (int i = 0; i < streamCount; i++) {
           final streamId = streamIds[i];
 
-          // Poll this stream for data
-          final buffer = calloc<Uint8>(4096);
-          final received = _moqQuicRecvData!(_connectionId, streamId, buffer, 4096);
+          // Poll this stream for data - drain all available data in a loop
+          final buffer = calloc<Uint8>(65536); // 64KB
 
-          if (received > 0) {
+          // Keep reading until no more data available
+          while (true) {
+            final received = _moqQuicRecvData!(_connectionId, streamId, buffer, 65536);
+
+            if (received <= 0) break; // No more data
+
             final data = Uint8List(received);
             final nativeData = buffer.asTypedList(received);
             data.setAll(0, nativeData);

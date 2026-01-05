@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:sizer/sizer.dart';
+import '../moq/protocol/moq_messages.dart';
 import '../providers/moq_providers.dart';
 import '../widgets/connection_status_card.dart';
 import '../widgets/server_config_card.dart';
@@ -132,15 +133,25 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
         final audioTrackName = ref.read(audioTrackNameProvider);
 
         // Subscribe to video track
+        // Use nextGroupStart to start at the next group boundary (keyframe)
         _setStatus('Subscribing to $namespace/$videoTrackName...');
         final videoTrackNameBytes = Uint8List.fromList(videoTrackName.codeUnits);
-        final videoResult = await client.subscribe(namespaceBytes, videoTrackNameBytes);
+        final videoResult = await client.subscribe(
+          namespaceBytes,
+          videoTrackNameBytes,
+          filterType: FilterType.nextGroupStart,
+        );
         _setStatus('Video subscribed! Track alias: ${videoResult.trackAlias}');
 
         // Subscribe to audio track
+        // Use nextGroupStart for mid-stream joining
         _setStatus('Subscribing to $namespace/$audioTrackName...');
         final audioTrackNameBytes = Uint8List.fromList(audioTrackName.codeUnits);
-        final audioResult = await client.subscribe(namespaceBytes, audioTrackNameBytes);
+        final audioResult = await client.subscribe(
+          namespaceBytes,
+          audioTrackNameBytes,
+          filterType: FilterType.nextGroupStart,
+        );
         _setStatus('Audio subscribed! Track alias: ${audioResult.trackAlias}');
 
         if (mounted) {

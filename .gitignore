@@ -61,3 +61,4 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 .claude/settings.local.json
+linux/*.so

@@ -904,10 +904,11 @@ class StreamingPlaybackPipeline {
     _audioSink!.add(segment);
     _audioSegmentsWritten++;
 
-    // Notify when first segment is written (no await - let OS buffer)
-    if (_audioSegmentsWritten == 1) {
+    // Notify when enough segments are written for playback to start
+    // Audio needs at least 20 segments (~400-500ms at 20ms per frame) for stable playback
+    if (_audioSegmentsWritten == 20) {
       _audioReadyController.add(_audioFile!.path);
-      debugPrint('StreamingPlayback: Audio ready at ${_audioFile!.path}');
+      debugPrint('StreamingPlayback: Audio ready at ${_audioFile!.path} (20 segments buffered)');
     }
 
     // Log progress periodically

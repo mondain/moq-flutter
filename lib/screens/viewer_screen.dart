@@ -7,6 +7,8 @@ import 'package:sizer/sizer.dart';
 import '../providers/moq_providers.dart';
 import '../widgets/connection_status_card.dart';
 import '../media/moq_video_player.dart';
+import '../media/native_moq_player.dart';
+import '../services/native_media_player.dart';
 
 /// Screen for viewing subscribed MoQ streams with video playback
 class ViewerScreen extends ConsumerStatefulWidget {
@@ -30,6 +32,8 @@ class ViewerScreen extends ConsumerStatefulWidget {
 class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   String _statusMessage = '';
   MoQVideoPlayer? _videoPlayer;
+  NativeMoQPlayer? _nativePlayer;
+  bool _useNativePlayer = false;
   bool _isInitializing = true;
   String? _errorMessage;
 
@@ -40,6 +44,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   int _audioFramesDecoded = 0;
   int _videoSegmentsWritten = 0;
   int _totalBytesReceived = 0;
+  int _bytesWrittenToBuffer = 0;
 
   @override
   void initState() {
@@ -54,6 +59,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   void dispose() {
     _statsTimer?.cancel();
     _videoPlayer?.dispose();
+    _nativePlayer?.dispose();
     super.dispose();
   }
 
@@ -69,24 +75,61 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         return;
       }
 
-      debugPrint('ViewerScreen: Initializing video player with ${client.subscriptions.length} subscriptions');
+      debugPrint('ViewerScreen: Initializing player with ${client.subscriptions.length} subscriptions');
 
-      // Create and initialize the video player
-      _videoPlayer = MoQVideoPlayer();
-      await _videoPlayer!.initialize(client.subscriptions.values.toList());
+      // Check if native player is available (with defensive try/catch)
+      bool nativeAvailable = false;
+      try {
+        debugPrint('ViewerScreen: Checking native player availability...');
+        nativeAvailable = NativeMoQPlayer.isAvailable;
+        debugPrint('ViewerScreen: Native player available: $nativeAvailable');
+      } catch (e) {
+        debugPrint('ViewerScreen: Native player check threw exception: $e');
+        nativeAvailable = false;
+      }
 
-      // Start statistics timer
-      _statsTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
-        _updateStats();
-      });
+      // Try native player first (more efficient, no file I/O)
+      if (nativeAvailable) {
+        debugPrint('ViewerScreen: Using native buffer-based player');
+        _useNativePlayer = true;
+        _nativePlayer = NativeMoQPlayer();
+        await _nativePlayer!.initialize(
+          client.subscriptions.values.toList(),
+          outputMode: VideoOutputMode.window, // Opens separate mpv window
+        );
 
-      setState(() {
-        _statusMessage = 'Waiting for keyframe...';
-        _isInitializing = false;
-      });
+        // Start statistics timer
+        _statsTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+          _updateStats();
+        });
 
-      // Auto-start playback
-      await _videoPlayer!.play();
+        setState(() {
+          _statusMessage = 'Using native player (video in separate window)';
+          _isInitializing = false;
+        });
+
+        // Auto-start playback
+        await _nativePlayer!.play();
+      } else {
+        // Fall back to file-based player
+        debugPrint('ViewerScreen: Native player not available, using file-based player');
+        _useNativePlayer = false;
+        _videoPlayer = MoQVideoPlayer();
+        await _videoPlayer!.initialize(client.subscriptions.values.toList());
+
+        // Start statistics timer
+        _statsTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+          _updateStats();
+        });
+
+        setState(() {
+          _statusMessage = 'Waiting for keyframe...';
+          _isInitializing = false;
+        });
+
+        // Auto-start playback
+        await _videoPlayer!.play();
+      }
 
     } catch (e) {
       debugPrint('ViewerScreen: Error initializing player: $e');
@@ -98,23 +141,42 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   }
 
   void _updateStats() {
-    if (!mounted || _videoPlayer == null) return;
+    if (!mounted) return;
 
-    setState(() {
-      _videoObjectsReceived = _videoPlayer!.objectsReceived;
-      _totalBytesReceived = _videoPlayer!.bytesReceived;
-      _videoFramesDecoded = _videoPlayer!.videoFramesReceived;
-      _audioFramesDecoded = _videoPlayer!.audioFramesReceived;
-      _videoSegmentsWritten = _videoPlayer!.videoSegmentsWritten;
+    if (_useNativePlayer && _nativePlayer != null) {
+      setState(() {
+        _videoObjectsReceived = _nativePlayer!.objectsReceived;
+        _totalBytesReceived = _nativePlayer!.bytesReceived;
+        _videoFramesDecoded = _nativePlayer!.videoFramesReceived;
+        _audioFramesDecoded = _nativePlayer!.audioFramesReceived;
+        _bytesWrittenToBuffer = _nativePlayer!.bytesWrittenToBuffer;
 
-      if (_videoPlayer!.isMediaReady) {
-        _statusMessage = 'Playing';
-      } else if (_videoFramesDecoded > 0) {
-        _statusMessage = 'Buffering video...';
-      } else if (_videoObjectsReceived > 0) {
-        _statusMessage = 'Decoding frames...';
-      }
-    });
+        final stats = _nativePlayer!.getStats();
+        if (_nativePlayer!.isPlaying) {
+          _statusMessage = 'Playing (native, buffered: ${stats?.buffered ?? 0} bytes)';
+        } else if (_videoFramesDecoded > 0) {
+          _statusMessage = 'Buffering...';
+        } else if (_videoObjectsReceived > 0) {
+          _statusMessage = 'Waiting for keyframe... (received $_videoObjectsReceived objects)';
+        }
+      });
+    } else if (_videoPlayer != null) {
+      setState(() {
+        _videoObjectsReceived = _videoPlayer!.objectsReceived;
+        _totalBytesReceived = _videoPlayer!.bytesReceived;
+        _videoFramesDecoded = _videoPlayer!.videoFramesReceived;
+        _audioFramesDecoded = _videoPlayer!.audioFramesReceived;
+        _videoSegmentsWritten = _videoPlayer!.videoSegmentsWritten;
+
+        if (_videoPlayer!.isMediaReady) {
+          _statusMessage = 'Playing';
+        } else if (_videoFramesDecoded > 0) {
+          _statusMessage = 'Buffering video...';
+        } else if (_videoObjectsReceived > 0) {
+          _statusMessage = 'Decoding frames...';
+        }
+      });
+    }
   }
 
   Future<void> _disconnect() async {
@@ -122,6 +184,8 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       _statsTimer?.cancel();
       await _videoPlayer?.dispose();
       _videoPlayer = null;
+      await _nativePlayer?.dispose();
+      _nativePlayer = null;
 
       final client = ref.read(moqClientProvider);
       await client.disconnect();
@@ -209,7 +273,10 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                             _buildStatsRow('Objects Received', '$_videoObjectsReceived'),
                             _buildStatsRow('Video Frames', '$_videoFramesDecoded'),
                             _buildStatsRow('Audio Frames', '$_audioFramesDecoded'),
-                            _buildStatsRow('Segments Written', '$_videoSegmentsWritten'),
+                            if (_useNativePlayer)
+                              _buildStatsRow('Buffer Written', _formatBytes(_bytesWrittenToBuffer))
+                            else
+                              _buildStatsRow('Segments Written', '$_videoSegmentsWritten'),
                             _buildStatsRow('Data Received', _formatBytes(_totalBytesReceived)),
                           ],
                         ),
@@ -230,8 +297,8 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                             ),
                             SizedBox(height: 1.h),
                             _buildInfoRow('Namespace', widget.namespace),
-                            _buildInfoRow('Video Track', 'video0'),
-                            _buildInfoRow('Audio Track', 'audio0'),
+                            _buildInfoRow('Video Track', widget.videoTrackAlias),
+                            _buildInfoRow('Audio Track', widget.audioTrackAlias),
                           ],
                         ),
                       ),
@@ -296,6 +363,46 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       );
     }
 
+    // Native player - video in separate mpv window
+    if (_useNativePlayer) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              _nativePlayer?.isPlaying == true
+                  ? Icons.videocam
+                  : Icons.play_circle_outline,
+              size: 8.h,
+              color: _nativePlayer?.isPlaying == true
+                  ? Colors.green
+                  : Colors.white54,
+            ),
+            SizedBox(height: 2.h),
+            Text(
+              'Native Player Mode',
+              style: TextStyle(color: Colors.white, fontSize: 14.sp),
+            ),
+            SizedBox(height: 1.h),
+            Text(
+              'Video appears in separate mpv window',
+              style: TextStyle(color: Colors.white70, fontSize: 12.sp),
+            ),
+            SizedBox(height: 1.h),
+            Text(
+              _statusMessage,
+              style: TextStyle(color: Colors.white54, fontSize: 11.sp),
+            ),
+            SizedBox(height: 2.h),
+            Text(
+              'V:$_videoFramesDecoded A:$_audioFramesDecoded',
+              style: TextStyle(color: Colors.white70, fontSize: 10.sp),
+            ),
+          ],
+        ),
+      );
+    }
+
     if (_videoPlayer == null) {
       return Center(
         child: Text(
@@ -305,7 +412,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       );
     }
 
-    // Show video player or waiting indicator
+    // Show video player or waiting indicator (file-based player)
     return Stack(
       children: [
         // Video player widget

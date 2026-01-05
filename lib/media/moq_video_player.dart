@@ -37,6 +37,12 @@ class MoQVideoPlayer {
   int _objectsReceived = 0;
   int _bytesReceived = 0;
 
+  // Group tracking for mid-stream join detection
+  Int64? _currentVideoGroupId;
+  bool _joinedVideoMidGroup = false;
+  bool _foundValidVideoStart = false;
+  int _skippedVideoFrames = 0;
+
   // Media paths
   String? _videoPath;
   String? _audioPath;
@@ -177,9 +183,11 @@ class MoQVideoPlayer {
 
   void _handleMediaObject(MoQObject object) {
     final trackName = String.fromCharCodes(object.trackName);
-    _logger.d('Received object on track $trackName: objectId=${object.objectId}, '
-        'status=${object.status}, payloadSize=${object.payload?.length ?? 0}, '
-        'headers=${object.extensionHeaders.length}');
+    final isVideo = trackName.contains('video');
+
+    _logger.d('Received object on track $trackName: groupId=${object.groupId}, '
+        'objectId=${object.objectId}, status=${object.status}, '
+        'payloadSize=${object.payload?.length ?? 0}, headers=${object.extensionHeaders.length}');
 
     if (object.status != ObjectStatus.normal || object.payload == null) {
       if (object.status == ObjectStatus.endOfTrack) {
@@ -191,11 +199,81 @@ class MoQVideoPlayer {
     _objectsReceived++;
     _bytesReceived += object.payload!.length;
 
+    // For video, implement mid-group join detection and skip logic
+    if (isVideo) {
+      if (!_handleVideoGroupTracking(object)) {
+        // Skip this frame - we're waiting for a valid starting point
+        return;
+      }
+    }
+
     // Process through the streaming pipeline
     _playbackPipeline?.processObject(object);
 
     _logger.d(
         'Processed object: ${object.objectId}, ${object.payload!.length} bytes');
+  }
+
+  /// Handle video group tracking for mid-stream join detection
+  /// Returns true if the frame should be processed, false if it should be skipped
+  bool _handleVideoGroupTracking(MoQObject object) {
+    final groupId = object.groupId;
+    final objectId = object.objectId;
+
+    // First video object ever received
+    if (_currentVideoGroupId == null) {
+      _currentVideoGroupId = groupId;
+
+      // Check if we joined mid-group (objectId != 0)
+      if (objectId != Int64.ZERO) {
+        _joinedVideoMidGroup = true;
+        _skippedVideoFrames++;
+        _logger.w('Detected mid-group join: groupId=$groupId, objectId=$objectId. '
+            'Skipping P-frames until next group with keyframe at objectId=0...');
+        return false; // Skip this frame - keyframe is at objectId=0 which we missed
+      } else {
+        // We joined at the start of a group - great!
+        _foundValidVideoStart = true;
+        _logger.i('Joined at group start: groupId=$groupId, objectId=0');
+        return true;
+      }
+    }
+
+    // Check if this is a new group
+    if (groupId != _currentVideoGroupId) {
+      _logger.i('New video group detected: $groupId (was $_currentVideoGroupId)');
+      _currentVideoGroupId = groupId;
+
+      // New group - check if we're at objectId=0
+      if (objectId == Int64.ZERO) {
+        if (_joinedVideoMidGroup && !_foundValidVideoStart) {
+          _logger.i('Found valid starting point! groupId=$groupId, objectId=0. '
+              'Skipped $_skippedVideoFrames frames from partial group.');
+        }
+        _foundValidVideoStart = true;
+        _joinedVideoMidGroup = false;
+        return true;
+      } else {
+        // New group but not at objectId=0 - shouldn't happen normally
+        _logger.w('New group $groupId but objectId=$objectId (not 0). '
+            'Continuing to wait for group with objectId=0...');
+        _skippedVideoFrames++;
+        return false;
+      }
+    }
+
+    // Same group - check if we have a valid start
+    if (_foundValidVideoStart) {
+      return true; // Process normally
+    } else {
+      // Still waiting for valid start - skip this P-frame
+      _skippedVideoFrames++;
+      if (_skippedVideoFrames % 10 == 0) {
+        _logger.d('Waiting for keyframe... skipped $_skippedVideoFrames video frames '
+            '(groupId=$groupId, objectId=$objectId)');
+      }
+      return false;
+    }
   }
 
   void _handleVideoReady(String videoPath) {
@@ -211,11 +289,15 @@ class MoQVideoPlayer {
     _logger.i('Audio file ready at: $audioPath');
     _audioPath = audioPath;
 
-    // If video isn't ready yet but audio is, start playing audio
-    // This helps diagnose if audio is working even when video isn't
+    // We prefer to wait for video before starting playback
+    // If video becomes available, we'll play video
+    // Only play audio-only if explicitly needed (video track not subscribed)
+    // For now, log that audio is ready and wait for video
     if (!_mediaOpened && _videoPath == null) {
-      _logger.i('Video not ready yet, playing audio only');
-      _openMedia(audioPath);
+      _logger.i('Audio ready, waiting for video before starting playback...');
+      // Don't start audio-only playback - wait for video keyframe
+      // The streaming file approach doesn't work well with audio-only
+      // because mpv sees the file as complete after the initial data
     }
   }
 
@@ -299,6 +381,12 @@ class MoQVideoPlayer {
 
     _isInitialized = false;
     _mediaOpened = false;
+
+    // Reset group tracking state
+    _currentVideoGroupId = null;
+    _joinedVideoMidGroup = false;
+    _foundValidVideoStart = false;
+    _skippedVideoFrames = 0;
   }
 }
 

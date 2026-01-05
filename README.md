@@ -134,6 +134,17 @@ This implementation follows [draft-ietf-moq-transport-14](https://datatracker.ie
 - **Priorities**: Subscriber and publisher priority (0-255)
 - **Forward State**: Control whether objects are forwarded
 
+### Mid-Stream Join Handling
+
+When subscribing to an active stream, the player handles the case where it joins mid-group (missing the keyframe at objectId=0):
+
+- **Detection**: Automatically detects if first video object has objectId != 0
+- **Skip Logic**: Discards frames from the partial group (P-frames without preceding keyframe)
+- **Recovery**: Waits for next group boundary with objectId=0 to start playback
+- **Decoder Reset**: Resets decoder state when valid starting point is found
+
+This ensures clean playback startup even when relays don't properly implement `nextGroupStart` filter type.
+
 ### Wire Format
 
 - **Varint Encoding**: Variable-length integer encoding (32-bit and 64-bit)
@@ -319,6 +330,13 @@ Draft-14 implementation with:
   - GOAWAY handling (with and without migration URI)
   - Publisher mode (incoming SUBSCRIBE requests, acceptSubscribe, rejectSubscribe, PUBLISH_DONE)
   - Data stream handling (openDataStream, writeSubgroupHeader)
+
+## Saved Preferences
+
+The application saves user preferences using Flutter's shared_preferences package. To clear saved preferences, delete the app data or uninstall the app.
+
+- Android clear app data via Settings > Apps > MoQ Flutter > Storage > Clear Data
+- Linux clear app data by executing: `rm -rf ~/.local/share/moq_flutter/`
 
 ## TODO
 
