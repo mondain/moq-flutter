@@ -6,6 +6,19 @@ import '../protocol/moq_messages.dart';
 import '../protocol/moq_data_parser.dart';
 import '../transport/moq_transport.dart';
 import '../packager/moq_mi_packager.dart';
+import 'replay_stream.dart';
+
+/// Session termination error codes per draft-ietf-moq-transport-14 Section 3.4
+class MoQTerminationCode {
+  static const int noError = 0x0;
+  static const int internalError = 0x1;
+  static const int unauthorized = 0x2;
+  static const int protocolViolation = 0x3;
+  static const int duplicateTrackAlias = 0x5;
+  static const int parameterLengthMismatch = 0x6;
+  static const int tooManySubscribes = 0x7;
+  static const int goawayTimeout = 0x10;
+}
 
 /// MoQ Client implementation per draft-ietf-moq-transport-14
 class MoQClient {
@@ -1238,6 +1251,29 @@ class MoQClient {
   void _handleSubscribeOk(SubscribeOkMessage message) {
     final subscription = _subscriptions[message.requestId];
     if (subscription != null) {
+      final trackNameStr = String.fromCharCodes(subscription.trackName);
+      _logger.i('SUBSCRIBE_OK: requestId=${message.requestId}, trackAlias=${message.trackAlias}, trackName=$trackNameStr');
+
+      // Check for duplicate track alias per draft-14 Section 9.8:
+      // "If a subscriber receives a SUBSCRIBE_OK that uses the same Track Alias
+      // as a different track with an active subscription, it MUST close the
+      // session with error DUPLICATE_TRACK_ALIAS."
+      final existingTrack = _trackAliases[message.trackAlias];
+      if (existingTrack != null) {
+        final existingName = String.fromCharCodes(existingTrack.name);
+        // Check if it's actually a different track (not the same track being re-subscribed)
+        if (!_trackInfoMatches(existingTrack, subscription.trackNamespace, subscription.trackName)) {
+          _logger.e('DUPLICATE_TRACK_ALIAS: trackAlias=${message.trackAlias} already in use by track "$existingName", '
+              'but server assigned it to "$trackNameStr". This is a protocol violation.');
+          // Per spec, we MUST close the session
+          _terminateSession(
+            MoQTerminationCode.duplicateTrackAlias,
+            'Duplicate track alias ${message.trackAlias}: already assigned to "$existingName"',
+          );
+          return;
+        }
+      }
+
       subscription.complete(
         trackAlias: message.trackAlias,
         expires: message.expires,
@@ -1249,10 +1285,7 @@ class MoQClient {
       // Store track alias in the subscription for direct lookup
       subscription.assignedTrackAlias = message.trackAlias;
 
-      // Also register in track aliases map (may have collisions if server reuses aliases)
-      final trackNameStr = String.fromCharCodes(subscription.trackName);
-      _logger.i('SUBSCRIBE_OK: requestId=${message.requestId}, trackAlias=${message.trackAlias}, trackName=$trackNameStr');
-
+      // Register in track aliases map
       _trackAliases[message.trackAlias] = TrackInfo(
         namespace: subscription.trackNamespace,
         name: subscription.trackName,
@@ -1260,6 +1293,23 @@ class MoQClient {
 
       _logger.i('Subscription successful for $trackNameStr: trackAlias=${message.trackAlias}');
     }
+  }
+
+  /// Check if a TrackInfo matches the given namespace and name
+  bool _trackInfoMatches(TrackInfo info, List<Uint8List> namespace, Uint8List name) {
+    if (info.namespace.length != namespace.length) return false;
+    for (int i = 0; i < namespace.length; i++) {
+      if (!_bytesEqual(info.namespace[i], namespace[i])) return false;
+    }
+    return _bytesEqual(info.name, name);
+  }
+
+  /// Terminate the session with an error code
+  void _terminateSession(int errorCode, String reason) {
+    _logger.e('Terminating session: code=$errorCode, reason=$reason');
+    // TODO: Send proper termination message to server
+    // For now, just disconnect
+    disconnect();
   }
 
   void _handleSubscribeError(SubscribeErrorMessage message) {
@@ -1643,7 +1693,10 @@ class MoQSubscription {
   int priority = 128;
   bool forward = true;
 
-  final _objectController = StreamController<MoQObject>.broadcast();
+  /// Replay stream controller that buffers objects for late-joining listeners.
+  /// Buffer size of 60 ensures we capture at least one GOP worth of video frames
+  /// plus audio frames, preventing keyframe loss during player initialization.
+  final _objectController = ReplayStreamController<MoQObject>(bufferSize: 60);
   bool _isClosed = false;
 
   MoQSubscription({
@@ -1703,6 +1756,9 @@ class MoQSubscription {
     _isClosed = true;
     await _objectController.close();
   }
+
+  /// Get number of buffered objects (for debugging)
+  int get bufferedObjectCount => _objectController.bufferedCount;
 
   void dispose() {
     close();
