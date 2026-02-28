@@ -2,9 +2,9 @@ part of 'moq_messages.dart';
 
 /// Object Datagram - carries a single object in a datagram
 ///
-/// Wire format:
+/// Draft-14 wire format (types 0x00-0x07, 0x20-0x27):
 /// OBJECT_DATAGRAM Message {
-///   Type (i) = Object Datagram Type (0x00-0x07, 0x20-0x27),
+///   Type (i) = Object Datagram Type,
 ///   Track Alias (i),
 ///   [Group ID (i),]
 ///   [Object ID (i),]
@@ -15,6 +15,26 @@ part of 'moq_messages.dart';
 ///   [Object Payload Length (i),
 ///   Object Payload (..)]
 /// }
+///
+/// Draft-16 wire format (types 0x00-0x0F, 0x20-0x2D):
+/// OBJECT_DATAGRAM Message {
+///   Type (i) = 0x00..0x0F / 0x20..0x21 / 0x24..0x25 /
+///              0x28..0x29 / 0x2C..0x2D,
+///   Track Alias (i),
+///   Group ID (i),
+///   [Object ID (i),]
+///   [Publisher Priority (8),]
+///   [Extensions (..),]
+///   [Object Status (i),]
+///   [Object Payload (..),]
+/// }
+///
+/// Draft-16 type bitfield (0b00X0XXXX):
+///   Bit 0 (0x01): EXTENSIONS present
+///   Bit 1 (0x02): END_OF_GROUP
+///   Bit 2 (0x04): ZERO_OBJECT_ID (Object ID omitted, implied 0)
+///   Bit 3 (0x08): DEFAULT_PRIORITY (Publisher Priority omitted)
+///   Bit 5 (0x20): STATUS (Object Status present instead of payload)
 class ObjectDatagram {
   final Int64 trackAlias;
   final Int64 groupId;
@@ -23,6 +43,9 @@ class ObjectDatagram {
   final List<KeyValuePair> extensionHeaders;
   final ObjectStatus? status;
   final Uint8List? payload;
+  /// Draft-16: when true, Publisher Priority byte is omitted and
+  /// inherited from the subscription's control message.
+  final bool useDefaultPriority;
 
   ObjectDatagram({
     required this.trackAlias,
@@ -32,9 +55,10 @@ class ObjectDatagram {
     this.extensionHeaders = const [],
     this.status,
     this.payload,
+    this.useDefaultPriority = false,
   });
 
-  /// Get the message type based on status
+  /// Get the message type for draft-14 based on status
   int get messageType {
     if (status == null) return 0x00; // OBJECT_DATAGRAM_NORMAL
     switch (status!) {
@@ -51,8 +75,53 @@ class ObjectDatagram {
     }
   }
 
+  /// Compute the message type for a given version.
+  ///
+  /// Draft-14: type encodes status directly.
+  /// Draft-16: type is a bitfield (0b00X0XXXX):
+  ///   Bit 0 (0x01): EXTENSIONS present
+  ///   Bit 1 (0x02): END_OF_GROUP
+  ///   Bit 2 (0x04): ZERO_OBJECT_ID
+  ///   Bit 3 (0x08): DEFAULT_PRIORITY
+  ///   Bit 5 (0x20): STATUS (status present instead of payload)
+  int _messageType(int version) {
+    if (!MoQVersion.isDraft16OrLater(version)) {
+      return messageType;
+    }
+    int type = 0;
+    // Bit 0: EXTENSIONS
+    if (extensionHeaders.isNotEmpty) {
+      type |= 0x01;
+    }
+    // Bit 1: END_OF_GROUP
+    if (status == ObjectStatus.endOfGroup) {
+      type |= 0x02;
+    }
+    // Bit 2: ZERO_OBJECT_ID
+    if (objectId == null || objectId == Int64(0)) {
+      type |= 0x04;
+    }
+    // Bit 3: DEFAULT_PRIORITY
+    if (useDefaultPriority) {
+      type |= 0x08;
+    }
+    // Bit 5: STATUS (status present instead of payload)
+    if (status != null && status != ObjectStatus.normal) {
+      type |= 0x20;
+    }
+    return type;
+  }
+
   /// Serialize the object datagram
-  Uint8List serialize() {
+  Uint8List serialize({int version = MoQVersion.draft14}) {
+    if (MoQVersion.isDraft16OrLater(version)) {
+      return _serializeDraft16();
+    }
+    return _serializeDraft14();
+  }
+
+  /// Draft-14 serialization (original behavior)
+  Uint8List _serializeDraft14() {
     int len = 0;
     // Type (object datagram type is in first varint byte)
     len += MoQWireFormat._varintSize(messageType);
@@ -142,6 +211,155 @@ class ObjectDatagram {
     return buffer;
   }
 
+  /// Draft-16 serialization with expanded bitfield type
+  Uint8List _serializeDraft16() {
+    final type = _messageType(MoQVersion.draft16);
+    final hasExtensions = (type & 0x01) != 0;
+    final zeroObjectId = (type & 0x04) != 0;
+    final defaultPriority = (type & 0x08) != 0;
+    final hasStatus = (type & 0x20) != 0;
+
+    // Build extensions block first so we know its size
+    Uint8List? extensionsBlock;
+    if (hasExtensions) {
+      extensionsBlock = _buildExtensionsBlock();
+    }
+
+    int len = 0;
+    // Type
+    len += MoQWireFormat._varintSize(type);
+    // Track Alias
+    len += MoQWireFormat._varintSize64(trackAlias);
+    // Group ID (always present)
+    len += MoQWireFormat._varintSize64(groupId);
+    // Object ID (omitted when ZERO_OBJECT_ID bit set)
+    if (!zeroObjectId && objectId != null) {
+      len += MoQWireFormat._varintSize64(objectId!);
+    }
+    // Publisher Priority (omitted when DEFAULT_PRIORITY bit set)
+    if (!defaultPriority) {
+      len += 1;
+    }
+    // Extensions block (Extension Headers Length + Extension Headers)
+    if (extensionsBlock != null) {
+      len += extensionsBlock.length;
+    }
+    // Object Status (varint, when STATUS bit set)
+    if (hasStatus && status != null) {
+      len += MoQWireFormat._varintSize(status!.value);
+    }
+    // Object Payload (rest of datagram, no explicit length field)
+    if (!hasStatus && payload != null) {
+      len += payload!.length;
+    }
+
+    final buffer = Uint8List(len);
+    int offset = 0;
+
+    // Type
+    offset += _writeVarint(buffer, offset, type);
+
+    // Track Alias
+    offset += _writeVarint64(buffer, offset, trackAlias);
+
+    // Group ID
+    offset += _writeVarint64(buffer, offset, groupId);
+
+    // Object ID (omitted when ZERO_OBJECT_ID bit set)
+    if (!zeroObjectId && objectId != null) {
+      offset += _writeVarint64(buffer, offset, objectId!);
+    }
+
+    // Publisher Priority (omitted when DEFAULT_PRIORITY bit set)
+    if (!defaultPriority) {
+      buffer[offset++] = publisherPriority;
+    }
+
+    // Extensions block
+    if (extensionsBlock != null) {
+      buffer.setAll(offset, extensionsBlock);
+      offset += extensionsBlock.length;
+    }
+
+    // Object Status (varint)
+    if (hasStatus && status != null) {
+      offset += _writeVarint(buffer, offset, status!.value);
+    }
+
+    // Object Payload (no explicit length - rest of datagram is payload)
+    if (!hasStatus && payload != null) {
+      buffer.setAll(offset, payload!);
+      offset += payload!.length;
+    }
+
+    return buffer;
+  }
+
+  /// Build the Extensions block for draft-16:
+  /// Extension Headers Length (i) + Extension Headers (..)
+  /// where headers use delta-encoded Key-Value-Pairs.
+  Uint8List _buildExtensionsBlock() {
+    // Sort headers by type ascending for delta encoding
+    final sorted = List<KeyValuePair>.from(extensionHeaders)
+      ..sort((a, b) => a.type.compareTo(b.type));
+
+    // Calculate size of KVP payload (delta-encoded, no count prefix)
+    int kvpSize = 0;
+    int lastType = 0;
+    for (final param in sorted) {
+      final delta = param.type - lastType;
+      kvpSize += MoQWireFormat._varintSize(delta);
+      if (param.isVarintType) {
+        kvpSize += MoQWireFormat._varintSize(param.intValue ?? 0);
+      } else if (param.value != null) {
+        kvpSize +=
+            MoQWireFormat._varintSize(param.value!.length) +
+            param.value!.length;
+      } else {
+        kvpSize += MoQWireFormat._varintSize(0);
+      }
+      lastType = param.type;
+    }
+
+    // Total block = Extension Headers Length (varint) + KVP bytes
+    final totalSize = MoQWireFormat._varintSize(kvpSize) + kvpSize;
+    final buffer = Uint8List(totalSize);
+    int offset = 0;
+
+    // Write Extension Headers Length
+    final lenBytes = MoQWireFormat.encodeVarint(kvpSize);
+    buffer.setAll(offset, lenBytes);
+    offset += lenBytes.length;
+
+    // Write delta-encoded KVPs
+    lastType = 0;
+    for (final param in sorted) {
+      final delta = param.type - lastType;
+      final deltaBytes = MoQWireFormat.encodeVarint(delta);
+      buffer.setAll(offset, deltaBytes);
+      offset += deltaBytes.length;
+
+      if (param.isVarintType) {
+        final valBytes = MoQWireFormat.encodeVarint(param.intValue ?? 0);
+        buffer.setAll(offset, valBytes);
+        offset += valBytes.length;
+      } else if (param.value != null) {
+        final valLenBytes = MoQWireFormat.encodeVarint(param.value!.length);
+        buffer.setAll(offset, valLenBytes);
+        offset += valLenBytes.length;
+        buffer.setAll(offset, param.value!);
+        offset += param.value!.length;
+      } else {
+        final zeroBytes = MoQWireFormat.encodeVarint(0);
+        buffer.setAll(offset, zeroBytes);
+        offset += zeroBytes.length;
+      }
+      lastType = param.type;
+    }
+
+    return buffer;
+  }
+
   int _writeVarint(Uint8List buffer, int offset, int value) {
     final bytes = MoQWireFormat.encodeVarint(value);
     buffer.setAll(offset, bytes);
@@ -155,7 +373,16 @@ class ObjectDatagram {
   }
 
   /// Deserialize an object datagram from bytes
-  static ObjectDatagram deserialize(Uint8List data) {
+  static ObjectDatagram deserialize(Uint8List data,
+      {int version = MoQVersion.draft14}) {
+    if (MoQVersion.isDraft16OrLater(version)) {
+      return _deserializeDraft16(data);
+    }
+    return _deserializeDraft14(data);
+  }
+
+  /// Draft-14 deserialization (original behavior)
+  static ObjectDatagram _deserializeDraft14(Uint8List data) {
     int offset = 0;
 
     // Read type
@@ -245,6 +472,122 @@ class ObjectDatagram {
     );
   }
 
+  /// Draft-16 deserialization with expanded bitfield type
+  static ObjectDatagram _deserializeDraft16(Uint8List data) {
+    int offset = 0;
+
+    // Read type (bitfield)
+    final (type, typeLen) = MoQWireFormat.decodeVarint(data, offset);
+    offset += typeLen;
+
+    // Decode bitfield flags
+    final hasExtensions = (type & 0x01) != 0;
+    final endOfGroup = (type & 0x02) != 0;
+    final zeroObjectId = (type & 0x04) != 0;
+    final defaultPriority = (type & 0x08) != 0;
+    final hasStatus = (type & 0x20) != 0;
+
+    // Read Track Alias
+    final (trackAlias, aliasLen) = MoQWireFormat.decodeVarint64(data, offset);
+    offset += aliasLen;
+
+    // Read Group ID (always present in datagram)
+    final (groupId, groupLen) = MoQWireFormat.decodeVarint64(data, offset);
+    offset += groupLen;
+
+    // Object ID: omitted when ZERO_OBJECT_ID bit set (implied 0)
+    Int64? objectId;
+    if (zeroObjectId) {
+      objectId = Int64(0);
+    } else {
+      final (oid, oidLen) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += oidLen;
+      objectId = oid;
+    }
+
+    // Publisher Priority: omitted when DEFAULT_PRIORITY bit set
+    int publisherPriority = 0;
+    if (!defaultPriority) {
+      publisherPriority = data[offset++];
+    }
+
+    // Extensions: Extension Headers Length (i) + delta-encoded KVPs
+    final headers = <KeyValuePair>[];
+    if (hasExtensions) {
+      // Read Extension Headers Length (total byte length of KVP block)
+      final (extLen, extLenLen) = MoQWireFormat.decodeVarint(data, offset);
+      offset += extLenLen;
+
+      if (extLen > 0) {
+        final extEnd = offset + extLen;
+        int lastType = 0;
+        while (offset < extEnd) {
+          // Read delta-encoded type
+          final (delta, deltaLen) = MoQWireFormat.decodeVarint(data, offset);
+          offset += deltaLen;
+          final absoluteType = lastType + delta;
+
+          if (absoluteType % 2 == 0) {
+            // Even type: value is a direct varint
+            final (intValue, intLen) =
+                MoQWireFormat.decodeVarint(data, offset);
+            offset += intLen;
+            headers
+                .add(KeyValuePair(type: absoluteType, intValue: intValue));
+          } else {
+            // Odd type: value is length-prefixed buffer
+            final (length, lengthLen) =
+                MoQWireFormat.decodeVarint(data, offset);
+            offset += lengthLen;
+            Uint8List? value;
+            if (length > 0 && offset + length <= data.length) {
+              value = data.sublist(offset, offset + length);
+              offset += length;
+            }
+            headers.add(KeyValuePair(type: absoluteType, value: value));
+          }
+          lastType = absoluteType;
+        }
+      }
+    }
+
+    // Status or Payload based on STATUS bit
+    ObjectStatus? status;
+    Uint8List? payload;
+
+    if (hasStatus) {
+      // STATUS bit set: read Object Status as varint
+      if (offset < data.length) {
+        final (statusVal, statusLen) =
+            MoQWireFormat.decodeVarint(data, offset);
+        offset += statusLen;
+        status = ObjectStatus.fromValue(statusVal);
+      }
+    } else {
+      // No STATUS bit: remaining bytes are Object Payload (no explicit length)
+      if (offset < data.length) {
+        payload = data.sublist(offset);
+      }
+      status = ObjectStatus.normal;
+    }
+
+    // END_OF_GROUP bit overrides status if set
+    if (endOfGroup && (status == null || status == ObjectStatus.normal)) {
+      status = ObjectStatus.endOfGroup;
+    }
+
+    return ObjectDatagram(
+      trackAlias: trackAlias,
+      groupId: groupId,
+      objectId: objectId,
+      publisherPriority: publisherPriority,
+      extensionHeaders: headers,
+      status: status ?? ObjectStatus.normal,
+      payload: payload,
+      useDefaultPriority: defaultPriority,
+    );
+  }
+
   /// Check if this is a normal object with payload
   bool get isNormal => status == null || status == ObjectStatus.normal;
 
@@ -262,15 +605,27 @@ class ObjectDatagram {
 ///
 /// Wire format:
 /// SUBGROUP_HEADER Message {
-///   Type (i) = Subgroup Type (0x10-0x1D),
+///   Type (i) = Subgroup Type (draft-14: 0x10-0x1D, draft-16: 0x10-0x1D/0x30-0x3D),
 ///   Track Alias (i),
 ///   Group ID (i),
 ///   Subgroup ID (i),
 ///   [First Object ID (i),]
-///   Publisher Priority (8),
+///   [Publisher Priority (8),]  // omitted when draft-16 DEFAULT_PRIORITY bit set
 ///   [Number of Extension Headers (i),
 ///   Extension Headers (..) ...,]
 /// }
+///
+/// Draft-14 type bitfield (0x10-0x1D):
+///   Bit 0 (0x01): EXTENSIONS present
+///   Bits 1-2: subgroupId mode (00=absent/0, 01=first obj ID, 10=explicit field)
+///   Type >= 0x18: END_OF_GROUP
+///
+/// Draft-16 type bitfield (0x10-0x15, 0x18-0x1D, 0x30-0x35, 0x38-0x3D):
+///   Bit 0 (0x01): EXTENSIONS present
+///   Bits 1-2 (mask 0x06): SUBGROUP_ID_MODE
+///   Bit 3 (0x08): END_OF_GROUP
+///   Bit 4: always 1 (0x10 base for subgroup)
+///   Bit 5 (0x20): DEFAULT_PRIORITY - Publisher Priority omitted
 class SubgroupHeader {
   final Int64 trackAlias;
   final Int64 groupId;
@@ -278,6 +633,8 @@ class SubgroupHeader {
   final Int64? firstObjectId;
   final int publisherPriority;
   final List<KeyValuePair> extensionHeaders;
+  final bool useDefaultPriority; // draft-16: when true, omit Publisher Priority byte
+  final bool endOfGroup; // draft-16: explicit END_OF_GROUP flag
 
   SubgroupHeader({
     required this.trackAlias,
@@ -286,22 +643,64 @@ class SubgroupHeader {
     this.firstObjectId,
     required this.publisherPriority,
     this.extensionHeaders = const [],
+    this.useDefaultPriority = false,
+    this.endOfGroup = false,
   });
 
-  /// Get the message type based on forwarding preference
-  int get messageType => 0x10; // SUBGROUP_HEADER_BASE
+  /// Get the message type based on forwarding preference (draft-14 default)
+  int get messageType => _messageType(MoQVersion.draft14);
+
+  /// Compute the message type for a given protocol version.
+  ///
+  /// Draft-14: always returns 0x10 (SUBGROUP_HEADER_BASE). The type bitfield
+  ///   encoding for draft-14 is handled by the parser/transport layer.
+  /// Draft-16: 0x10 base, extensions in bit 0, subgroup mode in bits 1-2,
+  ///   bit 3 = END_OF_GROUP, bit 5 = DEFAULT_PRIORITY.
+  int _messageType(int version) {
+    if (MoQVersion.isDraft16OrLater(version)) {
+      int type = 0x10; // bit 4 always set (subgroup base)
+      // Bit 0: extensions present
+      if (extensionHeaders.isNotEmpty) {
+        type |= 0x01;
+      }
+      // Bits 1-2: subgroup ID mode
+      if (firstObjectId != null) {
+        // Mode 01: subgroupId is first object ID
+        type |= 0x02;
+      } else if (subgroupId != Int64(0)) {
+        // Mode 10: explicit subgroup ID field
+        type |= 0x04;
+      }
+      // Bit 3: END_OF_GROUP
+      if (endOfGroup) {
+        type |= 0x08;
+      }
+      // Bit 5: DEFAULT_PRIORITY
+      if (useDefaultPriority) {
+        type |= 0x20;
+      }
+      return type;
+    }
+    // Draft-14 behavior: base type 0x10
+    return 0x10;
+  }
 
   /// Serialize the subgroup header
-  Uint8List serialize() {
+  Uint8List serialize({int version = MoQVersion.draft14}) {
+    final type = _messageType(version);
+    final skipPriority = MoQVersion.isDraft16OrLater(version) && useDefaultPriority;
+
     int len = 0;
-    len += MoQWireFormat._varintSize(messageType);
+    len += MoQWireFormat._varintSize(type);
     len += MoQWireFormat._varintSize64(trackAlias);
     len += MoQWireFormat._varintSize64(groupId);
     len += MoQWireFormat._varintSize64(subgroupId);
     if (firstObjectId != null) {
       len += MoQWireFormat._varintSize64(firstObjectId!);
     }
-    len += 1; // Publisher Priority
+    if (!skipPriority) {
+      len += 1; // Publisher Priority
+    }
     len += MoQWireFormat._varintSize(extensionHeaders.length);
     for (final param in extensionHeaders) {
       len += MoQWireFormat._varintSize(param.type);
@@ -318,7 +717,7 @@ class SubgroupHeader {
     final buffer = Uint8List(len);
     int offset = 0;
 
-    offset += _writeVarint(buffer, offset, messageType);
+    offset += _writeVarint(buffer, offset, type);
     offset += _writeVarint64(buffer, offset, trackAlias);
     offset += _writeVarint64(buffer, offset, groupId);
     offset += _writeVarint64(buffer, offset, subgroupId);
@@ -327,7 +726,9 @@ class SubgroupHeader {
       offset += _writeVarint64(buffer, offset, firstObjectId!);
     }
 
-    buffer[offset++] = publisherPriority;
+    if (!skipPriority) {
+      buffer[offset++] = publisherPriority;
+    }
 
     offset += _writeVarint(buffer, offset, extensionHeaders.length);
     for (final param in extensionHeaders) {
@@ -360,12 +761,26 @@ class SubgroupHeader {
   }
 
   /// Deserialize a subgroup header from bytes
-  static SubgroupHeader deserialize(Uint8List data) {
+  static SubgroupHeader deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
 
     // Type
     final (type, typeLen) = MoQWireFormat.decodeVarint(data, offset);
     offset += typeLen;
+
+    // Decode type flags based on version
+    bool eog = false;
+    bool defaultPriority = false;
+
+    if (MoQVersion.isDraft16OrLater(version)) {
+      // Draft-16: accept 0x10-0x1D and 0x30-0x3D
+      final masked = type & ~0x20; // mask out bit 5 for validation
+      if (masked < 0x10 || masked > 0x1D) {
+        throw FormatException('Invalid draft-16 subgroup header type: 0x${type.toRadixString(16)}');
+      }
+      eog = (type & 0x08) != 0;
+      defaultPriority = (type & 0x20) != 0;
+    }
 
     // Track Alias
     final (trackAlias, aliasLen) = MoQWireFormat.decodeVarint64(data, offset);
@@ -391,8 +806,11 @@ class SubgroupHeader {
       }
     }
 
-    // Publisher Priority
-    final publisherPriority = data[offset++];
+    // Publisher Priority (skipped when draft-16 DEFAULT_PRIORITY bit is set)
+    int publisherPriority = 0;
+    if (!(MoQVersion.isDraft16OrLater(version) && defaultPriority)) {
+      publisherPriority = data[offset++];
+    }
 
     // Extension Headers
     final (numHeaders, headersLen) = MoQWireFormat.decodeVarint(data, offset);
@@ -432,6 +850,8 @@ class SubgroupHeader {
       firstObjectId: firstObjectId,
       publisherPriority: publisherPriority,
       extensionHeaders: headers,
+      useDefaultPriority: defaultPriority,
+      endOfGroup: eog,
     );
   }
 }

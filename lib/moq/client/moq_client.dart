@@ -8,7 +8,7 @@ import '../transport/moq_transport.dart';
 import '../packager/moq_mi_packager.dart';
 import 'replay_stream.dart';
 
-/// Session termination error codes per draft-ietf-moq-transport-14 Section 3.4
+/// Session termination error codes per draft-ietf-moq-transport-14/16 Section 3.4
 class MoQTerminationCode {
   static const int noError = 0x0;
   static const int internalError = 0x1;
@@ -20,7 +20,7 @@ class MoQTerminationCode {
   static const int goawayTimeout = 0x10;
 }
 
-/// MoQ Client implementation per draft-ietf-moq-transport-14
+/// MoQ Client implementation per draft-ietf-moq-transport-14/16
 class MoQClient {
   final MoQTransport _transport;
   final Logger _logger;
@@ -146,7 +146,7 @@ class MoQClient {
 
   /// Connect to a MoQ server
   Future<void> connect(String host, int port,
-      {List<int>? supportedVersions, Map<String, String>? options}) async {
+      {List<int>? supportedVersions, int? targetVersion, Map<String, String>? options}) async {
     if (_isConnected) {
       _logger.w('Already connected');
       return;
@@ -219,7 +219,13 @@ class MoQClient {
     // Send CLIENT_SETUP message
     // Draft versions use 0xff000000 + draft number format per spec section 9.3.1
     // Draft-14 = 0xff00000E (confirmed by moqt.js reference implementation)
-    final versions = supportedVersions ?? [0xff00000e]; // Draft-14
+    // Draft-16: version is negotiated via ALPN, not in CLIENT_SETUP
+    final effectiveVersion = targetVersion ?? MoQVersion.draft14;
+    if (MoQVersion.isDraft16OrLater(effectiveVersion)) {
+      _selectedVersion = effectiveVersion;
+    }
+
+    final versions = supportedVersions ?? (MoQVersion.isDraft16OrLater(effectiveVersion) ? <int>[] : [0xff00000e]);
 
     // MAX_REQUEST_ID parameter is required per FB reference implementation
     // Value of 128 matches moqt.js MOQ_MAX_REQUEST_ID_NUM
@@ -230,7 +236,7 @@ class MoQClient {
       ],
     );
 
-    final setupBytes = setupMessage.serialize();
+    final setupBytes = setupMessage.serialize(version: _selectedVersion);
     _logger.d('CLIENT_SETUP bytes (${setupBytes.length}): ${setupBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
     await _transport.send(setupBytes);
     _logger.d('Sent CLIENT_SETUP with versions: $versions');
@@ -325,7 +331,7 @@ class MoQClient {
       endGroup: endGroup,
     );
 
-    await _transport.send(subscribeMessage.serialize());
+    await _transport.send(subscribeMessage.serialize(version: _selectedVersion));
 
     // Create subscription object (will be completed when SUBSCRIBE_OK arrives)
     final subscription = MoQSubscription(
@@ -369,7 +375,7 @@ class MoQClient {
       forward: (forward ?? subscription.forward) ? 1 : 0,
     );
 
-    await _transport.send(updateMessage.serialize());
+    await _transport.send(updateMessage.serialize(version: _selectedVersion));
 
     // Update subscription state
     if (startLocation != null) {
@@ -393,7 +399,7 @@ class MoQClient {
     }
 
     final unsubscribeMessage = UnsubscribeMessage(requestId: subscriptionId);
-    await _transport.send(unsubscribeMessage.serialize());
+    await _transport.send(unsubscribeMessage.serialize(version: _selectedVersion));
 
     final subscription = _subscriptions.remove(subscriptionId);
     if (subscription != null) {
@@ -423,7 +429,7 @@ class MoQClient {
       parameters: parameters ?? [],
     );
 
-    await _transport.send(message.serialize());
+    await _transport.send(message.serialize(version: _selectedVersion));
 
     // Create announcement object (will be completed when PUBLISH_NAMESPACE_OK arrives)
     final announcement = MoQNamespaceAnnouncement(
@@ -463,7 +469,7 @@ class MoQClient {
       parameters: parameters ?? [],
     );
 
-    await _transport.send(message.serialize());
+    await _transport.send(message.serialize(version: _selectedVersion));
 
     // Create subscription object (will be completed when SUBSCRIBE_NAMESPACE_OK arrives)
     final subscription = MoQNamespaceSubscription(
@@ -492,7 +498,7 @@ class MoQClient {
       trackNamespacePrefix: trackNamespacePrefix,
     );
 
-    await _transport.send(message.serialize());
+    await _transport.send(message.serialize(version: _selectedVersion));
 
     // Remove matching subscription
     _namespaceSubscriptions.removeWhere((_, sub) {
@@ -545,7 +551,7 @@ class MoQClient {
       parameters: parameters ?? [],
     );
 
-    await _transport.send(message.serialize());
+    await _transport.send(message.serialize(version: _selectedVersion));
 
     // Create fetch object (will be completed when FETCH_OK arrives)
     final fetch = MoQFetch(
@@ -596,7 +602,7 @@ class MoQClient {
       parameters: parameters ?? [],
     );
 
-    await _transport.send(message.serialize());
+    await _transport.send(message.serialize(version: _selectedVersion));
 
     final fetch = MoQFetch(
       client: this,
@@ -644,7 +650,7 @@ class MoQClient {
       parameters: parameters ?? [],
     );
 
-    await _transport.send(message.serialize());
+    await _transport.send(message.serialize(version: _selectedVersion));
 
     final fetch = MoQFetch(
       client: this,
@@ -677,7 +683,7 @@ class MoQClient {
     _logger.i('Canceling fetch: $requestId');
 
     final message = FetchCancelMessage(requestId: requestId);
-    await _transport.send(message.serialize());
+    await _transport.send(message.serialize(version: _selectedVersion));
 
     fetch.cancel();
   }
@@ -856,14 +862,33 @@ class MoQClient {
       throw StateError('Not connected');
     }
 
+    // Find the request ID for this namespace announcement
+    Int64? requestId;
+    for (final entry in _namespaceAnnouncements.entries) {
+      if (_namespacesEqual(entry.value.trackNamespace, trackNamespace)) {
+        requestId = entry.key;
+        break;
+      }
+    }
+
     final message = PublishNamespaceDoneMessage(
       trackNamespace: trackNamespace,
       statusCode: statusCode,
       reason: ReasonPhrase(reason),
+      requestId: requestId,
     );
 
-    await _transport.send(message.serialize());
+    await _transport.send(message.serialize(version: _selectedVersion));
     _logger.i('Cancelled namespace: ${trackNamespace.map((n) => String.fromCharCodes(n)).join("/")}');
+  }
+
+  /// Compare two namespace tuples for equality
+  bool _namespacesEqual(List<Uint8List> a, List<Uint8List> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (!_bytesEqual(a[i], b[i])) return false;
+    }
+    return true;
   }
 
   void _handleIncomingData(Uint8List data) {
@@ -881,7 +906,7 @@ class MoQClient {
         // Parse as control message
         // Note: Data streams (SUBGROUP_HEADER) now come via incomingDataStreams,
         // not through the control stream, so no need to detect them here.
-        final (message, bytesRead) = MoQControlMessageParser.parse(bufferData);
+        final (message, bytesRead) = MoQControlMessageParser.parse(bufferData, version: _selectedVersion);
 
         if (message != null && bytesRead > 0) {
           // Remove parsed bytes from buffer
@@ -929,7 +954,7 @@ class MoQClient {
 
     if (parser == null) {
       // New stream - create parser
-      parser = MoQDataStreamParser(logger: _logger);
+      parser = MoQDataStreamParser(logger: _logger, version: _selectedVersion);
       _dataStreamParsers[chunk.streamId] = parser;
       _logger.d('Created new parser for stream ${chunk.streamId}');
     }
@@ -958,7 +983,7 @@ class MoQClient {
 
     try {
       // Parse as OBJECT_DATAGRAM
-      final datagram = ObjectDatagram.deserialize(data);
+      final datagram = ObjectDatagram.deserialize(data, version: _selectedVersion);
 
       _logger.d('Received datagram: trackAlias=${datagram.trackAlias}, '
           'group=${datagram.groupId}, object=${datagram.objectId}, '
@@ -1196,13 +1221,29 @@ class MoQClient {
       case MoQMessageType.fetchError:
         _handleFetchError(message as FetchErrorMessage);
         break;
+      case MoQMessageType.requestOk:
+        _handleRequestOk(message as RequestOkMessage);
+        break;
+      case MoQMessageType.requestError:
+        _handleRequestError(message as RequestErrorMessage);
+        break;
+      case MoQMessageType.namespace_:
+        _handleNamespace(message as NamespaceMessage);
+        break;
+      case MoQMessageType.namespaceDone:
+        _handleNamespaceDone(message as NamespaceDoneMessage);
+        break;
       default:
         _logger.w('Unhandled message type: ${message.type}');
     }
   }
 
   void _handleServerSetup(ServerSetupMessage message) {
-    _selectedVersion = message.selectedVersion;
+    if (!MoQVersion.isDraft16OrLater(_selectedVersion)) {
+      // Draft-14: version comes from SERVER_SETUP
+      _selectedVersion = message.selectedVersion;
+    }
+    // For draft-16: _selectedVersion was set in connect() from ALPN
     _logger.i('Server selected version: $_selectedVersion');
 
     // Store setup parameters
@@ -1415,6 +1456,99 @@ class MoQClient {
     }
   }
 
+  /// Handle REQUEST_OK (draft-16) - consolidated OK for namespace announcements,
+  /// namespace subscriptions, and track status requests
+  void _handleRequestOk(RequestOkMessage message) {
+    // Try namespace announcement first
+    final announcement = _namespaceAnnouncements[message.requestId];
+    if (announcement != null) {
+      announcement.complete();
+      _logger.i('REQUEST_OK: namespace announcement successful: ${announcement.namespacePath}');
+      return;
+    }
+
+    // Try namespace subscription
+    final nsSub = _namespaceSubscriptions[message.requestId];
+    if (nsSub != null) {
+      nsSub.complete();
+      _logger.i('REQUEST_OK: namespace subscription successful: ${nsSub.namespacePrefixPath}');
+      return;
+    }
+
+    _logger.w('Received REQUEST_OK for unknown request: ${message.requestId}');
+  }
+
+  /// Handle REQUEST_ERROR (draft-16) - consolidated error for subscriptions,
+  /// fetches, namespace announcements, namespace subscriptions
+  void _handleRequestError(RequestErrorMessage message) {
+    // Try subscription
+    final subscription = _subscriptions[message.requestId];
+    if (subscription != null) {
+      subscription.fail(
+        errorCode: message.errorCode,
+        reason: message.errorReason.reason,
+      );
+      _subscriptions.remove(message.requestId);
+      _logger.e('REQUEST_ERROR (subscription): ${message.errorCode} - ${message.errorReason.reason}');
+      return;
+    }
+
+    // Try fetch
+    final fetch = _activeFetches[message.requestId];
+    if (fetch != null) {
+      fetch.fail(
+        errorCode: message.errorCode,
+        reason: message.errorReason.reason,
+      );
+      _activeFetches.remove(message.requestId);
+      _logger.e('REQUEST_ERROR (fetch): ${message.errorCode} - ${message.errorReason.reason}');
+      return;
+    }
+
+    // Try namespace announcement
+    final announcement = _namespaceAnnouncements[message.requestId];
+    if (announcement != null) {
+      announcement.fail(
+        errorCode: message.errorCode,
+        reason: message.errorReason.reason,
+      );
+      _namespaceAnnouncements.remove(message.requestId);
+      _logger.e('REQUEST_ERROR (namespace): ${message.errorCode} - ${message.errorReason.reason}');
+      return;
+    }
+
+    // Try namespace subscription
+    final nsSub = _namespaceSubscriptions[message.requestId];
+    if (nsSub != null) {
+      nsSub.fail(
+        errorCode: message.errorCode,
+        reason: message.errorReason.reason,
+      );
+      _namespaceSubscriptions.remove(message.requestId);
+      _logger.e('REQUEST_ERROR (namespace sub): ${message.errorCode} - ${message.errorReason.reason}');
+      return;
+    }
+
+    _logger.w('Received REQUEST_ERROR for unknown request: ${message.requestId}');
+  }
+
+  /// Handle NAMESPACE message (draft-16)
+  /// Received on SUBSCRIBE_NAMESPACE response stream indicating a namespace match
+  void _handleNamespace(NamespaceMessage message) {
+    _logger.i('NAMESPACE: ${message.suffixPath}');
+    // Route to namespace subscriptions that match
+    for (final sub in _namespaceSubscriptions.values) {
+      // Notify subscribers about namespace discovery
+      _logger.d('Namespace match for subscription ${sub.requestId}: ${message.suffixPath}');
+    }
+  }
+
+  /// Handle NAMESPACE_DONE message (draft-16)
+  /// Received on SUBSCRIBE_NAMESPACE response stream indicating namespace removed
+  void _handleNamespaceDone(NamespaceDoneMessage message) {
+    _logger.i('NAMESPACE_DONE: ${message.suffixPath}');
+  }
+
   void _handleSubscribeNamespaceError(SubscribeNamespaceErrorMessage message) {
     final subscription = _namespaceSubscriptions[message.requestId];
     if (subscription != null) {
@@ -1481,7 +1615,7 @@ class MoQClient {
       parameters: parameters ?? [],
     );
 
-    await _transport.send(publishOk.serialize());
+    await _transport.send(publishOk.serialize(version: _selectedVersion));
 
     // Register track alias for incoming data
     _trackAliases[request.trackAlias] = TrackInfo(
@@ -1494,7 +1628,8 @@ class MoQClient {
 
   /// Reject a PUBLISH request (server mode)
   ///
-  /// Sends PUBLISH_ERROR to the publisher to reject the subscription.
+  /// Sends PUBLISH_ERROR (draft-14) or REQUEST_ERROR (draft-16) to the
+  /// publisher to reject the subscription.
   Future<void> rejectPublish(
     Int64 requestId, {
     required int errorCode,
@@ -1506,13 +1641,22 @@ class MoQClient {
 
     _pendingPublishRequests.remove(requestId);
 
-    final publishError = PublishErrorMessage(
-      requestId: requestId,
-      errorCode: errorCode,
-      errorReason: ReasonPhrase(reason),
-    );
-
-    await _transport.send(publishError.serialize());
+    if (MoQVersion.isDraft16OrLater(_selectedVersion)) {
+      final requestError = RequestErrorMessage(
+        requestId: requestId,
+        errorCode: errorCode,
+        retryInterval: Int64(0),
+        errorReason: ReasonPhrase(reason),
+      );
+      await _transport.send(requestError.serialize(version: _selectedVersion));
+    } else {
+      final publishError = PublishErrorMessage(
+        requestId: requestId,
+        errorCode: errorCode,
+        errorReason: ReasonPhrase(reason),
+      );
+      await _transport.send(publishError.serialize(version: _selectedVersion));
+    }
     _logger.i('Rejected PUBLISH request: $requestId - $reason');
   }
 
@@ -1583,7 +1727,7 @@ class MoQClient {
       parameters: parameters ?? [],
     );
 
-    await _transport.send(subscribeOk.serialize());
+    await _transport.send(subscribeOk.serialize(version: _selectedVersion));
 
     // Track active subscription
     _activePublisherSubscriptions[requestId] = request;
@@ -1599,7 +1743,8 @@ class MoQClient {
 
   /// Reject a SUBSCRIBE request (publisher mode)
   ///
-  /// Sends SUBSCRIBE_ERROR to the subscriber to reject the subscription.
+  /// Sends SUBSCRIBE_ERROR (draft-14) or REQUEST_ERROR (draft-16) to the
+  /// subscriber to reject the subscription.
   Future<void> rejectSubscribe(
     Int64 requestId, {
     required int errorCode,
@@ -1611,13 +1756,22 @@ class MoQClient {
 
     _pendingSubscribeRequests.remove(requestId);
 
-    final subscribeError = SubscribeErrorMessage(
-      requestId: requestId,
-      errorCode: errorCode,
-      errorReason: ReasonPhrase(reason),
-    );
-
-    await _transport.send(subscribeError.serialize());
+    if (MoQVersion.isDraft16OrLater(_selectedVersion)) {
+      final requestError = RequestErrorMessage(
+        requestId: requestId,
+        errorCode: errorCode,
+        retryInterval: Int64(0),
+        errorReason: ReasonPhrase(reason),
+      );
+      await _transport.send(requestError.serialize(version: _selectedVersion));
+    } else {
+      final subscribeError = SubscribeErrorMessage(
+        requestId: requestId,
+        errorCode: errorCode,
+        errorReason: ReasonPhrase(reason),
+      );
+      await _transport.send(subscribeError.serialize(version: _selectedVersion));
+    }
     _logger.i('Rejected SUBSCRIBE request: $requestId - $reason');
   }
 
@@ -1641,7 +1795,7 @@ class MoQClient {
       errorReason: reason != null ? ReasonPhrase(reason) : null,
     );
 
-    await _transport.send(publishDone.serialize());
+    await _transport.send(publishDone.serialize(version: _selectedVersion));
     _activePublisherSubscriptions.remove(requestId);
     _logger.i('Sent PUBLISH_DONE for subscription: $requestId');
   }

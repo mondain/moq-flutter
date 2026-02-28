@@ -4,8 +4,9 @@ part of 'moq_messages.dart';
 abstract class MoQControlMessage {
   MoQMessageType get type;
 
-  /// Serialize the message to bytes
-  Uint8List serialize();
+  /// Serialize the message to bytes.
+  /// [version] selects the wire format (default draft-14).
+  Uint8List serialize({int version = MoQVersion.draft14});
 
   /// Get the message payload length (excluding type and length fields)
   int get payloadLength;
@@ -35,109 +36,93 @@ class ClientSetupMessage extends MoQControlMessage {
   MoQMessageType get type => MoQMessageType.clientSetup;
 
   @override
-  int get payloadLength {
+  int get payloadLength => _payloadLength(MoQVersion.draft14);
+
+  int _payloadLength(int version) {
     int len = 0;
-    // Number of versions
-    len += MoQWireFormat._varintSize(supportedVersions.length);
-    // Each version (varint)
-    for (final version in supportedVersions) {
-      len += MoQWireFormat._varintSize(version);
+    final useDelta = MoQVersion.usesDeltaKvp(version);
+
+    if (!MoQVersion.isDraft16OrLater(version)) {
+      // Draft-14: version list
+      len += MoQWireFormat._varintSize(supportedVersions.length);
+      for (final v in supportedVersions) {
+        len += MoQWireFormat._varintSize(v);
+      }
     }
-    // Number of parameters
+
+    // Parameters (uses KVP encoding helper for size calc)
     len += MoQWireFormat._varintSize(parameters.length);
-    // Each parameter - encoding depends on type (even = varint, odd = buffer)
+    int lastType = 0;
     for (final param in parameters) {
-      len += MoQWireFormat._varintSize(param.type);
+      final typeToWrite = useDelta ? (param.type - lastType) : param.type;
+      len += MoQWireFormat._varintSize(typeToWrite);
       if (param.isVarintType) {
-        // Even types: value is direct varint
         len += MoQWireFormat._varintSize(param.intValue ?? 0);
       } else if (param.value != null) {
-        // Odd types: value is length-prefixed buffer
         len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
       }
+      if (useDelta) lastType = param.type;
     }
     return len;
   }
 
   @override
-  Uint8List serialize() {
-    final payload = Uint8List(payloadLength);
+  Uint8List serialize({int version = MoQVersion.draft14}) {
+    final payload = Uint8List(_payloadLength(version));
     int offset = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
 
-    // Write number of versions
-    offset += _writeVarint(payload, offset, supportedVersions.length);
-
-    // Write versions
-    for (final version in supportedVersions) {
-      offset += _writeVarint(payload, offset, version);
+    if (!MoQVersion.isDraft16OrLater(version)) {
+      // Draft-14: write version list
+      offset += _writeVarint(payload, offset, supportedVersions.length);
+      for (final v in supportedVersions) {
+        offset += _writeVarint(payload, offset, v);
+      }
     }
 
-    // Write number of parameters
+    // Write parameters
     offset += _writeVarint(payload, offset, parameters.length);
-
-    // Write parameters - encoding depends on type (even = varint, odd = buffer)
+    int lastType = 0;
     for (final param in parameters) {
-      offset += _writeVarint(payload, offset, param.type);
+      final typeToWrite = useDelta ? (param.type - lastType) : param.type;
+      offset += _writeVarint(payload, offset, typeToWrite);
       if (param.isVarintType) {
-        // Even types: value is direct varint
         offset += _writeVarint(payload, offset, param.intValue ?? 0);
       } else if (param.value != null) {
-        // Odd types: value is length-prefixed buffer
         offset += _writeVarint(payload, offset, param.value!.length);
         payload.setAll(offset, param.value!);
         offset += param.value!.length;
       }
+      if (useDelta) lastType = param.type;
     }
 
-    // Wrap with type and length
     return _wrapMessage(payload);
   }
 
   /// Deserialize a CLIENT_SETUP message
-  static ClientSetupMessage deserialize(Uint8List data) {
+  static ClientSetupMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
 
-    // Read number of versions
-    final (numVersions, versionsLen) = MoQWireFormat.decodeVarint(data, offset);
-    offset += versionsLen;
-
-    // Read versions
+    // Draft-14: read version list; draft-16: version comes from ALPN
     final versions = <int>[];
-    for (int i = 0; i < numVersions; i++) {
-      final (version, len) = MoQWireFormat.decodeVarint(data, offset);
-      offset += len;
-      versions.add(version);
+    if (!MoQVersion.isDraft16OrLater(version)) {
+      final (numVersions, versionsLen) = MoQWireFormat.decodeVarint(data, offset);
+      offset += versionsLen;
+      for (int i = 0; i < numVersions; i++) {
+        final (v, len) = MoQWireFormat.decodeVarint(data, offset);
+        offset += len;
+        versions.add(v);
+      }
     }
 
-    // Read number of parameters
+    // Read parameters
     final (numParams, paramsLen) = MoQWireFormat.decodeVarint(data, offset);
     offset += paramsLen;
 
-    // Read parameters - encoding depends on type (even = varint, odd = buffer)
-    final params = <KeyValuePair>[];
-    for (int i = 0; i < numParams; i++) {
-      final (type, typeLen) = MoQWireFormat.decodeVarint(data, offset);
-      offset += typeLen;
-
-      if (type % 2 == 0) {
-        // Even types: value is direct varint
-        final (intValue, intLen) = MoQWireFormat.decodeVarint(data, offset);
-        offset += intLen;
-        params.add(KeyValuePair(type: type, intValue: intValue));
-      } else {
-        // Odd types: value is length-prefixed buffer
-        Uint8List? value;
-        if (offset < data.length) {
-          final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
-          offset += lengthLen;
-          if (length > 0) {
-            value = data.sublist(offset, offset + length);
-            offset += length;
-          }
-        }
-        params.add(KeyValuePair(type: type, value: value));
-      }
-    }
+    final (params, paramsRead) =
+        MoQWireFormat.decodeKeyValuePairs(data, offset, numParams, useDelta: useDelta);
+    offset += paramsRead;
 
     return ClientSetupMessage(
       supportedVersions: versions,
@@ -196,82 +181,85 @@ class ServerSetupMessage extends MoQControlMessage {
   MoQMessageType get type => MoQMessageType.serverSetup;
 
   @override
-  int get payloadLength {
-    int len = MoQWireFormat._varintSize(selectedVersion);
+  int get payloadLength => _payloadLength(MoQVersion.draft14);
+
+  int _payloadLength(int version) {
+    int len = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
+
+    if (!MoQVersion.isDraft16OrLater(version)) {
+      // Draft-14: selected version field
+      len += MoQWireFormat._varintSize(selectedVersion);
+    }
+
     len += MoQWireFormat._varintSize(parameters.length);
+    int lastType = 0;
     for (final param in parameters) {
-      len += MoQWireFormat._varintSize(param.type);
-      if (param.value != null) {
+      final typeToWrite = useDelta ? (param.type - lastType) : param.type;
+      len += MoQWireFormat._varintSize(typeToWrite);
+      if (param.isVarintType) {
+        len += MoQWireFormat._varintSize(param.intValue ?? 0);
+      } else if (param.value != null) {
         len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
       }
+      if (useDelta) lastType = param.type;
     }
     return len;
   }
 
   @override
-  Uint8List serialize() {
-    final payload = Uint8List(payloadLength);
+  Uint8List serialize({int version = MoQVersion.draft14}) {
+    final payload = Uint8List(_payloadLength(version));
     int offset = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
 
-    // Write selected version
-    offset += _writeVarint(payload, offset, selectedVersion);
-
-    // Write number of parameters
-    offset += _writeVarint(payload, offset, parameters.length);
+    if (!MoQVersion.isDraft16OrLater(version)) {
+      // Draft-14: write selected version
+      offset += _writeVarint(payload, offset, selectedVersion);
+    }
 
     // Write parameters
+    offset += _writeVarint(payload, offset, parameters.length);
+    int lastType = 0;
     for (final param in parameters) {
-      offset += _writeVarint(payload, offset, param.type);
-      if (param.value != null) {
+      final typeToWrite = useDelta ? (param.type - lastType) : param.type;
+      offset += _writeVarint(payload, offset, typeToWrite);
+      if (param.isVarintType) {
+        offset += _writeVarint(payload, offset, param.intValue ?? 0);
+      } else if (param.value != null) {
         offset += _writeVarint(payload, offset, param.value!.length);
         payload.setAll(offset, param.value!);
         offset += param.value!.length;
       }
+      if (useDelta) lastType = param.type;
     }
 
     return _wrapMessage(payload);
   }
 
   /// Deserialize a SERVER_SETUP message
-  static ServerSetupMessage deserialize(Uint8List data) {
+  static ServerSetupMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
 
-    // Read selected version
-    final (version, versionLen) = MoQWireFormat.decodeVarint(data, offset);
-    offset += versionLen;
+    // Draft-14: read selected version; draft-16: already known from ALPN
+    int selectedVer = version; // default to the negotiated version
+    if (!MoQVersion.isDraft16OrLater(version)) {
+      final (sv, versionLen) = MoQWireFormat.decodeVarint(data, offset);
+      offset += versionLen;
+      selectedVer = sv;
+    }
 
-    // Read number of parameters
+    // Read parameters
     final (numParams, paramsLen) = MoQWireFormat.decodeVarint(data, offset);
     offset += paramsLen;
 
-    // Read parameters - encoding depends on type (even = varint, odd = buffer)
-    final params = <KeyValuePair>[];
-    for (int i = 0; i < numParams; i++) {
-      final (type, typeLen) = MoQWireFormat.decodeVarint(data, offset);
-      offset += typeLen;
-
-      if (type % 2 == 0) {
-        // Even types: value is direct varint
-        final (intValue, intLen) = MoQWireFormat.decodeVarint(data, offset);
-        offset += intLen;
-        params.add(KeyValuePair(type: type, intValue: intValue));
-      } else {
-        // Odd types: value is length-prefixed buffer
-        Uint8List? value;
-        if (offset < data.length) {
-          final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
-          offset += lengthLen;
-          if (length > 0) {
-            value = data.sublist(offset, offset + length);
-            offset += length;
-          }
-        }
-        params.add(KeyValuePair(type: type, value: value));
-      }
-    }
+    final (params, paramsRead) =
+        MoQWireFormat.decodeKeyValuePairs(data, offset, numParams, useDelta: useDelta);
+    offset += paramsRead;
 
     return ServerSetupMessage(
-      selectedVersion: version,
+      selectedVersion: selectedVer,
       parameters: params,
     );
   }
@@ -347,41 +335,109 @@ class SubscribeMessage extends MoQControlMessage {
   MoQMessageType get type => MoQMessageType.subscribe;
 
   @override
-  int get payloadLength {
+  int get payloadLength => _payloadLength(MoQVersion.draft14);
+
+  int _payloadLength(int version) {
     int len = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
+
     // Request ID (varint)
     len += MoQWireFormat._varintSize64(requestId);
     // Track Namespace (tuple)
     len += _tupleSize(trackNamespace);
     // Track Name length (varint) + Track Name
     len += MoQWireFormat._varintSize(trackName.length) + trackName.length;
-    // Subscriber Priority (1 byte)
-    len += 1;
-    // Group Order (1 byte)
-    len += 1;
-    // Forward (1 byte)
-    len += 1;
-    // Filter Type (varint)
-    len += MoQWireFormat._varintSize(filterType.value);
-    // Start Location (if present)
-    if (filterType == FilterType.absoluteStart ||
-        filterType == FilterType.absoluteRange) {
-      len += _locationSize();
-    }
-    // End Group (varint, if present)
-    if (filterType == FilterType.absoluteRange && endGroup != null) {
-      len += MoQWireFormat._varintSize64(endGroup!);
-    }
-    // Number of parameters
-    len += MoQWireFormat._varintSize(parameters.length);
-    // Parameters
-    for (final param in parameters) {
-      len += MoQWireFormat._varintSize(param.type);
-      if (param.value != null) {
-        len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+
+    if (MoQVersion.isDraft16OrLater(version)) {
+      // Draft-16: inline fields moved to params
+      final allParams = _buildDraft16Params();
+      final kvpBytes = MoQWireFormat.encodeKeyValuePairs(allParams, useDelta: useDelta);
+      len += kvpBytes.length;
+    } else {
+      // Draft-14: inline fields
+      // Subscriber Priority (1 byte)
+      len += 1;
+      // Group Order (1 byte)
+      len += 1;
+      // Forward (1 byte)
+      len += 1;
+      // Filter Type (varint)
+      len += MoQWireFormat._varintSize(filterType.value);
+      // Start Location (if present)
+      if (filterType == FilterType.absoluteStart ||
+          filterType == FilterType.absoluteRange) {
+        len += _locationSize();
+      }
+      // End Group (varint, if present)
+      if (filterType == FilterType.absoluteRange && endGroup != null) {
+        len += MoQWireFormat._varintSize64(endGroup!);
+      }
+      // Number of parameters
+      len += MoQWireFormat._varintSize(parameters.length);
+      // Parameters
+      for (final param in parameters) {
+        len += MoQWireFormat._varintSize(param.type);
+        if (param.value != null) {
+          len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+        }
       }
     }
     return len;
+  }
+
+  /// Build the combined parameter list for draft-16 serialization.
+  /// Inline fields (priority, group order, forward, filter) become params.
+  List<KeyValuePair> _buildDraft16Params() {
+    final allParams = <KeyValuePair>[
+      // forward (0x10, even) -> varint
+      KeyValuePair.varint(SubscribeParameterType.forward, forward),
+      // subscriberPriority (0x20, even) -> varint
+      KeyValuePair.varint(SubscribeParameterType.subscriberPriority, subscriberPriority),
+      // subscriptionFilter (0x21, odd) -> buffer: FilterType [+ StartLocation] [+ EndGroup]
+      KeyValuePair.buffer(SubscribeParameterType.subscriptionFilter, _encodeFilterParam()),
+      // groupOrder (0x22, even) -> varint
+      KeyValuePair.varint(SubscribeParameterType.groupOrder, groupOrder.value),
+    ];
+    // Append any user-supplied parameters
+    allParams.addAll(parameters);
+    return allParams;
+  }
+
+  /// Encode the subscription filter as a buffer for draft-16 param 0x21.
+  /// Contents: FilterType(i) [StartLocation] [EndGroup(i)]
+  Uint8List _encodeFilterParam() {
+    // Calculate size
+    int size = MoQWireFormat._varintSize(filterType.value);
+    if (filterType == FilterType.absoluteStart ||
+        filterType == FilterType.absoluteRange) {
+      size += MoQWireFormat._varintSize64(startLocation?.group ?? Int64(0));
+      size += MoQWireFormat._varintSize64(startLocation?.object ?? Int64(0));
+    }
+    if (filterType == FilterType.absoluteRange && endGroup != null) {
+      size += MoQWireFormat._varintSize64(endGroup!);
+    }
+
+    final buf = Uint8List(size);
+    int off = 0;
+    final ftBytes = MoQWireFormat.encodeVarint(filterType.value);
+    buf.setAll(off, ftBytes);
+    off += ftBytes.length;
+
+    if (filterType == FilterType.absoluteStart ||
+        filterType == FilterType.absoluteRange) {
+      final loc = startLocation ?? Location.zero();
+      final locBytes = MoQWireFormat.encodeLocation(loc);
+      buf.setAll(off, locBytes);
+      off += locBytes.length;
+    }
+
+    if (filterType == FilterType.absoluteRange && endGroup != null) {
+      final egBytes = MoQWireFormat.encodeVarint64(endGroup!);
+      buf.setAll(off, egBytes);
+      off += egBytes.length;
+    }
+
+    return buf;
   }
 
   int _tupleSize(List<Uint8List> tuple) {
@@ -400,9 +456,10 @@ class SubscribeMessage extends MoQControlMessage {
   }
 
   @override
-  Uint8List serialize() {
-    final payload = Uint8List(payloadLength);
+  Uint8List serialize({int version = MoQVersion.draft14}) {
+    final payload = Uint8List(_payloadLength(version));
     int offset = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
 
     // Request ID
     offset += _writeVarint64(payload, offset, requestId);
@@ -415,44 +472,53 @@ class SubscribeMessage extends MoQControlMessage {
     payload.setAll(offset, trackName);
     offset += trackName.length;
 
-    // Subscriber Priority
-    payload[offset++] = subscriberPriority;
+    if (MoQVersion.isDraft16OrLater(version)) {
+      // Draft-16: write all fields as delta-encoded KVP params
+      final allParams = _buildDraft16Params();
+      final kvpBytes = MoQWireFormat.encodeKeyValuePairs(allParams, useDelta: useDelta);
+      payload.setAll(offset, kvpBytes);
+      offset += kvpBytes.length;
+    } else {
+      // Draft-14: inline fields
+      // Subscriber Priority
+      payload[offset++] = subscriberPriority;
 
-    // Group Order
-    payload[offset++] = groupOrder.value;
+      // Group Order
+      payload[offset++] = groupOrder.value;
 
-    // Forward
-    payload[offset++] = forward;
+      // Forward
+      payload[offset++] = forward;
 
-    // Filter Type
-    offset += _writeVarint(payload, offset, filterType.value);
+      // Filter Type
+      offset += _writeVarint(payload, offset, filterType.value);
 
-    // Start Location (if present)
-    if (filterType == FilterType.absoluteStart ||
-        filterType == FilterType.absoluteRange) {
-      if (startLocation != null) {
-        offset += _writeLocation(payload, offset, startLocation!);
-      } else {
-        // Write default location {0, 0}
-        offset += _writeLocation(payload, offset, Location.zero());
+      // Start Location (if present)
+      if (filterType == FilterType.absoluteStart ||
+          filterType == FilterType.absoluteRange) {
+        if (startLocation != null) {
+          offset += _writeLocation(payload, offset, startLocation!);
+        } else {
+          // Write default location {0, 0}
+          offset += _writeLocation(payload, offset, Location.zero());
+        }
       }
-    }
 
-    // End Group (if present)
-    if (filterType == FilterType.absoluteRange && endGroup != null) {
-      offset += _writeVarint64(payload, offset, endGroup!);
-    }
+      // End Group (if present)
+      if (filterType == FilterType.absoluteRange && endGroup != null) {
+        offset += _writeVarint64(payload, offset, endGroup!);
+      }
 
-    // Number of parameters
-    offset += _writeVarint(payload, offset, parameters.length);
+      // Number of parameters
+      offset += _writeVarint(payload, offset, parameters.length);
 
-    // Parameters
-    for (final param in parameters) {
-      offset += _writeVarint(payload, offset, param.type);
-      if (param.value != null) {
-        offset += _writeVarint(payload, offset, param.value!.length);
-        payload.setAll(offset, param.value!);
-        offset += param.value!.length;
+      // Parameters
+      for (final param in parameters) {
+        offset += _writeVarint(payload, offset, param.type);
+        if (param.value != null) {
+          offset += _writeVarint(payload, offset, param.value!.length);
+          payload.setAll(offset, param.value!);
+          offset += param.value!.length;
+        }
       }
     }
 
@@ -500,8 +566,9 @@ class SubscribeMessage extends MoQControlMessage {
   }
 
   /// Deserialize a SUBSCRIBE message
-  static SubscribeMessage deserialize(Uint8List data) {
+  static SubscribeMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
 
     // Request ID
     final (requestId, requestIdLen) = MoQWireFormat.decodeVarint64(data, offset);
@@ -519,6 +586,74 @@ class SubscribeMessage extends MoQControlMessage {
     final trackName = data.sublist(offset, offset + nameLen);
     offset += nameLen;
 
+    if (MoQVersion.isDraft16OrLater(version)) {
+      // Draft-16: all inline fields are in params
+      final (numParams, numParamsLen) = MoQWireFormat.decodeVarint(data, offset);
+      offset += numParamsLen;
+
+      final (allParams, paramsRead) =
+          MoQWireFormat.decodeKeyValuePairs(data, offset, numParams, useDelta: useDelta);
+      offset += paramsRead;
+
+      // Extract inline fields from params, using defaults if not present
+      int subscriberPriority = 0;
+      var groupOrder = GroupOrder.none;
+      int forward = 0;
+      var filterType = FilterType.largestObject;
+      Location? startLocation;
+      Int64? endGroup;
+      final remainingParams = <KeyValuePair>[];
+
+      for (final param in allParams) {
+        switch (param.type) {
+          case SubscribeParameterType.subscriberPriority:
+            subscriberPriority = param.intValue ?? 0;
+          case SubscribeParameterType.groupOrder:
+            groupOrder = GroupOrder.fromValue(param.intValue ?? 0) ?? GroupOrder.none;
+          case SubscribeParameterType.forward:
+            forward = param.intValue ?? 0;
+          case SubscribeParameterType.subscriptionFilter:
+            // Decode filter buffer: FilterType(i) [StartLocation] [EndGroup(i)]
+            if (param.value != null && param.value!.isNotEmpty) {
+              int fOff = 0;
+              final (ftVal, ftLen) = MoQWireFormat.decodeVarint(param.value!, fOff);
+              fOff += ftLen;
+              filterType = FilterType.fromValue(ftVal) ?? FilterType.largestObject;
+
+              if (filterType == FilterType.absoluteStart ||
+                  filterType == FilterType.absoluteRange) {
+                if (fOff < param.value!.length) {
+                  final (loc, locLen) = MoQWireFormat.decodeLocation(param.value!, fOff);
+                  fOff += locLen;
+                  startLocation = loc;
+                }
+              }
+              if (filterType == FilterType.absoluteRange && fOff < param.value!.length) {
+                final (eg, egLen) = MoQWireFormat.decodeVarint64(param.value!, fOff);
+                fOff += egLen;
+                endGroup = eg;
+              }
+            }
+          default:
+            remainingParams.add(param);
+        }
+      }
+
+      return SubscribeMessage(
+        requestId: requestId,
+        trackNamespace: namespace,
+        trackName: trackName,
+        subscriberPriority: subscriberPriority,
+        groupOrder: groupOrder,
+        forward: forward,
+        filterType: filterType,
+        startLocation: startLocation,
+        endGroup: endGroup,
+        parameters: remainingParams,
+      );
+    }
+
+    // Draft-14: inline fields
     // Subscriber Priority
     final subscriberPriority = data[offset++];
 
@@ -610,6 +745,8 @@ class SubscribeOkMessage extends MoQControlMessage {
   final int contentExists;
   final Location? largestLocation;
   final List<KeyValuePair> parameters;
+  /// Draft-16: track extensions appended after params
+  final List<KeyValuePair> trackExtensions;
 
   SubscribeOkMessage({
     required this.requestId,
@@ -619,30 +756,69 @@ class SubscribeOkMessage extends MoQControlMessage {
     required this.contentExists,
     this.largestLocation,
     this.parameters = const [],
+    this.trackExtensions = const [],
   });
 
   @override
   MoQMessageType get type => MoQMessageType.subscribeOk;
 
   @override
-  int get payloadLength {
+  int get payloadLength => _payloadLength(MoQVersion.draft14);
+
+  int _payloadLength(int version) {
     int len = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
+
+    // RequestID + TrackAlias are always present
     len += MoQWireFormat._varintSize64(requestId);
     len += MoQWireFormat._varintSize64(trackAlias);
-    len += MoQWireFormat._varintSize64(expires);
-    len += 1; // Group Order
-    len += 1; // Content Exists
-    if (contentExists == 1 && largestLocation != null) {
-      len += _locationSize();
-    }
-    len += MoQWireFormat._varintSize(parameters.length);
-    for (final param in parameters) {
-      len += MoQWireFormat._varintSize(param.type);
-      if (param.value != null) {
-        len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+
+    if (MoQVersion.isDraft16OrLater(version)) {
+      // Draft-16: Expires/GroupOrder/ContentExists/LargestLocation as params
+      final allParams = _buildDraft16Params();
+      final kvpBytes = MoQWireFormat.encodeKeyValuePairs(allParams, useDelta: useDelta);
+      len += kvpBytes.length;
+      // Track extensions
+      final extBytes = MoQWireFormat.encodeKeyValuePairs(trackExtensions, useDelta: useDelta);
+      len += extBytes.length;
+    } else {
+      // Draft-14: inline fields
+      len += MoQWireFormat._varintSize64(expires);
+      len += 1; // Group Order
+      len += 1; // Content Exists
+      if (contentExists == 1 && largestLocation != null) {
+        len += _locationSize();
+      }
+      len += MoQWireFormat._varintSize(parameters.length);
+      for (final param in parameters) {
+        len += MoQWireFormat._varintSize(param.type);
+        if (param.value != null) {
+          len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+        }
       }
     }
     return len;
+  }
+
+  /// Build the combined parameter list for draft-16 serialization.
+  /// Inline fields (expires, groupOrder, contentExists, largestLocation) become params.
+  List<KeyValuePair> _buildDraft16Params() {
+    final allParams = <KeyValuePair>[
+      // expires (TrackPropertyType.expires = 0x8, even) -> varint
+      KeyValuePair.varint(TrackPropertyType.expires, expires.toInt()),
+      // groupOrder (SubscribeParameterType.groupOrder = 0x22, even) -> varint
+      KeyValuePair.varint(SubscribeParameterType.groupOrder, groupOrder.value),
+    ];
+    // ContentExists + LargestLocation encoded via largestObject param
+    // Only include if content exists and we have a location
+    if (contentExists == 1 && largestLocation != null) {
+      // largestObject (TrackPropertyType.largestObject = 0x9, odd) -> buffer: Location
+      final locBytes = MoQWireFormat.encodeLocation(largestLocation!);
+      allParams.add(KeyValuePair.buffer(TrackPropertyType.largestObject, locBytes));
+    }
+    // Append any user-supplied parameters
+    allParams.addAll(parameters);
+    return allParams;
   }
 
   int _locationSize() {
@@ -652,28 +828,43 @@ class SubscribeOkMessage extends MoQControlMessage {
   }
 
   @override
-  Uint8List serialize() {
-    final payload = Uint8List(payloadLength);
+  Uint8List serialize({int version = MoQVersion.draft14}) {
+    final payload = Uint8List(_payloadLength(version));
     int offset = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
 
     offset += _writeVarint64(payload, offset, requestId);
     offset += _writeVarint64(payload, offset, trackAlias);
-    offset += _writeVarint64(payload, offset, expires);
-    payload[offset++] = groupOrder.value;
-    payload[offset++] = contentExists;
 
-    if (contentExists == 1 && largestLocation != null) {
-      offset += _writeLocation(payload, offset, largestLocation!);
-    }
+    if (MoQVersion.isDraft16OrLater(version)) {
+      // Draft-16: delta-encoded params then track extensions
+      final allParams = _buildDraft16Params();
+      final kvpBytes = MoQWireFormat.encodeKeyValuePairs(allParams, useDelta: useDelta);
+      payload.setAll(offset, kvpBytes);
+      offset += kvpBytes.length;
 
-    offset += _writeVarint(payload, offset, parameters.length);
+      final extBytes = MoQWireFormat.encodeKeyValuePairs(trackExtensions, useDelta: useDelta);
+      payload.setAll(offset, extBytes);
+      offset += extBytes.length;
+    } else {
+      // Draft-14: inline fields
+      offset += _writeVarint64(payload, offset, expires);
+      payload[offset++] = groupOrder.value;
+      payload[offset++] = contentExists;
 
-    for (final param in parameters) {
-      offset += _writeVarint(payload, offset, param.type);
-      if (param.value != null) {
-        offset += _writeVarint(payload, offset, param.value!.length);
-        payload.setAll(offset, param.value!);
-        offset += param.value!.length;
+      if (contentExists == 1 && largestLocation != null) {
+        offset += _writeLocation(payload, offset, largestLocation!);
+      }
+
+      offset += _writeVarint(payload, offset, parameters.length);
+
+      for (final param in parameters) {
+        offset += _writeVarint(payload, offset, param.type);
+        if (param.value != null) {
+          offset += _writeVarint(payload, offset, param.value!.length);
+          payload.setAll(offset, param.value!);
+          offset += param.value!.length;
+        }
       }
     }
 
@@ -715,8 +906,9 @@ class SubscribeOkMessage extends MoQControlMessage {
   }
 
   /// Deserialize a SUBSCRIBE_OK message
-  static SubscribeOkMessage deserialize(Uint8List data) {
+  static SubscribeOkMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
 
     final (requestId, len1) = MoQWireFormat.decodeVarint64(data, offset);
     offset += len1;
@@ -724,6 +916,65 @@ class SubscribeOkMessage extends MoQControlMessage {
     final (trackAlias, len2) = MoQWireFormat.decodeVarint64(data, offset);
     offset += len2;
 
+    if (MoQVersion.isDraft16OrLater(version)) {
+      // Draft-16: params then track extensions
+      final (numParams, numParamsLen) = MoQWireFormat.decodeVarint(data, offset);
+      offset += numParamsLen;
+
+      final (allParams, paramsRead) =
+          MoQWireFormat.decodeKeyValuePairs(data, offset, numParams, useDelta: useDelta);
+      offset += paramsRead;
+
+      // Extract inline fields from params
+      var expires = Int64(0);
+      var groupOrder = GroupOrder.none;
+      int contentExists = 0;
+      Location? largestLocation;
+      final remainingParams = <KeyValuePair>[];
+
+      for (final param in allParams) {
+        switch (param.type) {
+          case TrackPropertyType.expires:
+            expires = Int64(param.intValue ?? 0);
+          case SubscribeParameterType.groupOrder:
+            groupOrder = GroupOrder.fromValue(param.intValue ?? 0) ?? GroupOrder.none;
+          case TrackPropertyType.largestObject:
+            // Buffer containing Location
+            if (param.value != null && param.value!.isNotEmpty) {
+              final (loc, _) = MoQWireFormat.decodeLocation(param.value!, 0);
+              largestLocation = loc;
+              contentExists = 1;
+            }
+          default:
+            remainingParams.add(param);
+        }
+      }
+
+      // Read track extensions
+      var trackExtensions = <KeyValuePair>[];
+      if (offset < data.length) {
+        final (numExt, numExtLen) = MoQWireFormat.decodeVarint(data, offset);
+        offset += numExtLen;
+
+        final (ext, extRead) =
+            MoQWireFormat.decodeKeyValuePairs(data, offset, numExt, useDelta: useDelta);
+        offset += extRead;
+        trackExtensions = ext;
+      }
+
+      return SubscribeOkMessage(
+        requestId: requestId,
+        trackAlias: trackAlias,
+        expires: expires,
+        groupOrder: groupOrder,
+        contentExists: contentExists,
+        largestLocation: largestLocation,
+        parameters: remainingParams,
+        trackExtensions: trackExtensions,
+      );
+    }
+
+    // Draft-14: inline fields
     final (expires, len3) = MoQWireFormat.decodeVarint64(data, offset);
     offset += len3;
 
@@ -804,7 +1055,7 @@ class SubscribeErrorMessage extends MoQControlMessage {
   }
 
   @override
-  Uint8List serialize() {
+  Uint8List serialize({int version = MoQVersion.draft14}) {
     final reasonBytes = const Utf8Encoder().convert(errorReason.reason);
     final payload = Uint8List(payloadLength);
     int offset = 0;
@@ -846,7 +1097,7 @@ class SubscribeErrorMessage extends MoQControlMessage {
   }
 
   /// Deserialize a SUBSCRIBE_ERROR message
-  static SubscribeErrorMessage deserialize(Uint8List data) {
+  static SubscribeErrorMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
 
     final (requestId, len1) = MoQWireFormat.decodeVarint64(data, offset);
@@ -907,22 +1158,63 @@ class SubscribeUpdateMessage extends MoQControlMessage {
   MoQMessageType get type => MoQMessageType.subscribeUpdate;
 
   @override
-  int get payloadLength {
+  int get payloadLength => _payloadLength(MoQVersion.draft14);
+
+  int _payloadLength(int version) {
     int len = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
+
+    // RequestID + ExistingRequestID (subscriptionRequestId) always present
     len += MoQWireFormat._varintSize64(requestId);
     len += MoQWireFormat._varintSize64(subscriptionRequestId);
-    len += _locationSize();
-    len += MoQWireFormat._varintSize64(endGroup);
-    len += 1; // Subscriber Priority
-    len += 1; // Forward
-    len += MoQWireFormat._varintSize(parameters.length);
-    for (final param in parameters) {
-      len += MoQWireFormat._varintSize(param.type);
-      if (param.value != null) {
-        len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+
+    if (MoQVersion.isDraft16OrLater(version)) {
+      // Draft-16: all inline fields moved to params
+      final allParams = _buildDraft16Params();
+      final kvpBytes = MoQWireFormat.encodeKeyValuePairs(allParams, useDelta: useDelta);
+      len += kvpBytes.length;
+    } else {
+      // Draft-14: inline fields
+      len += _locationSize();
+      len += MoQWireFormat._varintSize64(endGroup);
+      len += 1; // Subscriber Priority
+      len += 1; // Forward
+      len += MoQWireFormat._varintSize(parameters.length);
+      for (final param in parameters) {
+        len += MoQWireFormat._varintSize(param.type);
+        if (param.value != null) {
+          len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
+        }
       }
     }
     return len;
+  }
+
+  /// Build the combined parameter list for draft-16 serialization.
+  /// Inline fields (startLocation, endGroup, priority, forward) become params.
+  List<KeyValuePair> _buildDraft16Params() {
+    final allParams = <KeyValuePair>[
+      // forward (0x10, even) -> varint
+      KeyValuePair.varint(SubscribeParameterType.forward, forward),
+      // subscriberPriority (0x20, even) -> varint
+      KeyValuePair.varint(SubscribeParameterType.subscriberPriority, subscriberPriority),
+      // subscriptionFilter (0x21, odd) -> buffer: StartLocation + EndGroup
+      KeyValuePair.buffer(SubscribeParameterType.subscriptionFilter, _encodeFilterParam()),
+    ];
+    // Append any user-supplied parameters
+    allParams.addAll(parameters);
+    return allParams;
+  }
+
+  /// Encode start location and end group as a buffer for draft-16 param 0x21.
+  /// Contents: StartLocation (Location) + EndGroup (i)
+  Uint8List _encodeFilterParam() {
+    final locBytes = MoQWireFormat.encodeLocation(startLocation);
+    final egBytes = MoQWireFormat.encodeVarint64(endGroup);
+    final buf = Uint8List(locBytes.length + egBytes.length);
+    buf.setAll(0, locBytes);
+    buf.setAll(locBytes.length, egBytes);
+    return buf;
   }
 
   int _locationSize() {
@@ -932,24 +1224,35 @@ class SubscribeUpdateMessage extends MoQControlMessage {
   }
 
   @override
-  Uint8List serialize() {
-    final payload = Uint8List(payloadLength);
+  Uint8List serialize({int version = MoQVersion.draft14}) {
+    final payload = Uint8List(_payloadLength(version));
     int offset = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
 
     offset += _writeVarint64(payload, offset, requestId);
     offset += _writeVarint64(payload, offset, subscriptionRequestId);
-    offset += _writeLocation(payload, offset, startLocation);
-    offset += _writeVarint64(payload, offset, endGroup);
-    payload[offset++] = subscriberPriority;
-    payload[offset++] = forward;
-    offset += _writeVarint(payload, offset, parameters.length);
 
-    for (final param in parameters) {
-      offset += _writeVarint(payload, offset, param.type);
-      if (param.value != null) {
-        offset += _writeVarint(payload, offset, param.value!.length);
-        payload.setAll(offset, param.value!);
-        offset += param.value!.length;
+    if (MoQVersion.isDraft16OrLater(version)) {
+      // Draft-16: delta-encoded KVP params
+      final allParams = _buildDraft16Params();
+      final kvpBytes = MoQWireFormat.encodeKeyValuePairs(allParams, useDelta: useDelta);
+      payload.setAll(offset, kvpBytes);
+      offset += kvpBytes.length;
+    } else {
+      // Draft-14: inline fields
+      offset += _writeLocation(payload, offset, startLocation);
+      offset += _writeVarint64(payload, offset, endGroup);
+      payload[offset++] = subscriberPriority;
+      payload[offset++] = forward;
+      offset += _writeVarint(payload, offset, parameters.length);
+
+      for (final param in parameters) {
+        offset += _writeVarint(payload, offset, param.type);
+        if (param.value != null) {
+          offset += _writeVarint(payload, offset, param.value!.length);
+          payload.setAll(offset, param.value!);
+          offset += param.value!.length;
+        }
       }
     }
 
@@ -991,8 +1294,9 @@ class SubscribeUpdateMessage extends MoQControlMessage {
   }
 
   /// Deserialize a SUBSCRIBE_UPDATE message
-  static SubscribeUpdateMessage deserialize(Uint8List data) {
+  static SubscribeUpdateMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
+    final useDelta = MoQVersion.usesDeltaKvp(version);
 
     final (requestId, len1) = MoQWireFormat.decodeVarint64(data, offset);
     offset += len1;
@@ -1000,6 +1304,57 @@ class SubscribeUpdateMessage extends MoQControlMessage {
     final (subRequestId, len2) = MoQWireFormat.decodeVarint64(data, offset);
     offset += len2;
 
+    if (MoQVersion.isDraft16OrLater(version)) {
+      // Draft-16: all inline fields are in params
+      final (numParams, numParamsLen) = MoQWireFormat.decodeVarint(data, offset);
+      offset += numParamsLen;
+
+      final (allParams, paramsRead) =
+          MoQWireFormat.decodeKeyValuePairs(data, offset, numParams, useDelta: useDelta);
+      offset += paramsRead;
+
+      // Extract inline fields from params, using defaults if not present
+      var startLoc = Location.zero();
+      var endGroup = Int64(0);
+      int subscriberPriority = 0;
+      int forward = 0;
+      final remainingParams = <KeyValuePair>[];
+
+      for (final param in allParams) {
+        switch (param.type) {
+          case SubscribeParameterType.subscriberPriority:
+            subscriberPriority = param.intValue ?? 0;
+          case SubscribeParameterType.forward:
+            forward = param.intValue ?? 0;
+          case SubscribeParameterType.subscriptionFilter:
+            // Decode filter buffer: StartLocation (Location) + EndGroup (i)
+            if (param.value != null && param.value!.isNotEmpty) {
+              int fOff = 0;
+              final (loc, locLen) = MoQWireFormat.decodeLocation(param.value!, fOff);
+              fOff += locLen;
+              startLoc = loc;
+              if (fOff < param.value!.length) {
+                final (eg, _) = MoQWireFormat.decodeVarint64(param.value!, fOff);
+                endGroup = eg;
+              }
+            }
+          default:
+            remainingParams.add(param);
+        }
+      }
+
+      return SubscribeUpdateMessage(
+        requestId: requestId,
+        subscriptionRequestId: subRequestId,
+        startLocation: startLoc,
+        endGroup: endGroup,
+        subscriberPriority: subscriberPriority,
+        forward: forward,
+        parameters: remainingParams,
+      );
+    }
+
+    // Draft-14: inline fields
     final (startLoc, len3) = MoQWireFormat.decodeLocation(data, offset);
     offset += len3;
 
@@ -1063,7 +1418,7 @@ class UnsubscribeMessage extends MoQControlMessage {
   int get payloadLength => MoQWireFormat._varintSize64(requestId);
 
   @override
-  Uint8List serialize() {
+  Uint8List serialize({int version = MoQVersion.draft14}) {
     final payload = Uint8List(payloadLength);
     int offset = 0;
     offset += _writeVarint64(payload, offset, requestId);
@@ -1094,7 +1449,7 @@ class UnsubscribeMessage extends MoQControlMessage {
   }
 
   /// Deserialize an UNSUBSCRIBE message
-  static UnsubscribeMessage deserialize(Uint8List data) {
+  static UnsubscribeMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     final (requestId, _) = MoQWireFormat.decodeVarint64(data, 0);
     return UnsubscribeMessage(requestId: requestId);
   }
@@ -1135,7 +1490,7 @@ class GoawayMessage extends MoQControlMessage {
   }
 
   @override
-  Uint8List serialize() {
+  Uint8List serialize({int version = MoQVersion.draft14}) {
     final payload = Uint8List(payloadLength);
     int offset = 0;
 
@@ -1181,7 +1536,7 @@ class GoawayMessage extends MoQControlMessage {
   }
 
   /// Deserialize a GOAWAY message
-  static GoawayMessage deserialize(Uint8List data) {
+  static GoawayMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
     Int64? lastRequestId;
     String? newUri;
@@ -1259,7 +1614,7 @@ class PublishDoneMessage extends MoQControlMessage {
   }
 
   @override
-  Uint8List serialize() {
+  Uint8List serialize({int version = MoQVersion.draft14}) {
     final payload = Uint8List(payloadLength);
     int offset = 0;
 
@@ -1308,7 +1663,7 @@ class PublishDoneMessage extends MoQControlMessage {
   }
 
   /// Deserialize a PUBLISH_DONE message
-  static PublishDoneMessage deserialize(Uint8List data) {
+  static PublishDoneMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
 
     final (requestId, len1) = MoQWireFormat.decodeVarint64(data, offset);
