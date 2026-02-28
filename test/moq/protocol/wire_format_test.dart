@@ -5,89 +5,128 @@ import 'package:moq_flutter/moq/protocol/moq_messages.dart';
 
 void main() {
   group('MoQWireFormat - Varint Encoding/Decoding', () {
-    test('encodeVarint - single byte values', () {
-      expect(MoQWireFormat.encodeVarint(0), equals([0]));
-      expect(MoQWireFormat.encodeVarint(1), equals([1]));
-      expect(MoQWireFormat.encodeVarint(127), equals([0x7F]));
+    // QUIC prefix varint encoding (RFC 9000 Section 16):
+    // 0x00-0x3F: 1 byte  (6 bits of data, prefix 00)
+    // 0x40-0x7F: 2 bytes (14 bits of data, prefix 01)
+    // 0x80-0xBF: 4 bytes (30 bits of data, prefix 10)
+    // 0xC0-0xFF: 8 bytes (54 bits of data, prefix 11)
+
+    test('encodeVarint - single byte values (0-63)', () {
+      expect(MoQWireFormat.encodeVarint(0), equals([0x00]));
+      expect(MoQWireFormat.encodeVarint(1), equals([0x01]));
+      expect(MoQWireFormat.encodeVarint(63), equals([0x3F]));
     });
 
-    test('encodeVarint - multi byte values', () {
-      expect(MoQWireFormat.encodeVarint(128), equals([0x80, 0x01]));
-      expect(MoQWireFormat.encodeVarint(300), equals([0xAC, 0x02]));
-      expect(MoQWireFormat.encodeVarint(16384), equals([0x80, 0x80, 0x01]));
+    test('encodeVarint - two byte values (64-16383)', () {
+      // 64 = 0x0040 -> prefix 01: 0x40, 0x40
+      expect(MoQWireFormat.encodeVarint(64), equals([0x40, 0x40]));
+      // 127 = 0x007F -> prefix 01: 0x40, 0x7F
+      expect(MoQWireFormat.encodeVarint(127), equals([0x40, 0x7F]));
+      // 128 = 0x0080 -> prefix 01: 0x40, 0x80
+      expect(MoQWireFormat.encodeVarint(128), equals([0x40, 0x80]));
+      // 300 = 0x012C -> prefix 01: 0x41, 0x2C
+      expect(MoQWireFormat.encodeVarint(300), equals([0x41, 0x2C]));
+      // 16383 = 0x3FFF -> prefix 01: 0x7F, 0xFF
+      expect(MoQWireFormat.encodeVarint(16383), equals([0x7F, 0xFF]));
     });
 
-    test('encodeVarint - large values', () {
+    test('encodeVarint - four byte values (16384-1073741823)', () {
+      // 16384 = 0x00004000 -> prefix 10: 0x80, 0x00, 0x40, 0x00
+      expect(MoQWireFormat.encodeVarint(16384), equals([0x80, 0x00, 0x40, 0x00]));
+      // 0x3FFFFFFF -> prefix 10: 0xBF, 0xFF, 0xFF, 0xFF
+      expect(MoQWireFormat.encodeVarint(0x3FFFFFFF), equals([0xBF, 0xFF, 0xFF, 0xFF]));
+    });
+
+    test('encodeVarint - eight byte values', () {
+      // 0x40000000 -> prefix 11: 0xC0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00
+      expect(
+        MoQWireFormat.encodeVarint(0x40000000),
+        equals([0xC0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00]),
+      );
+      // 0xFFFFFFFF -> prefix 11: 0xC0, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF
       expect(
         MoQWireFormat.encodeVarint(0xFFFFFFFF),
-        equals([0xFF, 0xFF, 0xFF, 0xFF, 0x0F]),
-      );
-      expect(
-        MoQWireFormat.encodeVarint(0x7FFFFFFF),
-        equals([0xFF, 0xFF, 0xFF, 0xFF, 0x07]),
+        equals([0xC0, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]),
       );
     });
 
     test('decodeVarint - single byte values', () {
-      final (value, bytesRead) = MoQWireFormat.decodeVarint(Uint8List.fromList([0]), 0);
+      final (value, bytesRead) = MoQWireFormat.decodeVarint(Uint8List.fromList([0x00]), 0);
       expect(value, equals(0));
       expect(bytesRead, equals(1));
 
-      final (value2, bytesRead2) = MoQWireFormat.decodeVarint(Uint8List.fromList([1]), 0);
+      final (value2, bytesRead2) = MoQWireFormat.decodeVarint(Uint8List.fromList([0x01]), 0);
       expect(value2, equals(1));
       expect(bytesRead2, equals(1));
 
-      final (value3, bytesRead3) = MoQWireFormat.decodeVarint(Uint8List.fromList([0x7F]), 0);
-      expect(value3, equals(127));
+      final (value3, bytesRead3) = MoQWireFormat.decodeVarint(Uint8List.fromList([0x3F]), 0);
+      expect(value3, equals(63));
       expect(bytesRead3, equals(1));
     });
 
-    test('decodeVarint - multi byte values', () {
+    test('decodeVarint - two byte values', () {
       final (value, bytesRead) = MoQWireFormat.decodeVarint(
-        Uint8List.fromList([0x80, 0x01]),
+        Uint8List.fromList([0x40, 0x80]),
         0,
       );
       expect(value, equals(128));
       expect(bytesRead, equals(2));
 
       final (value2, bytesRead2) = MoQWireFormat.decodeVarint(
-        Uint8List.fromList([0xAC, 0x02]),
+        Uint8List.fromList([0x41, 0x2C]),
         0,
       );
       expect(value2, equals(300));
       expect(bytesRead2, equals(2));
     });
 
-    test('decodeVarint - large values', () {
+    test('decodeVarint - four byte values', () {
       final (value, bytesRead) = MoQWireFormat.decodeVarint(
-        Uint8List.fromList([0xFF, 0xFF, 0xFF, 0xFF, 0x0F]),
+        Uint8List.fromList([0x80, 0x00, 0x40, 0x00]),
+        0,
+      );
+      expect(value, equals(16384));
+      expect(bytesRead, equals(4));
+    });
+
+    test('decodeVarint - eight byte values', () {
+      final (value, bytesRead) = MoQWireFormat.decodeVarint(
+        Uint8List.fromList([0xC0, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]),
         0,
       );
       expect(value, equals(0xFFFFFFFF));
-      expect(bytesRead, equals(5));
+      expect(bytesRead, equals(8));
     });
 
     test('decodeVarint - with offset', () {
-      final data = Uint8List.fromList([0xFF, 0x80, 0x01, 0xAA]);
+      // Prefix byte at offset 1: 0x40 means 2-byte varint
+      final data = Uint8List.fromList([0xFF, 0x40, 0x80, 0xAA]);
       final (value, bytesRead) = MoQWireFormat.decodeVarint(data, 1);
       expect(value, equals(128));
       expect(bytesRead, equals(2));
     });
 
-    test('decodeVarint - throws on unexpected end', () {
+    test('decodeVarint - throws on incomplete 2-byte', () {
+      // 0x40 prefix means 2 bytes needed, but only 1 available
       expect(
-        () => MoQWireFormat.decodeVarint(Uint8List.fromList([0x80]), 0),
+        () => MoQWireFormat.decodeVarint(Uint8List.fromList([0x40]), 0),
         throwsA(isA<FormatException>()),
       );
     });
 
-    test('decodeVarint - throws on too long', () {
+    test('decodeVarint - throws on incomplete 4-byte', () {
+      // 0x80 prefix means 4 bytes needed, but only 2 available
+      expect(
+        () => MoQWireFormat.decodeVarint(Uint8List.fromList([0x80, 0x00]), 0),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('decodeVarint - throws on incomplete 8-byte', () {
+      // 0xC0 prefix means 8 bytes needed, but only 4 available
       expect(
         () => MoQWireFormat.decodeVarint(
-          Uint8List.fromList([
-            0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
-            0x01,
-          ]),
+          Uint8List.fromList([0xC0, 0x00, 0x00, 0x00]),
           0,
         ),
         throwsA(isA<FormatException>()),
@@ -96,8 +135,8 @@ void main() {
 
     test('varint round-trip', () {
       final testValues = [
-        0, 1, 127, 128, 255, 256, 16383, 16384, 65535, 65536, 2097151,
-        2097152, 0x7FFFFFFF,
+        0, 1, 63, 64, 127, 128, 255, 256, 16383, 16384, 65535, 65536,
+        0x3FFFFFFF,
       ];
 
       for (final value in testValues) {
@@ -107,63 +146,61 @@ void main() {
       }
     });
 
-    test('encodeVarint64 - single byte values', () {
-      expect(MoQWireFormat.encodeVarint64(Int64(0)), equals([0]));
-      expect(MoQWireFormat.encodeVarint64(Int64(1)), equals([1]));
-      expect(MoQWireFormat.encodeVarint64(Int64(127)), equals([0x7F]));
+    test('encodeVarint64 - single byte values (0-63)', () {
+      expect(MoQWireFormat.encodeVarint64(Int64(0)), equals([0x00]));
+      expect(MoQWireFormat.encodeVarint64(Int64(1)), equals([0x01]));
+      expect(MoQWireFormat.encodeVarint64(Int64(63)), equals([0x3F]));
     });
 
-    test('encodeVarint64 - multi byte values', () {
+    test('encodeVarint64 - two byte values', () {
+      // 128 = 0x0080 -> prefix 01: 0x40, 0x80
       expect(
         MoQWireFormat.encodeVarint64(Int64(128)),
-        equals([0x80, 0x01]),
+        equals([0x40, 0x80]),
       );
+      // 300 = 0x012C -> prefix 01: 0x41, 0x2C
       expect(
         MoQWireFormat.encodeVarint64(Int64(300)),
-        equals([0xAC, 0x02]),
+        equals([0x41, 0x2C]),
       );
     });
 
-    test('encodeVarint64 - large 64-bit values', () {
-      // Test encoding a value that requires 4 bytes (21-27 bits)
-      // Value: 2097151 = 0x1FFFFF
-      // Encoded as: 0xFF, 0xFF, 0x7F
+    test('encodeVarint64 - four byte values', () {
+      // 16384 = 0x00004000 -> prefix 10: 0x80, 0x00, 0x40, 0x00
       expect(
-        MoQWireFormat.encodeVarint64(Int64(2097151)),
-        equals([0xFF, 0xFF, 0x7F]),
+        MoQWireFormat.encodeVarint64(Int64(16384)),
+        equals([0x80, 0x00, 0x40, 0x00]),
       );
     });
 
     test('decodeVarint64 - single byte values', () {
       final (value, bytesRead) = MoQWireFormat.decodeVarint64(
-        Uint8List.fromList([0]),
+        Uint8List.fromList([0x00]),
         0,
       );
       expect(value, equals(Int64(0)));
       expect(bytesRead, equals(1));
 
       final (value2, bytesRead2) = MoQWireFormat.decodeVarint64(
-        Uint8List.fromList([127]),
+        Uint8List.fromList([0x3F]),
         0,
       );
-      expect(value2, equals(Int64(127)));
+      expect(value2, equals(Int64(63)));
       expect(bytesRead2, equals(1));
     });
 
-    test('decodeVarint64 - large values', () {
-      // Test decoding a 3-byte varint
-      // Value: 2097151 = 0x1FFFFF
+    test('decodeVarint64 - two byte values', () {
       final (value, bytesRead) = MoQWireFormat.decodeVarint64(
-        Uint8List.fromList([0xFF, 0xFF, 0x7F]),
+        Uint8List.fromList([0x40, 0x80]),
         0,
       );
-      expect(value, equals(Int64(2097151)));
-      expect(bytesRead, equals(3));
+      expect(value, equals(Int64(128)));
+      expect(bytesRead, equals(2));
     });
 
-    test('decodeVarint64 - throws on unexpected end', () {
+    test('decodeVarint64 - throws on incomplete', () {
       expect(
-        () => MoQWireFormat.decodeVarint64(Uint8List.fromList([0x80]), 0),
+        () => MoQWireFormat.decodeVarint64(Uint8List.fromList([0x40]), 0),
         throwsA(isA<FormatException>()),
       );
     });
@@ -172,14 +209,14 @@ void main() {
       final testValues = [
         Int64(0),
         Int64(1),
-        Int64(127),
+        Int64(63),
+        Int64(64),
         Int64(128),
         Int64(255),
         Int64(256),
         Int64(16383),
         Int64(16384),
-        Int64(2097151),
-        Int64(2097152),
+        Int64(0x3FFFFFFF),
       ];
 
       for (final value in testValues) {
@@ -200,7 +237,7 @@ void main() {
     test('encodeTuple - single element', () {
       final tuple = [Uint8List.fromList([1, 2, 3])];
       final encoded = MoQWireFormat.encodeTuple(tuple);
-      // Count (1) + Length (3) + Data (1,2,3)
+      // Count (1) + Length (3) + Data (1,2,3) - all values <= 63 so 1-byte varints
       expect(encoded, equals([1, 3, 1, 2, 3]));
     });
 
@@ -316,27 +353,11 @@ void main() {
       expect(encoded, equals([5, 10]));
     });
 
-    test('encodeLocation - multi byte values', () {
+    test('encodeLocation - two byte values', () {
+      // 300 = prefix 01: 0x41, 0x2C; 128 = prefix 01: 0x40, 0x80
       final location = Location(group: Int64(300), object: Int64(128));
       final encoded = MoQWireFormat.encodeLocation(location);
-      // 300 = 0xAC, 0x02
-      // 128 = 0x80, 0x01
-      expect(encoded, equals([0xAC, 0x02, 0x80, 0x01]));
-    });
-
-    test('encodeLocation - large values', () {
-      final location = Location(
-        group: Int64(0x7FFFFFFFFFFFFFFF),
-        object: Int64(0x7FFFFFFFFFFFFFFF),
-      );
-      final encoded = MoQWireFormat.encodeLocation(location);
-      expect(
-        encoded,
-        equals([
-          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F,
-          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F,
-        ]),
-      );
+      expect(encoded, equals([0x41, 0x2C, 0x40, 0x80]));
     });
 
     test('decodeLocation - zero location', () {
@@ -359,9 +380,9 @@ void main() {
       expect(bytesRead, equals(2));
     });
 
-    test('decodeLocation - multi byte values', () {
+    test('decodeLocation - two byte values', () {
       final (location, bytesRead) = MoQWireFormat.decodeLocation(
-        Uint8List.fromList([0xAC, 0x02, 0x80, 0x01]),
+        Uint8List.fromList([0x41, 0x2C, 0x40, 0x80]),
         0,
       );
       expect(location.group, equals(Int64(300)));
@@ -369,19 +390,8 @@ void main() {
       expect(bytesRead, equals(4));
     });
 
-    test('decodeLocation - large values', () {
-      final data = Uint8List.fromList([
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F,
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F,
-      ]);
-      final (location, bytesRead) = MoQWireFormat.decodeLocation(data, 0);
-      expect(location.group, equals(Int64(0x7FFFFFFFFFFFFFFF)));
-      expect(location.object, equals(Int64(0x7FFFFFFFFFFFFFFF)));
-      expect(bytesRead, equals(18));
-    });
-
     test('decodeLocation - with offset', () {
-      final data = Uint8List.fromList([0xFF, 0xAC, 0x02, 0x80, 0x01, 0xAA]);
+      final data = Uint8List.fromList([0xFF, 0x41, 0x2C, 0x40, 0x80, 0xAA]);
       final (location, bytesRead) = MoQWireFormat.decodeLocation(data, 1);
       expect(location.group, equals(Int64(300)));
       expect(location.object, equals(Int64(128)));
@@ -416,7 +426,7 @@ void main() {
     });
 
     test('parse - CLIENT_SETUP message', () {
-      // Type (0x20) + Length (0, 3) + num_versions (1) + version (14) + num_params (0)
+      // Type (0x20) = 1-byte varint + Length (0, 3) + num_versions (1) + version (14) + num_params (0)
       final data = Uint8List.fromList([0x20, 0x00, 0x03, 1, 14, 0]);
       final (message, bytesRead) = MoQControlMessageParser.parse(data);
 
@@ -441,7 +451,6 @@ void main() {
 
     test('parse - SUBSCRIBE message', () {
       // Type (0x3) + Length + request_id + namespace + track_name + priority + group_order + forward + filter_type + params
-      // Payload = 1 + 1 + 1 + 4 + 1 + 3 + 1 + 1 + 1 + 1 + 1 = 16 bytes
       final data = Uint8List.fromList([
         0x03, // Type
         0x00, 0x10, // Length (16)
@@ -467,12 +476,10 @@ void main() {
     });
 
     test('parse - unknown message type', () {
-      // Type (0x7F = single byte varint) + Length (0, 0)
-      final data = Uint8List.fromList([0x7F, 0x00, 0x00]);
+      // Type 0x3F (max single-byte prefix varint = 63) + Length (0, 0)
+      final data = Uint8List.fromList([0x3F, 0x00, 0x00]);
       final (message, bytesRead) = MoQControlMessageParser.parse(data);
 
-      // The parser should handle the format correctly even for unknown types
-      // Type (varint) + Length (16-bit) = 3 bytes total
       expect(message, isNull);
       expect(bytesRead, equals(3));
     });

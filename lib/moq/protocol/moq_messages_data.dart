@@ -86,7 +86,7 @@ class ObjectDatagram {
       len += 1;
     }
     // Payload (conditional)
-    if (payload != null && status == ObjectStatus.normal) {
+    if (payload != null && isNormal) {
       len += MoQWireFormat._varintSize(payload!.length) + payload!.length;
     }
 
@@ -134,7 +134,7 @@ class ObjectDatagram {
     }
 
     // Payload
-    if (payload != null && status == ObjectStatus.normal) {
+    if (payload != null && isNormal) {
       offset += _writeVarint(buffer, offset, payload!.length);
       buffer.setAll(offset, payload!);
     }
@@ -485,7 +485,7 @@ class SubgroupObject {
     if (status != null && status != ObjectStatus.normal) {
       len += 1;
     }
-    if (payload != null && status == ObjectStatus.normal) {
+    if (payload != null && isNormal) {
       len += MoQWireFormat._varintSize(payload!.length) + payload!.length;
     }
 
@@ -517,7 +517,7 @@ class SubgroupObject {
       buffer[offset++] = status!.value;
     }
 
-    if (payload != null && status == ObjectStatus.normal) {
+    if (payload != null && isNormal) {
       offset += _writeVarint(buffer, offset, payload!.length);
       buffer.setAll(offset, payload!);
     }
