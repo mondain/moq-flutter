@@ -9,6 +9,7 @@
 
 mod stream_writer;
 pub mod webtransport;
+#[cfg(feature = "media-player")]
 pub mod media_player;
 
 use quinn::{Endpoint, ClientConfig, Connection, SendStream, VarInt, TokioRuntime, EndpointConfig, TransportConfig};

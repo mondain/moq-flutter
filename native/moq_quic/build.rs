@@ -63,14 +63,16 @@ fn main() {
     //    println!("cargo:rustc-link-lib=stdc++");
     //}
     let target = std::env::var("TARGET").unwrap();
-    if target.contains("apple") {
+    if target.contains("android") {
+        // Android NDK uses libc++ and the linker handles it automatically
+    } else if target.contains("apple") {
         // macOS uses libc++
         println!("cargo:rustc-link-lib=c++");
     } else if target.contains("linux") {
         // Linux uses libstdc++
         println!("cargo:rustc-link-lib=stdc++");
     } else if target.contains("windows") {
-        // Windows (MSVC) doesn't need a manual stdc++ link; 
+        // Windows (MSVC) doesn't need a manual stdc++ link;
         // it uses default libs like msvcrt
     }
     
