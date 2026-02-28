@@ -8,10 +8,12 @@ class MockMoQTransport implements MoQTransport {
   final _connectionStateController = StreamController<bool>.broadcast();
   final _incomingDataController = StreamController<Uint8List>.broadcast();
   final _incomingDataStreamsController = StreamController<DataStreamChunk>.broadcast();
+  final _incomingDatagramsController = StreamController<Uint8List>.broadcast();
 
   // Track sent data for assertions
   final List<Uint8List> sentControlMessages = [];
   final Map<int, List<Uint8List>> sentStreamData = {};
+  final List<Uint8List> sentDatagrams = [];
 
   // Stream ID counter
   int _nextStreamId = 1;
@@ -91,10 +93,20 @@ class MockMoQTransport implements MoQTransport {
   }
 
   @override
+  Future<void> sendDatagram(Uint8List data) async {
+    sentDatagrams.add(data);
+    _bytesSent += data.length;
+  }
+
+  @override
+  Stream<Uint8List> get incomingDatagrams => _incomingDatagramsController.stream;
+
+  @override
   void dispose() {
     _connectionStateController.close();
     _incomingDataController.close();
     _incomingDataStreamsController.close();
+    _incomingDatagramsController.close();
   }
 
   // Test helper methods
@@ -115,10 +127,17 @@ class MockMoQTransport implements MoQTransport {
     ));
   }
 
+  /// Simulate receiving a datagram from server
+  void simulateIncomingDatagram(Uint8List data) {
+    _bytesReceived += data.length;
+    _incomingDatagramsController.add(data);
+  }
+
   /// Clear sent messages (for test isolation)
   void clearSentMessages() {
     sentControlMessages.clear();
     sentStreamData.clear();
+    sentDatagrams.clear();
     _bytesSent = 0;
     _bytesReceived = 0;
   }

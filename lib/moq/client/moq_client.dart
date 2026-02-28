@@ -1262,25 +1262,33 @@ class MoQClient {
   void _processServerSetupParameters(List<KeyValuePair> parameters) {
     for (final param in parameters) {
       switch (param.type) {
-        case 0x0001: // max_subscribe_id
+        case 0x0001: // max_subscribe_id (odd type = buffer)
           if (param.value != null && param.value!.isNotEmpty) {
             final (maxSubId, _) = MoQWireFormat.decodeVarint(param.value!, 0);
             _maxSubscriptionId = maxSubId;
             _logger.d('Server max_subscription_id: $maxSubId');
           }
           break;
-        case 0x0002: // max_track_alias
-          if (param.value != null && param.value!.isNotEmpty) {
+        case SetupParameterType.maxRequestId: // 0x0002 (even type = varint)
+          if (param.intValue != null) {
+            _maxTrackAlias = param.intValue!;
+            _logger.d('Server max_request_id: ${param.intValue}');
+          } else if (param.value != null && param.value!.isNotEmpty) {
             final (maxAlias, _) = MoQWireFormat.decodeVarint(param.value!, 0);
             _maxTrackAlias = maxAlias;
-            _logger.d('Server max_track_alias: $maxAlias');
+            _logger.d('Server max_request_id: $maxAlias');
           }
           break;
-        case 0x0003: // supported_versions
+        case 0x0003: // supported_versions (odd type = buffer)
           if (param.value != null && param.value!.isNotEmpty) {
             final (versions, _) = MoQWireFormat.decodeTuple(param.value!, 0);
             final versionList = versions.map((v) => '0x${v.map((b) => b.toRadixString(16).padLeft(2, '0')).join()}').join(', ');
             _logger.d('Server supported versions: [$versionList]');
+          }
+          break;
+        case SetupParameterType.maxAuthTokenCacheSize: // 0x0004 (even type = varint)
+          if (param.intValue != null) {
+            _logger.d('Server max_auth_token_cache_size: ${param.intValue}');
           }
           break;
         default:

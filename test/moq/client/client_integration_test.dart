@@ -78,14 +78,14 @@ void main() {
         if (data.isNotEmpty && data[0] == 0x20) {
           Future.microtask(() {
             // Send SERVER_SETUP with parameters
-            final maxSubId = MoQWireFormat.encodeVarint(100);
-            final maxTrackAlias = MoQWireFormat.encodeVarint(50);
+            // 0x0001 is odd type (buffer), 0x0002 is even type (varint)
+            final maxSubIdBytes = MoQWireFormat.encodeVarint(100);
 
             final serverSetup = ServerSetupMessage(
               selectedVersion: 0xff00000e,
               parameters: [
-                KeyValuePair(type: 0x0001, value: maxSubId), // max_subscribe_id
-                KeyValuePair(type: 0x0002, value: maxTrackAlias), // max_track_alias
+                KeyValuePair(type: 0x0001, value: maxSubIdBytes), // max_subscribe_id (odd=buffer)
+                KeyValuePair.varint(SetupParameterType.maxRequestId, 50), // max_request_id (even=varint)
               ],
             );
             transport.simulateIncomingControlData(serverSetup.serialize());
