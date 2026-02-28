@@ -33,13 +33,14 @@ flutter analyze
 
 ## Architecture Overview
 
-This is a Media over QUIC (MoQ) Flutter client implementing [draft-ietf-moq-transport-14](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/14/).
+This is a Media over QUIC (MoQ) Flutter client implementing [draft-ietf-moq-transport-14](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/14/). A reference publisher app exists at `../moq-pub` for testing.
 
 ### Layer Structure
 
 1. **Transport Layer** (`lib/services/quic_transport.dart`, `lib/moq/transport/moq_transport.dart`)
    - `MoQTransport`: Abstract interface for QUIC transport
-   - `QuicTransport`: FFI bindings to Rust Quinn QUIC library (`native/moq_quic/`)
+   - `QuicTransport`: FFI bindings to Rust Quinn library via `moq_quic_*` functions (5ms polling)
+   - `WebTransportQuinnTransport`: Alternative transport via `moq_webtransport_*` functions (10ms polling); incomplete (no datagram support)
    - Falls back to stub mode if native library unavailable
 
 2. **Protocol Layer** (`lib/moq/protocol/`)
@@ -49,45 +50,72 @@ This is a Media over QUIC (MoQ) Flutter client implementing [draft-ietf-moq-tran
    - `moq_messages_control_extra.dart`: Additional control messages (FETCH, PUBLISH_NAMESPACE, etc.)
    - `moq_messages_data.dart`: Data messages (OBJECT_DATAGRAM, SUBGROUP_HEADER)
    - `moq_messages_publish.dart`: Publish-related messages
+   - `moq_data_parser.dart`: Stateful incremental parser for SUBGROUP_HEADER + object sequences; handles delta-plus-one object ID encoding and moq-mi extension headers (even type = varint value, odd type = length-prefixed buffer)
 
 3. **Client Layer** (`lib/moq/client/moq_client.dart`)
    - `MoQClient`: Main client handling connection, subscriptions, and namespace announcements
-   - Request ID management (even IDs for client, odd for server)
-   - Track alias mapping
+   - Request ID parity: client uses even IDs (0, 2, 4...), server uses odd IDs, incremented by 2
+   - Track alias mapping via `_trackAliases: Map<Int64, TrackInfo>`
+   - `ReplayStreamController` (`replay_stream.dart`): Buffers last N events (default 60) for late-joining subscribers; delivers buffered events synchronously before live subscription starts
 
-4. **Publisher Layer** (`lib/moq/publisher/`)
-   - `moq_publisher.dart`: Publishing infrastructure
-   - `cmaf_publisher.dart`: CMAF segment publishing
+4. **Publisher Layer** (`lib/moq/publisher/`) - Three publishers with distinct packaging:
+   - `MoQPublisher`: Base publisher, raw LOC format, manual group/subgroup management
+   - `CmafPublisher`: fMP4/CMAF packaging via `H264Fmp4Muxer`/`OpusFmp4Muxer`, groups on video keyframes, publishes init segment on dedicated track, handles incoming SUBSCRIBE from relay (per draft-law-moq-carp-00)
+   - `MoqMiPublisher`: moq-mi format (draft-cenzano-moq-media-interop-03), raw codec bitstreams with metadata in extension headers, one QUIC stream per video GOP but one stream per audio frame, track naming `{prefix}audio0`/`{prefix}video0`
 
-5. **Media Layer** (`lib/moq/media/`, `lib/media/`)
-   - Camera/audio capture and encoding
-   - fMP4 muxing for H.264 video and Opus audio
+5. **Packager Layer** (`lib/moq/packager/moq_mi_packager.dart`)
+   - Generates/parses moq-mi extension headers with codec-specific type codes (0x0A media type, 0x0D AVC extradata, 0x0F Opus metadata, etc.)
+   - Tracks sequence IDs and only sends AVC decoder config when it changes
+
+6. **Media Layer** (`lib/moq/media/`, `lib/media/`)
+   - Camera/audio capture with platform-specific implementations (Linux: FFmpeg+V4L2/PulseAudio, Android: camera plugin, iOS/macOS: AVFoundation)
+   - fMP4 muxing for H.264 (baseline, ultrafast) and Opus (48kHz, 128kbps)
    - Video player integration with media_kit
+   - `lib/moq/media/fmp4/`: CMAF/fMP4 segment packaging
 
-6. **State Management** (`lib/providers/moq_providers.dart`)
+7. **State Management** (`lib/providers/moq_providers.dart`)
    - Riverpod providers for MoQ client state
 
 ### Native Rust Library
 
 The `native/moq_quic/` directory contains a Rust library using Quinn for QUIC transport:
 - Compiled automatically during `flutter run` or `flutter build`
-- Platform-specific build handled by `tool/build_rust.dart`
-- Creates universal binary on macOS (arm64 + x86_64)
-- Android/iOS builds use platform-specific build phases
+- Platform-specific build handled by `tool/build_rust.dart` (Linux: cargo, macOS: lipo universal binary, Android: Gradle, iOS: Xcode)
+- Two transport stacks in one library: raw QUIC (`lib.rs`) and WebTransport (`webtransport.rs`)
+- `stream_writer.rs`: Non-blocking write queue via mpsc channel per stream
+- `media_player.rs`: Embedded mpv player with custom `moqbuffer://` stream protocol and 16MB ring buffer
+- Key Cargo deps: `quinn 0.11.9`, `web-transport-quinn 0.10.1`, `libmpv2-sys`, `dashmap`, `parking_lot`
+- QUIC transport uses 2MB receive buffer, datagrams enabled (RFC 9221), 30s idle timeout, 4s keepalive
+- Datagram buffer capped at 1000 entries before dropping
 
-### Key Message Types
+### Key Protocol Details
 
-Control messages use Type-Length-Value format: `type (varint) + length (16-bit) + payload`
+**Control messages**: Type-Length-Value format: `type (varint) + length (16-bit) + payload`
 
-- `CLIENT_SETUP` (0x20) / `SERVER_SETUP` (0x21): Version negotiation
-- `SUBSCRIBE` (0x3) / `SUBSCRIBE_OK` (0x4) / `SUBSCRIBE_ERROR` (0x5)
-- `PUBLISH_NAMESPACE` (0x6) / `PUBLISH_NAMESPACE_OK` (0x7)
-- `GOAWAY` (0x10): Session termination
+**Data streams**: Stream type prefix byte encodes flags via bitfield:
+- Bit 0 (LSB): extensions present
+- Type >= 0x18: end-of-group
+- Types 0x14/0x15/0x1C/0x1D: explicit Subgroup ID
+- Types 0x12/0x13/0x1A/0x1B: Subgroup ID = first Object ID
 
-Data streams use stream type prefix:
-- `SUBGROUP_HEADER` (0x10): Starts each subgroup stream
-- Objects follow with: `object_id (varint) + status (varint) + payload`
+**Draft versions**: `0xff000000 + draft_number`. Draft-14 = `0xff00000e`.
 
-### Draft Version Format
+**Int64 usage**: `package:fixnum` `Int64` is used throughout for group IDs, object IDs, and timestamps to ensure correct 64-bit arithmetic across all platforms.
 
-Draft versions use `0xff000000 + draft_number`. Draft-14 = `0xff00000e`.
+### Test Infrastructure
+
+Tests use `MockMoQTransport` (in `test/moq/client/client_integration_test.dart`):
+- Captures sent messages in `sentControlMessages` and `sentStreamData`
+- `onControlMessageSent` callback injects server responses via `Future.microtask()` to simulate async network behavior
+- `simulateIncomingControlData` / `simulateIncomingDataStream` trigger receive paths
+- Message type matching is done by inspecting the first byte of serialized data (e.g., `data[0] == 0x20` for CLIENT_SETUP)
+
+### Reference Specifications
+
+Draft specs and RFCs are stored as `.txt` files in `docs/` for easy parsing. Key specs:
+- `draft-ietf-moq-transport-14.txt`: Primary spec being implemented
+- `draft-cenzano-moq-media-interop-03.txt`: moq-mi packaging spec
+- `draft-law-moq-carp-00.txt`: CARP streaming (used by CmafPublisher)
+- `draft-ietf-moq-loc-01.txt`: LOC container spec
+- `rfc9221.txt`: QUIC Datagrams (implemented)
+- `draft-ietf-moq-catalogformat-01.txt` / `draft-wilaw-moq-catalogformat-02.txt`: Catalog format

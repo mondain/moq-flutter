@@ -48,6 +48,8 @@ class WebTransportQuinnTransport extends MoQTransport {
   _OpenUniStreamFunc? _moqWtOpenUniStream;
   _StreamWriteFunc? _moqWtStreamWrite;
   _StreamFinishFunc? _moqWtStreamFinish;
+  _SendDatagramFunc? _moqWtSendDatagram;
+  _RecvDatagramFunc? _moqWtRecvDatagram;
 
   Timer? _pollTimer;
   bool _nativeLibraryLoaded = false;
@@ -99,6 +101,14 @@ class WebTransportQuinnTransport extends MoQTransport {
           .asFunction();
       _moqWtStreamFinish = _nativeLib!
           .lookup<NativeFunction<NativeInt32 Function(NativeUint64, NativeUint64)>>('moq_webtransport_stream_finish')
+          .asFunction();
+      _moqWtSendDatagram = _nativeLib!
+          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
+              'moq_webtransport_send_datagram')
+          .asFunction();
+      _moqWtRecvDatagram = _nativeLib!
+          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
+              'moq_webtransport_recv_datagram')
           .asFunction();
 
       // Initialize the native library
@@ -404,9 +414,40 @@ class WebTransportQuinnTransport extends MoQTransport {
 
   @override
   Future<void> sendDatagram(Uint8List data) async {
-    // WebTransport datagrams not yet implemented
-    _logger.w('sendDatagram not yet implemented for WebTransport');
-    throw UnimplementedError('WebTransport datagrams not yet implemented');
+    if (!isConnected) {
+      throw StateError('Not connected');
+    }
+
+    if (!_nativeLibraryLoaded || _moqWtSendDatagram == null) {
+      _logger.e('Cannot send datagram: Native WebTransport library is not available');
+      throw StateError('Native WebTransport library not available');
+    }
+
+    try {
+      final dataPtr = calloc<Uint8>(data.length);
+      final nativeData = dataPtr.asTypedList(data.length);
+      nativeData.setAll(0, data);
+
+      final sent = _moqWtSendDatagram!(_sessionId, dataPtr, data.length);
+
+      calloc.free(dataPtr);
+
+      final sentInt = sent.toInt();
+      if (sentInt < 0) {
+        throw Exception('SendDatagram failed with error code: $sentInt');
+      }
+
+      _stats = _stats.copyWith(
+        bytesSent: _stats.bytesSent + sentInt,
+        packetsSent: _stats.packetsSent + 1,
+        lastActivity: DateTime.now(),
+      );
+
+      _logger.d('Sent datagram ($sentInt bytes) via WebTransport');
+    } catch (e) {
+      _logger.e('SendDatagram failed: $e');
+      rethrow;
+    }
   }
 
   @override
@@ -425,6 +466,9 @@ class WebTransportQuinnTransport extends MoQTransport {
 
       // Poll data streams (incoming unidirectional)
       _pollDataStreams();
+
+      // Poll datagrams
+      _pollDatagrams();
     });
   }
 
@@ -522,6 +566,40 @@ class WebTransportQuinnTransport extends MoQTransport {
     }
   }
 
+  void _pollDatagrams() {
+    if (!_nativeLibraryLoaded || _moqWtRecvDatagram == null) return;
+
+    try {
+      // Keep polling until no more datagrams available
+      while (true) {
+        final buffer = calloc<Uint8>(65536); // Max datagram size
+        final received = _moqWtRecvDatagram!(_sessionId, buffer, 65536);
+
+        if (received > 0) {
+          final data = Uint8List(received.toInt());
+          final nativeData = buffer.asTypedList(received.toInt());
+          data.setAll(0, nativeData);
+
+          _stats = _stats.copyWith(
+            bytesReceived: _stats.bytesReceived + received.toInt(),
+            packetsReceived: _stats.packetsReceived + 1,
+            lastActivity: DateTime.now(),
+          );
+
+          _logger.d('Received datagram (${received.toInt()} bytes) via WebTransport');
+          _incomingDatagramController.add(data);
+
+          calloc.free(buffer);
+        } else {
+          calloc.free(buffer);
+          break; // No more datagrams
+        }
+      }
+    } catch (e) {
+      _logger.e('Datagram poll error: $e');
+    }
+  }
+
   void _stopReceiving() {
     _pollTimer?.cancel();
     _pollTimer = null;
@@ -556,3 +634,7 @@ typedef _GetLastErrorFunc = int Function(Pointer<Uint8> buffer, int bufferLen);
 typedef _OpenUniStreamFunc = int Function(int sessionId, Pointer<Uint64> outStreamId);
 typedef _StreamWriteFunc = int Function(int sessionId, int streamId, Pointer<Uint8> data, int len);
 typedef _StreamFinishFunc = int Function(int sessionId, int streamId);
+typedef _SendDatagramFunc = int Function(
+    int sessionId, Pointer<Uint8> data, int len);
+typedef _RecvDatagramFunc = int Function(
+    int sessionId, Pointer<Uint8> buffer, int bufferLen);

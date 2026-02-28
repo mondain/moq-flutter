@@ -2,7 +2,7 @@
 // Uses web-transport-quinn crate for WebTransport over HTTP/3
 
 use web_transport_quinn::{Session, Client as WebTransportClient, SendStream};
-use quinn::{Endpoint, ClientConfig, TokioRuntime, EndpointConfig};
+use quinn::{Endpoint, ClientConfig, TokioRuntime, EndpointConfig, TransportConfig};
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{ServerName, CertificateDer, UnixTime};
 use dashmap::DashMap;
@@ -132,6 +132,8 @@ static WT_ENDPOINTS: OnceCell<DashMap<u64, Arc<Endpoint>>> = OnceCell::new();
 static WT_RECV_BUFFERS: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<ReceiveBuffer>>>> = OnceCell::new();
 static WT_DATA_QUEUES: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<DataStreamQueue>>>> = OnceCell::new();
 static WT_CONTROL_STREAMS: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<Option<ControlStream>>>>> = OnceCell::new();
+// Global registry of datagram receive buffers (session_id -> buffer of complete datagrams)
+static WT_DATAGRAM_BUFFERS: OnceCell<DashMap<u64, Arc<tokio::sync::Mutex<VecDeque<Vec<u8>>>>>> = OnceCell::new();
 static WT_RUNTIME: OnceCell<Runtime> = OnceCell::new();
 static WT_NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 static WT_NEXT_INCOMING_STREAM_ID: AtomicU64 = AtomicU64::new(1);
@@ -208,6 +210,9 @@ pub extern "C" fn moq_webtransport_init() {
     }
     if WT_DATA_STREAMS.set(DashMap::new()).is_err() {
         log::warn!("WebTransport data streams registry already initialized");
+    }
+    if WT_DATAGRAM_BUFFERS.set(DashMap::new()).is_err() {
+        log::warn!("WebTransport datagram buffers registry already initialized");
     }
     if LAST_ERROR.set(Mutex::new(Vec::new())).is_err() {
         log::warn!("WebTransport last error buffer already initialized");
@@ -328,7 +333,13 @@ pub extern "C" fn moq_webtransport_connect(
             }
         };
 
-        let client_config = ClientConfig::new(Arc::new(quic_crypto));
+        // Build transport config with datagram support (RFC 9221)
+        let mut transport = TransportConfig::default();
+        transport.datagram_receive_buffer_size(Some(65536));
+        transport.datagram_send_buffer_size(65536);
+
+        let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
+        client_config.transport_config(Arc::new(transport));
 
         // Create endpoint
         let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
@@ -445,6 +456,39 @@ pub extern "C" fn moq_webtransport_connect(
                 log::error!("Failed to open control stream for session {}: {:?}", session_id, e);
             }
         }
+    });
+
+    // Initialize datagram buffer for this session
+    let datagram_buffers = WT_DATAGRAM_BUFFERS.get().expect("Datagram buffers not initialized");
+    datagram_buffers.insert(session_id, Arc::new(tokio::sync::Mutex::new(VecDeque::new())));
+
+    // Start background task to receive datagrams
+    let session_for_datagrams = session_arc.clone();
+    runtime.spawn(async move {
+        log::info!("Starting WebTransport datagram receiver for session {}", session_id);
+        let datagram_buffers = WT_DATAGRAM_BUFFERS.get().expect("Datagram buffers not initialized");
+
+        loop {
+            match session_for_datagrams.read_datagram().await {
+                Ok(datagram) => {
+                    log::trace!("Received datagram ({} bytes) on WebTransport session {}", datagram.len(), session_id);
+
+                    if let Some(buffer) = datagram_buffers.get(&session_id) {
+                        let mut buf = buffer.lock().await;
+                        if buf.len() < 1000 {
+                            buf.push_back(datagram.to_vec());
+                        } else {
+                            log::warn!("WebTransport datagram buffer full, dropping datagram");
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Error receiving WebTransport datagram: {:?}", e);
+                    break;
+                }
+            }
+        }
+        log::info!("WebTransport datagram receiver stopped for session {}", session_id);
     });
 
     // Start background task to accept incoming unidirectional streams (data streams)
@@ -882,6 +926,102 @@ pub extern "C" fn moq_webtransport_stream_finish(
     result
 }
 
+/// Send a datagram (unreliable, unordered)
+///
+/// Datagrams are used for low-latency data that doesn't require
+/// reliable delivery (e.g., audio frames in MoQ).
+///
+/// # Arguments
+/// * `session_id` - The session ID
+/// * `data` - Pointer to data to send
+/// * `len` - Length of data
+///
+/// # Returns
+/// * Number of bytes sent on success, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_webtransport_send_datagram(
+    session_id: u64,
+    data: *const u8,
+    len: usize,
+) -> i64 {
+    let sessions = WT_SESSIONS.get().expect("Sessions not initialized");
+
+    let session = match sessions.get(&session_id) {
+        Some(s) => s.clone(),
+        None => {
+            log::error!("Session {} not found for send_datagram", session_id);
+            return -1;
+        }
+    };
+
+    let data_bytes = unsafe { slice::from_raw_parts(data, len) };
+
+    match session.send_datagram(bytes::Bytes::copy_from_slice(data_bytes)) {
+        Ok(()) => {
+            log::trace!("Sent datagram ({} bytes) on WebTransport session {}", len, session_id);
+            len as i64
+        }
+        Err(e) => {
+            log::error!("Failed to send WebTransport datagram: {:?}", e);
+            -2
+        }
+    }
+}
+
+/// Receive a datagram (non-blocking poll)
+///
+/// Returns the next complete datagram from the buffer, if available.
+///
+/// # Arguments
+/// * `session_id` - The session ID
+/// * `buffer` - Pointer to buffer to store received datagram
+/// * `buffer_len` - Length of buffer
+///
+/// # Returns
+/// * Number of bytes received on success, 0 if no datagram available, negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_webtransport_recv_datagram(
+    session_id: u64,
+    buffer: *mut u8,
+    buffer_len: usize,
+) -> i64 {
+    let datagram_buffers = WT_DATAGRAM_BUFFERS.get().expect("Datagram buffers not initialized");
+
+    let datagram_buffer = match datagram_buffers.get(&session_id) {
+        Some(buf) => buf.clone(),
+        None => {
+            log::error!("Session {} not found for recv_datagram", session_id);
+            return -1;
+        }
+    };
+
+    if buffer.is_null() || buffer_len == 0 {
+        return 0;
+    }
+
+    let runtime = get_runtime();
+
+    let result = runtime.block_on(async {
+        let mut buf = datagram_buffer.lock().await;
+
+        if let Some(datagram) = buf.pop_front() {
+            let copy_len = datagram.len().min(buffer_len);
+            unsafe {
+                let output = slice::from_raw_parts_mut(buffer, copy_len);
+                output.copy_from_slice(&datagram[..copy_len]);
+            }
+            if datagram.len() > buffer_len {
+                log::warn!("WebTransport datagram truncated: {} bytes available, {} bytes buffer", datagram.len(), buffer_len);
+            }
+            copy_len as i64
+        } else {
+            0
+        }
+    });
+
+    result
+}
+
 /// Close a WebTransport session
 #[no_mangle]
 pub extern "C" fn moq_webtransport_close(session_id: u64) -> i32 {
@@ -912,6 +1052,10 @@ pub extern "C" fn moq_webtransport_close(session_id: u64) -> i32 {
     data_queues.remove(&session_id);
     control_streams.remove(&session_id);
 
+    // Clean up datagram buffer
+    let datagram_buffers = WT_DATAGRAM_BUFFERS.get().expect("Datagram buffers not initialized");
+    datagram_buffers.remove(&session_id);
+
     // Clean up any data streams for this session
     data_streams.retain(|(sid, _), _| *sid != session_id);
 
@@ -935,6 +1079,9 @@ pub extern "C" fn moq_webtransport_cleanup() {
     recv_buffers.clear();
     control_streams.clear();
     data_streams.clear();
+
+    let datagram_buffers = WT_DATAGRAM_BUFFERS.get().expect("Datagram buffers not initialized");
+    datagram_buffers.clear();
 
     log::info!("MoQ WebTransport cleanup complete");
 }
