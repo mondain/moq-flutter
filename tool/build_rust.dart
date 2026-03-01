@@ -76,7 +76,22 @@ Future<void> _compileRustLibrary({
 Future<void> _compileLinux(String rustDir, bool isDebug) async {
   print('Compiling for Linux...');
 
-  final args = ['build', '--lib', '--profile', isDebug ? 'dev' : 'release'];
+  // Auto-detect mpv for media-player feature
+  final hasMediaPlayer = await _detectMpv();
+  final extraFeatures = hasMediaPlayer ? ['--features', 'media-player'] : <String>[];
+  if (hasMediaPlayer) {
+    print('libmpv detected - enabling media-player feature');
+  } else {
+    print('libmpv not found - building without media-player (install with: apt install libmpv-dev)');
+  }
+
+  final args = [
+    'build',
+    '--lib',
+    '--profile',
+    isDebug ? 'dev' : 'release',
+    ...extraFeatures,
+  ];
 
   final result = await Process.run(
     'cargo',
@@ -110,6 +125,15 @@ Future<void> _compileMacOS(String rustDir, bool isDebug) async {
 
   final buildType = isDebug ? 'debug' : 'release';
 
+  // Auto-detect mpv for media-player feature
+  final hasMediaPlayer = await _detectMpv();
+  final extraFeatures = hasMediaPlayer ? ['--features', 'media-player'] : <String>[];
+  if (hasMediaPlayer) {
+    print('libmpv detected - enabling media-player feature');
+  } else {
+    print('libmpv not found - building without media-player (install with: brew install mpv)');
+  }
+
   // Build for each target
   for (final target in targets) {
     final args = [
@@ -118,6 +142,7 @@ Future<void> _compileMacOS(String rustDir, bool isDebug) async {
       '--target',
       target,
       if (!isDebug) '--release',
+      ...extraFeatures,
     ];
 
     final result = await Process.run(
@@ -189,6 +214,47 @@ Future<bool> _checkCommand(String command, List<String> args) async {
 Future<bool> _checkRustTarget(String target) async {
   final result = await Process.run('rustup', ['target', 'list', '--installed']);
   return result.stdout.toString().contains(target);
+}
+
+/// Detect if libmpv is available on the system
+Future<bool> _detectMpv() async {
+  // Try pkg-config first
+  try {
+    final result = await Process.run('pkg-config', ['--exists', 'mpv']);
+    if (result.exitCode == 0) {
+      return true;
+    }
+  } catch (e) {
+    // pkg-config not available
+  }
+
+  // Check common locations
+  if (Platform.isMacOS) {
+    final paths = [
+      '/opt/homebrew/lib/libmpv.dylib',      // Apple Silicon
+      '/usr/local/lib/libmpv.dylib',          // Intel
+      '/opt/homebrew/opt/mpv/lib/libmpv.dylib',
+      '/usr/local/opt/mpv/lib/libmpv.dylib',
+    ];
+    for (final path in paths) {
+      if (File(path).existsSync()) {
+        return true;
+      }
+    }
+  } else if (Platform.isLinux) {
+    final paths = [
+      '/usr/lib/libmpv.so',
+      '/usr/lib/x86_64-linux-gnu/libmpv.so',
+      '/usr/lib/aarch64-linux-gnu/libmpv.so',
+    ];
+    for (final path in paths) {
+      if (File(path).existsSync()) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 /// Exception thrown when build fails

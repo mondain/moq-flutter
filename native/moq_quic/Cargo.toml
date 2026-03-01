@@ -24,14 +24,14 @@ libmpv2-sys = { version = "4.0.1", optional = true }
 parking_lot = { version = "0.12", optional = true }
 
 [features]
-default = ["ring", "media-player"]
+default = ["ring"]
 ring = ["rustls/ring", "quinn/ring", "web-transport-quinn/ring"]
 aws-lc-rs = ["rustls/aws-lc-rs", "quinn/aws-lc-rs", "web-transport-quinn/aws-lc-rs"]
 media-player = ["dep:libmpv2-sys", "dep:parking_lot"]
 
 # Platform-specific features
-macos = ["ring", "media-player"]
-linux = ["aws-lc-rs", "media-player"]
+macos = ["ring"]
+linux = ["aws-lc-rs"]
 
 [build-dependencies]
 cbindgen = "0.29.2"
