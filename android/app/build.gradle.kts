@@ -8,7 +8,7 @@ plugins {
 android {
     namespace = "com.moqapp.moq_flutter"
     compileSdk = 36
-    ndkVersion = "27.0.12077973"
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -101,7 +101,7 @@ val buildRustLibs = tasks.register("buildRustLibs") {
 
                 // Set up environment for NDK toolchain
                 val ndkRoot = System.getenv("ANDROID_NDK_ROOT")
-                    ?: "${System.getenv("ANDROID_HOME") ?: "/home/mondain/Android/Sdk"}/ndk/27.0.12077973"
+                    ?: "${System.getenv("ANDROID_HOME") ?: "/home/mondain/Android/Sdk"}/ndk/28.2.13676358"
                 val toolchainBin = "$ndkRoot/toolchains/llvm/prebuilt/linux-x86_64/bin"
                 val currentPath = System.getenv("PATH") ?: ""
 

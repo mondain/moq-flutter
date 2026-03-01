@@ -294,7 +294,7 @@ pub extern "C" fn moq_webtransport_connect(
         let url = format!("https://{}:{}{}", host_str, port, path_str);
         log::info!("Connecting to WebTransport: {}", url);
 
-        let parsed_url = match url.parse() {
+        let parsed_url: url::Url = match url.parse() {
             Ok(u) => u,
             Err(e) => {
                 log::error!("Failed to parse URL: {:?}", e);
