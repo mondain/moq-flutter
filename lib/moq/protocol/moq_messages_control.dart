@@ -605,37 +605,36 @@ class SubscribeMessage extends MoQControlMessage {
       final remainingParams = <KeyValuePair>[];
 
       for (final param in allParams) {
-        switch (param.type) {
-          case SubscribeParameterType.subscriberPriority:
-            subscriberPriority = param.intValue ?? 0;
-          case SubscribeParameterType.groupOrder:
-            groupOrder = GroupOrder.fromValue(param.intValue ?? 0) ?? GroupOrder.none;
-          case SubscribeParameterType.forward:
-            forward = param.intValue ?? 0;
-          case SubscribeParameterType.subscriptionFilter:
-            // Decode filter buffer: FilterType(i) [StartLocation] [EndGroup(i)]
-            if (param.value != null && param.value!.isNotEmpty) {
-              int fOff = 0;
-              final (ftVal, ftLen) = MoQWireFormat.decodeVarint(param.value!, fOff);
-              fOff += ftLen;
-              filterType = FilterType.fromValue(ftVal) ?? FilterType.largestObject;
+        if (param.type == SubscribeParameterType.subscriberPriority) {
+          subscriberPriority = param.intValue ?? 0;
+        } else if (param.type == SubscribeParameterType.groupOrder) {
+          groupOrder = GroupOrder.fromValue(param.intValue ?? 0) ?? GroupOrder.none;
+        } else if (param.type == SubscribeParameterType.forward) {
+          forward = param.intValue ?? 0;
+        } else if (param.type == SubscribeParameterType.subscriptionFilter) {
+          // Decode filter buffer: FilterType(i) [StartLocation] [EndGroup(i)]
+          if (param.value != null && param.value!.isNotEmpty) {
+            int fOff = 0;
+            final (ftVal, ftLen) = MoQWireFormat.decodeVarint(param.value!, fOff);
+            fOff += ftLen;
+            filterType = FilterType.fromValue(ftVal) ?? FilterType.largestObject;
 
-              if (filterType == FilterType.absoluteStart ||
-                  filterType == FilterType.absoluteRange) {
-                if (fOff < param.value!.length) {
-                  final (loc, locLen) = MoQWireFormat.decodeLocation(param.value!, fOff);
-                  fOff += locLen;
-                  startLocation = loc;
-                }
-              }
-              if (filterType == FilterType.absoluteRange && fOff < param.value!.length) {
-                final (eg, egLen) = MoQWireFormat.decodeVarint64(param.value!, fOff);
-                fOff += egLen;
-                endGroup = eg;
+            if (filterType == FilterType.absoluteStart ||
+                filterType == FilterType.absoluteRange) {
+              if (fOff < param.value!.length) {
+                final (loc, locLen) = MoQWireFormat.decodeLocation(param.value!, fOff);
+                fOff += locLen;
+                startLocation = loc;
               }
             }
-          default:
-            remainingParams.add(param);
+            if (filterType == FilterType.absoluteRange && fOff < param.value!.length) {
+              final (eg, egLen) = MoQWireFormat.decodeVarint64(param.value!, fOff);
+              fOff += egLen;
+              endGroup = eg;
+            }
+          }
+        } else {
+          remainingParams.add(param);
         }
       }
 
@@ -933,24 +932,19 @@ class SubscribeOkMessage extends MoQControlMessage {
       final remainingParams = <KeyValuePair>[];
 
       for (final param in allParams) {
-        switch (param.type) {
-          case TrackPropertyType.expires:
-            expires = Int64(param.intValue ?? 0);
-            break;
-          case SubscribeParameterType.groupOrder:
-            groupOrder = GroupOrder.fromValue(param.intValue ?? 0) ?? GroupOrder.none;
-            break;
-          case TrackPropertyType.largestObject:
-            // Buffer containing Location
-            if (param.value != null && param.value!.isNotEmpty) {
-              final (loc, _) = MoQWireFormat.decodeLocation(param.value!, 0);
-              largestLocation = loc;
-              contentExists = 1;
-            }
-            break;
-          default:
-            remainingParams.add(param);
-            break;
+        if (param.type == TrackPropertyType.expires) {
+          expires = Int64(param.intValue ?? 0);
+        } else if (param.type == SubscribeParameterType.groupOrder) {
+          groupOrder = GroupOrder.fromValue(param.intValue ?? 0) ?? GroupOrder.none;
+        } else if (param.type == TrackPropertyType.largestObject) {
+          // Buffer containing Location
+          if (param.value != null && param.value!.isNotEmpty) {
+            final (loc, _) = MoQWireFormat.decodeLocation(param.value!, 0);
+            largestLocation = loc;
+            contentExists = 1;
+          }
+        } else {
+          remainingParams.add(param);
         }
       }
 
@@ -1325,25 +1319,24 @@ class SubscribeUpdateMessage extends MoQControlMessage {
       final remainingParams = <KeyValuePair>[];
 
       for (final param in allParams) {
-        switch (param.type) {
-          case SubscribeParameterType.subscriberPriority:
-            subscriberPriority = param.intValue ?? 0;
-          case SubscribeParameterType.forward:
-            forward = param.intValue ?? 0;
-          case SubscribeParameterType.subscriptionFilter:
-            // Decode filter buffer: StartLocation (Location) + EndGroup (i)
-            if (param.value != null && param.value!.isNotEmpty) {
-              int fOff = 0;
-              final (loc, locLen) = MoQWireFormat.decodeLocation(param.value!, fOff);
-              fOff += locLen;
-              startLoc = loc;
-              if (fOff < param.value!.length) {
-                final (eg, _) = MoQWireFormat.decodeVarint64(param.value!, fOff);
-                endGroup = eg;
-              }
+        if (param.type == SubscribeParameterType.subscriberPriority) {
+          subscriberPriority = param.intValue ?? 0;
+        } else if (param.type == SubscribeParameterType.forward) {
+          forward = param.intValue ?? 0;
+        } else if (param.type == SubscribeParameterType.subscriptionFilter) {
+          // Decode filter buffer: StartLocation (Location) + EndGroup (i)
+          if (param.value != null && param.value!.isNotEmpty) {
+            int fOff = 0;
+            final (loc, locLen) = MoQWireFormat.decodeLocation(param.value!, fOff);
+            fOff += locLen;
+            startLoc = loc;
+            if (fOff < param.value!.length) {
+              final (eg, _) = MoQWireFormat.decodeVarint64(param.value!, fOff);
+              endGroup = eg;
             }
-          default:
-            remainingParams.add(param);
+          }
+        } else {
+          remainingParams.add(param);
         }
       }
 
