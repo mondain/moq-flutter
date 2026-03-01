@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:media_kit_video/media_kit_video.dart';
-import 'package:sizer/sizer.dart';
 import '../providers/moq_providers.dart';
 import '../widgets/connection_status_card.dart';
 import '../media/moq_video_player.dart';
@@ -230,7 +229,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('Stream Viewer', style: TextStyle(fontSize: 14.sp)),
+        title: const Text('Stream Viewer', style: TextStyle(fontSize: 18)),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: _disconnect,
@@ -248,7 +247,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
 
           // Info and controls
           Padding(
-            padding: EdgeInsets.all(4.w),
+            padding: const EdgeInsets.all(16),
             child: Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 600),
@@ -256,20 +255,20 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     ConnectionStatusCard(statusMessage: _statusMessage),
-                    SizedBox(height: 2.h),
+                    const SizedBox(height: 16),
 
                     // Statistics card
                     Card(
                       child: Padding(
-                        padding: EdgeInsets.all(4.w),
+                        padding: const EdgeInsets.all(16),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
                               'Stream Statistics',
-                              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 13.sp),
+                              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
                             ),
-                            SizedBox(height: 1.h),
+                            const SizedBox(height: 8),
                             _buildStatsRow('Objects Received', '$_videoObjectsReceived'),
                             _buildStatsRow('Video Frames', '$_videoFramesDecoded'),
                             _buildStatsRow('Audio Frames', '$_audioFramesDecoded'),
@@ -282,20 +281,20 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                         ),
                       ),
                     ),
-                    SizedBox(height: 1.h),
+                    const SizedBox(height: 8),
 
                     // Track info card
                     Card(
                       child: Padding(
-                        padding: EdgeInsets.all(4.w),
+                        padding: const EdgeInsets.all(16),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
                               'Track Info',
-                              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 13.sp),
+                              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
                             ),
-                            SizedBox(height: 1.h),
+                            const SizedBox(height: 8),
                             _buildInfoRow('Namespace', widget.namespace),
                             _buildInfoRow('Video Track', widget.videoTrackAlias),
                             _buildInfoRow('Audio Track', widget.audioTrackAlias),
@@ -303,13 +302,13 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                         ),
                       ),
                     ),
-                    SizedBox(height: 2.h),
+                    const SizedBox(height: 16),
 
                     // Disconnect button
                     OutlinedButton.icon(
                       onPressed: isConnected ? _disconnect : null,
                       icon: const Icon(Icons.stop),
-                      label: Text('Disconnect', style: TextStyle(fontSize: 12.sp)),
+                      label: const Text('Disconnect', style: TextStyle(fontSize: 15)),
                     ),
                   ],
                 ),
@@ -326,12 +325,12 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          children: [
-            const CircularProgressIndicator(color: Colors.white),
-            SizedBox(height: 2.h),
+          children: const [
+            CircularProgressIndicator(color: Colors.white),
+            SizedBox(height: 16),
             Text(
               'Initializing player...',
-              style: TextStyle(color: Colors.white70, fontSize: 12.sp),
+              style: TextStyle(color: Colors.white70, fontSize: 15),
             ),
           ],
         ),
@@ -343,18 +342,18 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.error_outline, size: 8.h, color: Colors.red),
-            SizedBox(height: 2.h),
-            Text(
+            const Icon(Icons.error_outline, size: 64, color: Colors.red),
+            const SizedBox(height: 16),
+            const Text(
               'Playback Error',
-              style: TextStyle(color: Colors.white, fontSize: 14.sp),
+              style: TextStyle(color: Colors.white, fontSize: 18),
             ),
-            SizedBox(height: 1.h),
+            const SizedBox(height: 8),
             Padding(
-              padding: EdgeInsets.symmetric(horizontal: 4.w),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Text(
                 _errorMessage!,
-                style: TextStyle(color: Colors.white70, fontSize: 11.sp),
+                style: const TextStyle(color: Colors.white70, fontSize: 14),
                 textAlign: TextAlign.center,
               ),
             ),
@@ -373,30 +372,30 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
               _nativePlayer?.isPlaying == true
                   ? Icons.videocam
                   : Icons.play_circle_outline,
-              size: 8.h,
+              size: 64,
               color: _nativePlayer?.isPlaying == true
                   ? Colors.green
                   : Colors.white54,
             ),
-            SizedBox(height: 2.h),
-            Text(
+            const SizedBox(height: 16),
+            const Text(
               'Native Player Mode',
-              style: TextStyle(color: Colors.white, fontSize: 14.sp),
+              style: TextStyle(color: Colors.white, fontSize: 18),
             ),
-            SizedBox(height: 1.h),
-            Text(
+            const SizedBox(height: 8),
+            const Text(
               'Video appears in separate mpv window',
-              style: TextStyle(color: Colors.white70, fontSize: 12.sp),
+              style: TextStyle(color: Colors.white70, fontSize: 15),
             ),
-            SizedBox(height: 1.h),
+            const SizedBox(height: 8),
             Text(
               _statusMessage,
-              style: TextStyle(color: Colors.white54, fontSize: 11.sp),
+              style: const TextStyle(color: Colors.white54, fontSize: 14),
             ),
-            SizedBox(height: 2.h),
+            const SizedBox(height: 16),
             Text(
               'V:$_videoFramesDecoded A:$_audioFramesDecoded',
-              style: TextStyle(color: Colors.white70, fontSize: 10.sp),
+              style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
           ],
         ),
@@ -404,10 +403,10 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     }
 
     if (_videoPlayer == null) {
-      return Center(
+      return const Center(
         child: Text(
           'No player available',
-          style: TextStyle(color: Colors.white70, fontSize: 12.sp),
+          style: TextStyle(color: Colors.white70, fontSize: 15),
         ),
       );
     }
@@ -425,23 +424,23 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
+                const Icon(
                   Icons.play_circle_outline,
-                  size: 8.h,
+                  size: 64,
                   color: Colors.white54,
                 ),
-                SizedBox(height: 2.h),
+                const SizedBox(height: 16),
                 Text(
                   'Receiving stream: ${widget.namespace}',
-                  style: TextStyle(color: Colors.white70, fontSize: 12.sp),
+                  style: const TextStyle(color: Colors.white70, fontSize: 15),
                 ),
-                SizedBox(height: 1.h),
+                const SizedBox(height: 8),
                 Text(
                   _statusMessage,
-                  style: TextStyle(color: Colors.white54, fontSize: 11.sp),
+                  style: const TextStyle(color: Colors.white54, fontSize: 14),
                 ),
                 if (_videoFramesDecoded > 0) ...[
-                  SizedBox(height: 2.h),
+                  const SizedBox(height: 16),
                   const SizedBox(
                     width: 24,
                     height: 24,
@@ -478,15 +477,15 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
 
   Widget _buildInfoRow(String label, String value) {
     return Padding(
-      padding: EdgeInsets.symmetric(vertical: 0.3.h),
+      padding: const EdgeInsets.symmetric(vertical: 3),
       child: Row(
         children: [
           Text(
             '$label: ',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11.sp),
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
           ),
           Expanded(
-            child: Text(value, style: TextStyle(fontSize: 11.sp)),
+            child: Text(value, style: const TextStyle(fontSize: 14)),
           ),
         ],
       ),
@@ -495,12 +494,12 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
 
   Widget _buildStatsRow(String label, String value) {
     return Padding(
-      padding: EdgeInsets.symmetric(vertical: 0.2.h),
+      padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label, style: TextStyle(fontSize: 10.sp, color: Colors.grey)),
-          Text(value, style: TextStyle(fontSize: 10.sp, fontWeight: FontWeight.w500)),
+          Text(label, style: const TextStyle(fontSize: 13, color: Colors.grey)),
+          Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
         ],
       ),
     );

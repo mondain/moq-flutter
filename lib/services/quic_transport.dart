@@ -150,15 +150,35 @@ class QuicTransport extends MoQTransport {
 
       throw Exception('Could not find libmoq_quic.so in any of the expected paths');
     } else if (Platform.isIOS) {
-      return DynamicLibrary.process();
+      // Try DynamicLibrary.process() first (for statically linked libraries)
+      try {
+        _logger.d('Trying to load library from process');
+        return DynamicLibrary.process();
+      } catch (e) {
+        _logger.d('Failed to load from process: $e');
+      }
+
+      // Fall back to Frameworks path for dynamically linked libraries
+      final executableDir = File(Platform.resolvedExecutable).parent.path;
+      final frameworksPath = '$executableDir/Frameworks/libmoq_quic.dylib';
+      try {
+        _logger.d('Trying to load library from: $frameworksPath');
+        return DynamicLibrary.open(frameworksPath);
+      } catch (e) {
+        _logger.d('Failed to load from $frameworksPath: $e');
+      }
+
+      throw Exception('Could not find libmoq_quic on iOS');
     } else if (Platform.isMacOS) {
-      // Try multiple paths for the native library on macOS
+      // First try the app bundle's Frameworks directory (works when running packaged app)
+      final executableDir = File(Platform.resolvedExecutable).parent.path;
+      final frameworksPath = '$executableDir/../Frameworks/libmoq_quic.dylib';
+
       final paths = [
+        frameworksPath, // App bundle Frameworks (highest priority for packaged apps)
         'libmoq_quic.dylib',
         '../native/moq_quic/target/release/libmoq_quic.dylib',
         'native/moq_quic/target/release/libmoq_quic.dylib',
-        '../Frameworks/libmoq_quic.dylib',
-        '@rpath/libmoq_quic.dylib',
       ];
 
       for (final path in paths) {

@@ -57,7 +57,7 @@ class PublishNamespaceMessage extends MoQControlMessage {
   }
 
   @override
-  Uint8List serialize() {
+  Uint8List serialize({int version = MoQVersion.draft14}) {
     final payload = Uint8List(payloadLength);
     int offset = 0;
 
@@ -113,7 +113,7 @@ class PublishNamespaceMessage extends MoQControlMessage {
     return buffer;
   }
 
-  static PublishNamespaceMessage deserialize(Uint8List data) {
+  static PublishNamespaceMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
 
     final (requestId, len1) = MoQWireFormat.decodeVarint64(data, offset);
@@ -176,7 +176,7 @@ class PublishNamespaceOkMessage extends MoQControlMessage {
   int get payloadLength => MoQWireFormat._varintSize64(requestId);
 
   @override
-  Uint8List serialize() {
+  Uint8List serialize({int version = MoQVersion.draft14}) {
     final payload = Uint8List(payloadLength);
     final bytes = MoQWireFormat.encodeVarint64(requestId);
     payload.setAll(0, bytes);
@@ -199,7 +199,7 @@ class PublishNamespaceOkMessage extends MoQControlMessage {
     return buffer;
   }
 
-  static PublishNamespaceOkMessage deserialize(Uint8List data) {
+  static PublishNamespaceOkMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     final (requestId, _) = MoQWireFormat.decodeVarint64(data, 0);
     return PublishNamespaceOkMessage(requestId: requestId);
   }
@@ -233,7 +233,7 @@ class PublishNamespaceErrorMessage extends MoQControlMessage {
   }
 
   @override
-  Uint8List serialize() {
+  Uint8List serialize({int version = MoQVersion.draft14}) {
     final reasonBytes = const Utf8Encoder().convert(errorReason.reason);
     final payload = Uint8List(payloadLength);
     int offset = 0;
@@ -274,7 +274,7 @@ class PublishNamespaceErrorMessage extends MoQControlMessage {
     return buffer;
   }
 
-  static PublishNamespaceErrorMessage deserialize(Uint8List data) {
+  static PublishNamespaceErrorMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
 
     final (requestId, len1) = MoQWireFormat.decodeVarint64(data, offset);
@@ -304,18 +304,25 @@ class PublishNamespaceDoneMessage extends MoQControlMessage {
   final List<Uint8List> trackNamespace;
   final int statusCode;
   final ReasonPhrase reason;
+  final Int64? requestId;
 
   PublishNamespaceDoneMessage({
     required this.trackNamespace,
     required this.statusCode,
     required this.reason,
+    this.requestId,
   });
 
   @override
   MoQMessageType get type => MoQMessageType.publishNamespaceDone;
 
   @override
-  int get payloadLength {
+  int get payloadLength => _payloadLength(MoQVersion.draft14);
+
+  int _payloadLength(int version) {
+    if (MoQVersion.isDraft16OrLater(version)) {
+      return MoQWireFormat._varintSize64(requestId ?? Int64(0));
+    }
     int len = 0;
     len += _tupleSize(trackNamespace);
     len += MoQWireFormat._varintSize(statusCode);
@@ -333,21 +340,31 @@ class PublishNamespaceDoneMessage extends MoQControlMessage {
   }
 
   @override
-  Uint8List serialize() {
-    final reasonBytes = const Utf8Encoder().convert(reason.reason);
-    final payload = Uint8List(payloadLength);
+  Uint8List serialize({int version = MoQVersion.draft14}) {
+    final payload = Uint8List(_payloadLength(version));
     int offset = 0;
 
-    offset += _writeTuple(payload, offset, trackNamespace);
-    offset += _writeVarint(payload, offset, statusCode);
-    offset += _writeVarint(payload, offset, reasonBytes.length);
-    payload.setAll(offset, reasonBytes);
+    if (MoQVersion.isDraft16OrLater(version)) {
+      offset += _writeVarint64(payload, offset, requestId ?? Int64(0));
+    } else {
+      final reasonBytes = const Utf8Encoder().convert(reason.reason);
+      offset += _writeTuple(payload, offset, trackNamespace);
+      offset += _writeVarint(payload, offset, statusCode);
+      offset += _writeVarint(payload, offset, reasonBytes.length);
+      payload.setAll(offset, reasonBytes);
+    }
 
     return _wrapMessage(payload);
   }
 
   int _writeVarint(Uint8List buffer, int offset, int value) {
     final bytes = MoQWireFormat.encodeVarint(value);
+    buffer.setAll(offset, bytes);
+    return bytes.length;
+  }
+
+  int _writeVarint64(Uint8List buffer, int offset, Int64 value) {
+    final bytes = MoQWireFormat.encodeVarint64(value);
     buffer.setAll(offset, bytes);
     return bytes.length;
   }
@@ -374,8 +391,18 @@ class PublishNamespaceDoneMessage extends MoQControlMessage {
     return buffer;
   }
 
-  static PublishNamespaceDoneMessage deserialize(Uint8List data) {
+  static PublishNamespaceDoneMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
+
+    if (MoQVersion.isDraft16OrLater(version)) {
+      final (requestId, _) = MoQWireFormat.decodeVarint64(data, offset);
+      return PublishNamespaceDoneMessage(
+        trackNamespace: const [],
+        statusCode: 0,
+        reason: ReasonPhrase(''),
+        requestId: requestId,
+      );
+    }
 
     final (namespace, len1) = MoQWireFormat.decodeTuple(data, offset);
     offset += len1;
@@ -402,16 +429,34 @@ class PublishNamespaceDoneMessage extends MoQControlMessage {
 /// Sent by relay to cancel a previously accepted PUBLISH_NAMESPACE.
 class PublishNamespaceCancelMessage extends MoQControlMessage {
   final List<Uint8List> trackNamespace;
+  final Int64? requestId;
+  final int? errorCode;
+  final ReasonPhrase? errorReason;
 
   PublishNamespaceCancelMessage({
     required this.trackNamespace,
+    this.requestId,
+    this.errorCode,
+    this.errorReason,
   });
 
   @override
   MoQMessageType get type => MoQMessageType.publishNamespaceCancel;
 
   @override
-  int get payloadLength => _tupleSize(trackNamespace);
+  int get payloadLength => _payloadLength(MoQVersion.draft14);
+
+  int _payloadLength(int version) {
+    if (MoQVersion.isDraft16OrLater(version)) {
+      int len = 0;
+      len += MoQWireFormat._varintSize64(requestId ?? Int64(0));
+      len += MoQWireFormat._varintSize(errorCode ?? 0);
+      final reasonBytes = const Utf8Encoder().convert((errorReason ?? ReasonPhrase('')).reason);
+      len += MoQWireFormat._varintSize(reasonBytes.length) + reasonBytes.length;
+      return len;
+    }
+    return _tupleSize(trackNamespace);
+  }
 
   int _tupleSize(List<Uint8List> tuple) {
     int len = MoQWireFormat._varintSize(tuple.length);
@@ -422,12 +467,33 @@ class PublishNamespaceCancelMessage extends MoQControlMessage {
   }
 
   @override
-  Uint8List serialize() {
-    final payload = Uint8List(payloadLength);
+  Uint8List serialize({int version = MoQVersion.draft14}) {
+    final payload = Uint8List(_payloadLength(version));
     int offset = 0;
-    offset += _writeTuple(payload, offset, trackNamespace);
+
+    if (MoQVersion.isDraft16OrLater(version)) {
+      final reasonBytes = const Utf8Encoder().convert((errorReason ?? ReasonPhrase('')).reason);
+      offset += _writeVarint64(payload, offset, requestId ?? Int64(0));
+      offset += _writeVarint(payload, offset, errorCode ?? 0);
+      offset += _writeVarint(payload, offset, reasonBytes.length);
+      payload.setAll(offset, reasonBytes);
+    } else {
+      offset += _writeTuple(payload, offset, trackNamespace);
+    }
 
     return _wrapMessage(payload);
+  }
+
+  int _writeVarint(Uint8List buffer, int offset, int value) {
+    final bytes = MoQWireFormat.encodeVarint(value);
+    buffer.setAll(offset, bytes);
+    return bytes.length;
+  }
+
+  int _writeVarint64(Uint8List buffer, int offset, Int64 value) {
+    final bytes = MoQWireFormat.encodeVarint64(value);
+    buffer.setAll(offset, bytes);
+    return bytes.length;
   }
 
   int _writeTuple(Uint8List buffer, int offset, List<Uint8List> tuple) {
@@ -452,7 +518,30 @@ class PublishNamespaceCancelMessage extends MoQControlMessage {
     return buffer;
   }
 
-  static PublishNamespaceCancelMessage deserialize(Uint8List data) {
+  static PublishNamespaceCancelMessage deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
+    if (MoQVersion.isDraft16OrLater(version)) {
+      int offset = 0;
+
+      final (requestId, len1) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += len1;
+
+      final (errorCode, len2) = MoQWireFormat.decodeVarint(data, offset);
+      offset += len2;
+
+      final (reasonLen, len3) = MoQWireFormat.decodeVarint(data, offset);
+      offset += len3;
+
+      final reasonBytes = data.sublist(offset, offset + reasonLen);
+      final reason = const Utf8Decoder().convert(reasonBytes);
+
+      return PublishNamespaceCancelMessage(
+        trackNamespace: const [],
+        requestId: requestId,
+        errorCode: errorCode,
+        errorReason: ReasonPhrase(reason),
+      );
+    }
+
     final (namespace, _) = MoQWireFormat.decodeTuple(data, 0);
     return PublishNamespaceCancelMessage(trackNamespace: namespace);
   }

@@ -10,6 +10,7 @@ import 'moq_messages.dart';
 /// from deltas as specified in draft-ietf-moq-transport-14 Section 10.4.2.
 class MoQDataStreamParser {
   final Logger _logger;
+  final int version;
 
   /// The parsed subgroup header (available after first chunk processed)
   SubgroupHeader? header;
@@ -29,10 +30,8 @@ class MoQDataStreamParser {
   /// Whether extensions are present (determined by header type)
   bool _extensionsPresent = false;
 
-  /// Whether the stream contains end of group
-  bool _containsEndOfGroup = false;
-
-  MoQDataStreamParser({Logger? logger}) : _logger = logger ?? Logger();
+  MoQDataStreamParser({Logger? logger, this.version = MoQVersion.draft14})
+      : _logger = logger ?? Logger();
 
   /// Parse a chunk of data from the stream
   ///
@@ -84,15 +83,29 @@ class MoQDataStreamParser {
       final (type, typeLen) = MoQWireFormat.decodeVarint(data, offset);
       offset += typeLen;
 
-      // Validate type is a SUBGROUP_HEADER (0x10-0x1D)
-      if (type < 0x10 || type > 0x1D) {
-        _logger.w('Invalid subgroup header type: 0x${type.toRadixString(16)}');
-        return null;
+      // Validate type based on version
+      bool defaultPriority = false;
+      bool endOfGroup = false;
+
+      if (MoQVersion.isDraft16OrLater(version)) {
+        // Draft-16: accept 0x10-0x1D and 0x30-0x3D
+        final masked = type & ~0x20; // mask out bit 5 for validation
+        if (masked < 0x10 || masked > 0x1D) {
+          _logger.w('Invalid draft-16 subgroup header type: 0x${type.toRadixString(16)}');
+          return null;
+        }
+        defaultPriority = (type & 0x20) != 0;
+        endOfGroup = (type & 0x08) != 0;
+      } else {
+        // Draft-14: validate 0x10-0x1D
+        if (type < 0x10 || type > 0x1D) {
+          _logger.w('Invalid subgroup header type: 0x${type.toRadixString(16)}');
+          return null;
+        }
       }
 
-      // Decode type flags per draft-14 Table 7
+      // Decode type flags
       _extensionsPresent = _hasExtensions(type);
-      _containsEndOfGroup = _hasEndOfGroup(type);
       final hasSubgroupIdField = _hasSubgroupIdField(type);
       final subgroupIdIsFirstObjectId = _subgroupIdIsFirstObjectId(type);
 
@@ -122,9 +135,15 @@ class MoQDataStreamParser {
         subgroupId = Int64(0);
       }
 
-      // Read Publisher Priority (1 byte)
-      if (offset >= data.length) return null;
-      final publisherPriority = data[offset++];
+      // Read Publisher Priority (1 byte) - skipped when draft-16 DEFAULT_PRIORITY bit is set
+      int publisherPriority = 0;
+      if (MoQVersion.isDraft16OrLater(version) && defaultPriority) {
+        // DEFAULT_PRIORITY bit set: Publisher Priority field is omitted
+        _logger.d('Draft-16 DEFAULT_PRIORITY set, skipping Publisher Priority byte');
+      } else {
+        if (offset >= data.length) return null;
+        publisherPriority = data[offset++];
+      }
 
       // Read extension headers if present
       final headers = <KeyValuePair>[];
@@ -138,6 +157,8 @@ class MoQDataStreamParser {
         subgroupId: subgroupId,
         publisherPriority: publisherPriority,
         extensionHeaders: headers,
+        useDefaultPriority: defaultPriority,
+        endOfGroup: endOfGroup,
       );
 
       // Remove parsed bytes from buffer
@@ -285,22 +306,22 @@ class MoQDataStreamParser {
     return (type & 0x01) == 1;
   }
 
-  /// Check if type indicates end of group
-  bool _hasEndOfGroup(int type) {
-    // Types 0x18-0x1D contain end of group
-    return type >= 0x18;
-  }
-
   /// Check if type has explicit Subgroup ID field
   bool _hasSubgroupIdField(int type) {
+    // Mask out bit 5 (0x20) to normalize draft-16 types into the 0x10-0x1D range
+    final normalized = type & ~0x20;
     // Types 0x14, 0x15, 0x1C, 0x1D have explicit Subgroup ID
-    return type == 0x14 || type == 0x15 || type == 0x1C || type == 0x1D;
+    return normalized == 0x14 || normalized == 0x15 ||
+           normalized == 0x1C || normalized == 0x1D;
   }
 
   /// Check if Subgroup ID is derived from first Object ID
   bool _subgroupIdIsFirstObjectId(int type) {
+    // Mask out bit 5 (0x20) to normalize draft-16 types into the 0x10-0x1D range
+    final normalized = type & ~0x20;
     // Types 0x12, 0x13, 0x1A, 0x1B use first Object ID as Subgroup ID
-    return type == 0x12 || type == 0x13 || type == 0x1A || type == 0x1B;
+    return normalized == 0x12 || normalized == 0x13 ||
+           normalized == 0x1A || normalized == 0x1B;
   }
 
   /// Reset the parser state
@@ -309,7 +330,6 @@ class MoQDataStreamParser {
     _buffer.clear();
     _currentObjectId = Int64(0);
     _extensionsPresent = false;
-    _containsEndOfGroup = false;
   }
 
   /// Get remaining buffered bytes

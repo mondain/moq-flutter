@@ -20,16 +20,13 @@ class MoQPublisher {
 
   // Publisher state
   bool _isAnnounced = false;
-  Int64? _namespaceRequestId;
   List<Uint8List>? _namespace;
   String? _namespaceStr;
 
   // Catalog management
   MoQCatalog? _catalog;
-  int? _catalogStreamId;
   Int64 _catalogGroupId = Int64(0);
   Int64 _catalogObjectId = Int64(0);
-  bool _catalogDirty = false;
 
   // Track management
   final _tracks = <String, PublisherTrack>{};
@@ -71,7 +68,7 @@ class MoQPublisher {
     _namespace = namespaceParts.map((p) => Uint8List.fromList(p.codeUnits)).toList();
 
     try {
-      _namespaceRequestId = await _client.announceNamespace(_namespace!);
+      await _client.announceNamespace(_namespace!);
       _isAnnounced = true;
       _logger.i('Namespace announced: $_namespaceStr');
 
@@ -132,8 +129,6 @@ class MoQPublisher {
       // Finish the catalog stream
       await _client.finishDataStream(streamId);
 
-      _catalogStreamId = streamId;
-      _catalogDirty = false;
       _logger.i('Published catalog (${catalogBytes.length} bytes, group: $_catalogGroupId)');
     } catch (e) {
       _logger.e('Failed to publish catalog: $e');
@@ -179,9 +174,6 @@ class MoQPublisher {
 
     _tracks[trackName] = track;
     _logger.d('Added track: $trackName (alias: $alias)');
-
-    // Mark catalog as needing update
-    _catalogDirty = true;
 
     return alias;
   }

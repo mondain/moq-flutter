@@ -3,19 +3,22 @@ import UIKit
 import AVFoundation
 
 @main
-@objc class AppDelegate: FlutterAppDelegate {
+@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    GeneratedPluginRegistrant.register(with: self)
+    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    // Plugin registration moved here for UIScene lifecycle support
+    GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
 
     // Register native capture plugin
-    if let registrar = self.registrar(forPlugin: "NativeCapturePlugin") {
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "NativeCapturePlugin") {
       NativeCapturePlugin.register(with: registrar)
     }
-
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 }
 

@@ -33,7 +33,7 @@ flutter analyze
 
 ## Architecture Overview
 
-This is a Media over QUIC (MoQ) Flutter client implementing [draft-ietf-moq-transport-14](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/14/). A reference publisher app exists at `../moq-pub` for testing.
+This is a Media over QUIC (MoQ) Flutter client implementing [draft-ietf-moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) with support for both draft-14 and draft-16. A reference publisher app exists at `../moq-pub` for testing.
 
 ### Layer Structure
 
@@ -51,12 +51,14 @@ This is a Media over QUIC (MoQ) Flutter client implementing [draft-ietf-moq-tran
    - `moq_messages_data.dart`: Data messages (OBJECT_DATAGRAM, SUBGROUP_HEADER)
    - `moq_messages_publish.dart`: Publish-related messages
    - `moq_data_parser.dart`: Stateful incremental parser for SUBGROUP_HEADER + object sequences; handles delta-plus-one object ID encoding and moq-mi extension headers (even type = varint value, odd type = length-prefixed buffer)
+   - **Version-Aware Message System**: `MoQVersion` class provides version constants and helper methods (`isDraft16OrLater()`, `usesDeltaKvp()`); `MoQMessageType.fromValue(value, version:)` enables version-aware type dispatch; serialize/deserialize methods accept `{int version}` parameter for draft-specific encoding; KVP encoding uses delta mode for draft-15+ via `encodeKeyValuePairs(params, useDelta: true)`; draft-16 introduces new message types (`RequestOkMessage`, `RequestErrorMessage`, `NamespaceMessage`, `NamespaceDoneMessage`) and parameter type classes (`SubscribeParameterType`, `TrackPropertyType`, `SubscribeOptions`)
 
 3. **Client Layer** (`lib/moq/client/moq_client.dart`)
    - `MoQClient`: Main client handling connection, subscriptions, and namespace announcements
    - Request ID parity: client uses even IDs (0, 2, 4...), server uses odd IDs, incremented by 2
    - Track alias mapping via `_trackAliases: Map<Int64, TrackInfo>`
    - `ReplayStreamController` (`replay_stream.dart`): Buffers last N events (default 60) for late-joining subscribers; delivers buffered events synchronously before live subscription starts
+   - `connect()` accepts `targetVersion` parameter for draft-16 ALPN-based negotiation; for draft-16, version is set before CLIENT_SETUP (from ALPN) rather than from SERVER_SETUP response
 
 4. **Publisher Layer** (`lib/moq/publisher/`) - Three publishers with distinct packaging:
    - `MoQPublisher`: Base publisher, raw LOC format, manual group/subgroup management
@@ -98,7 +100,7 @@ The `native/moq_quic/` directory contains a Rust library using Quinn for QUIC tr
 - Types 0x14/0x15/0x1C/0x1D: explicit Subgroup ID
 - Types 0x12/0x13/0x1A/0x1B: Subgroup ID = first Object ID
 
-**Draft versions**: `0xff000000 + draft_number`. Draft-14 = `0xff00000e`.
+**Draft versions**: `0xff000000 + draft_number`. Draft-14 = `0xff00000e`, Draft-16 = `0xff000010`. `MoQVersion` class provides `isDraft16OrLater()` and `usesDeltaKvp()` helpers.
 
 **Int64 usage**: `package:fixnum` `Int64` is used throughout for group IDs, object IDs, and timestamps to ensure correct 64-bit arithmetic across all platforms.
 
@@ -113,7 +115,8 @@ Tests use `MockMoQTransport` (in `test/moq/client/client_integration_test.dart`)
 ### Reference Specifications
 
 Draft specs and RFCs are stored as `.txt` files in `docs/` for easy parsing. Key specs:
-- `draft-ietf-moq-transport-14.txt`: Primary spec being implemented
+- `draft-ietf-moq-transport-14.txt`: Primary spec (draft-14)
+- `draft-ietf-moq-transport-16.txt`: Primary spec (draft-16)
 - `draft-cenzano-moq-media-interop-03.txt`: moq-mi packaging spec
 - `draft-law-moq-carp-00.txt`: CARP streaming (used by CmafPublisher)
 - `draft-ietf-moq-loc-01.txt`: LOC container spec

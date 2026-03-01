@@ -12,6 +12,13 @@
 .swiftpm/
 migrate_working_dir/
 
+# Generated for native
+native/moq_quic/build/
+
+# Cocoapods related
+ios/Podfile.lock
+macos/Podfile.lock
+
 # IntelliJ related
 *.iml
 *.ipr
@@ -62,3 +69,4 @@ target
 **/mutants.out*/
 .claude/settings.local.json
 linux/*.so
+

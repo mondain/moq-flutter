@@ -306,6 +306,114 @@ class MoQWireFormat {
     }
     return size;
   }
+
+  /// Encode Key-Value-Pairs to bytes.
+  ///
+  /// When [useDelta] is true (draft-16+), params are sorted by type ascending
+  /// and the type field is encoded as the delta from the previous type.
+  static Uint8List encodeKeyValuePairs(List<KeyValuePair> params,
+      {bool useDelta = false}) {
+    final sorted = useDelta
+        ? (List<KeyValuePair>.from(params)
+          ..sort((a, b) => a.type.compareTo(b.type)))
+        : params;
+
+    // Calculate total size
+    int totalSize = _varintSize(sorted.length);
+    int lastType = 0;
+    for (final param in sorted) {
+      final typeToWrite = useDelta ? (param.type - lastType) : param.type;
+      totalSize += _varintSize(typeToWrite);
+      if (param.isVarintType) {
+        totalSize += _varintSize(param.intValue ?? 0);
+      } else if (param.value != null) {
+        totalSize +=
+            _varintSize(param.value!.length) + param.value!.length;
+      } else {
+        totalSize += _varintSize(0);
+      }
+      if (useDelta) lastType = param.type;
+    }
+
+    final buffer = Uint8List(totalSize);
+    int offset = 0;
+    lastType = 0;
+
+    // Write count
+    final countBytes = encodeVarint(sorted.length);
+    buffer.setAll(offset, countBytes);
+    offset += countBytes.length;
+
+    // Write each param
+    for (final param in sorted) {
+      final typeToWrite = useDelta ? (param.type - lastType) : param.type;
+      final typeBytes = encodeVarint(typeToWrite);
+      buffer.setAll(offset, typeBytes);
+      offset += typeBytes.length;
+
+      if (param.isVarintType) {
+        final valBytes = encodeVarint(param.intValue ?? 0);
+        buffer.setAll(offset, valBytes);
+        offset += valBytes.length;
+      } else if (param.value != null) {
+        final lenBytes = encodeVarint(param.value!.length);
+        buffer.setAll(offset, lenBytes);
+        offset += lenBytes.length;
+        buffer.setAll(offset, param.value!);
+        offset += param.value!.length;
+      } else {
+        final lenBytes = encodeVarint(0);
+        buffer.setAll(offset, lenBytes);
+        offset += lenBytes.length;
+      }
+      if (useDelta) lastType = param.type;
+    }
+
+    return buffer;
+  }
+
+  /// Decode Key-Value-Pairs from bytes.
+  ///
+  /// When [useDelta] is true (draft-16+), type fields are delta-encoded
+  /// from the previous type; this method reconstructs absolute types.
+  /// Returns (params, bytesRead) starting from [offset] in [data].
+  /// [count] is the number of params to read (already decoded by caller).
+  static (List<KeyValuePair> params, int bytesRead) decodeKeyValuePairs(
+      Uint8List data, int offset, int count,
+      {bool useDelta = false}) {
+    final startOffset = offset;
+    final params = <KeyValuePair>[];
+    int lastType = 0;
+
+    for (int i = 0; i < count; i++) {
+      final (rawType, typeLen) = decodeVarint(data, offset);
+      offset += typeLen;
+
+      final absoluteType = useDelta ? (lastType + rawType) : rawType;
+
+      if (absoluteType % 2 == 0) {
+        // Even types: value is direct varint
+        final (intValue, intLen) = decodeVarint(data, offset);
+        offset += intLen;
+        params.add(KeyValuePair(type: absoluteType, intValue: intValue));
+      } else {
+        // Odd types: value is length-prefixed buffer
+        final (length, lengthLen) = decodeVarint(data, offset);
+        offset += lengthLen;
+        if (length > 0 && offset + length > data.length) {
+          throw FormatException(
+              'Unexpected end of key-value pair buffer: need $length bytes, have ${data.length - offset}');
+        }
+        final value =
+            length > 0 ? data.sublist(offset, offset + length) : null;
+        offset += length;
+        params.add(KeyValuePair(type: absoluteType, value: value));
+      }
+      if (useDelta) lastType = absoluteType;
+    }
+
+    return (params, offset - startOffset);
+  }
 }
 
 /// Control message parser
@@ -317,7 +425,8 @@ class MoQControlMessageParser {
   ///
   /// Returns (message, totalBytesRead) where totalBytesRead includes
   /// the message type, length, and payload
-  static (MoQControlMessage? message, int bytesRead) parse(Uint8List data) {
+  static (MoQControlMessage? message, int bytesRead) parse(Uint8List data,
+      {int version = MoQVersion.draft14}) {
     if (data.isEmpty) {
       return (null, 0);
     }
@@ -353,8 +462,8 @@ class MoQControlMessageParser {
     final payload = data.sublist(offset, offset + length);
     final totalBytesRead = offset + length;
 
-    // Parse based on message type
-    final messageType = MoQMessageType.fromValue(type);
+    // Parse based on message type (version-aware for type-code collisions)
+    final messageType = MoQMessageType.fromValue(type, version: version);
     if (enableDebugLogging) {
       print('[MoQParser] MessageType enum: $messageType');
       print('[MoQParser] Payload: ${payload.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
@@ -366,7 +475,7 @@ class MoQControlMessageParser {
 
     MoQControlMessage? message;
     try {
-      message = _parseMessage(messageType, payload);
+      message = _parseMessage(messageType, payload, version: version);
       if (enableDebugLogging) {
         print('[MoQParser] Parsed message: ${message?.type}');
       }
@@ -382,68 +491,78 @@ class MoQControlMessageParser {
     return (message, totalBytesRead);
   }
 
-  static MoQControlMessage? _parseMessage(MoQMessageType type, Uint8List payload) {
+  static MoQControlMessage? _parseMessage(MoQMessageType type, Uint8List payload,
+      {int version = MoQVersion.draft14}) {
     switch (type) {
       case MoQMessageType.clientSetup:
-        return ClientSetupMessage.deserialize(payload);
+        return ClientSetupMessage.deserialize(payload, version: version);
       case MoQMessageType.serverSetup:
-        return ServerSetupMessage.deserialize(payload);
+        return ServerSetupMessage.deserialize(payload, version: version);
       case MoQMessageType.subscribe:
-        return SubscribeMessage.deserialize(payload);
+        return SubscribeMessage.deserialize(payload, version: version);
       case MoQMessageType.subscribeOk:
-        return SubscribeOkMessage.deserialize(payload);
+        return SubscribeOkMessage.deserialize(payload, version: version);
       case MoQMessageType.subscribeError:
-        return SubscribeErrorMessage.deserialize(payload);
+        return SubscribeErrorMessage.deserialize(payload, version: version);
       case MoQMessageType.subscribeUpdate:
-        return SubscribeUpdateMessage.deserialize(payload);
+        return SubscribeUpdateMessage.deserialize(payload, version: version);
       case MoQMessageType.unsubscribe:
-        return UnsubscribeMessage.deserialize(payload);
+        return UnsubscribeMessage.deserialize(payload, version: version);
       case MoQMessageType.goaway:
-        return GoawayMessage.deserialize(payload);
+        return GoawayMessage.deserialize(payload, version: version);
       case MoQMessageType.publishDone:
-        return PublishDoneMessage.deserialize(payload);
+        return PublishDoneMessage.deserialize(payload, version: version);
       case MoQMessageType.fetch:
-        return FetchMessage.deserialize(payload);
+        return FetchMessage.deserialize(payload, version: version);
       case MoQMessageType.fetchOk:
-        return FetchOkMessage.deserialize(payload);
+        return FetchOkMessage.deserialize(payload, version: version);
       case MoQMessageType.fetchError:
-        return FetchErrorMessage.deserialize(payload);
+        return FetchErrorMessage.deserialize(payload, version: version);
       case MoQMessageType.fetchCancel:
-        return FetchCancelMessage.deserialize(payload);
+        return FetchCancelMessage.deserialize(payload, version: version);
       case MoQMessageType.publish:
-        return PublishMessage.deserialize(payload);
+        return PublishMessage.deserialize(payload, version: version);
       case MoQMessageType.publishOk:
-        return PublishOkMessage.deserialize(payload);
+        return PublishOkMessage.deserialize(payload, version: version);
       case MoQMessageType.publishError:
-        return PublishErrorMessage.deserialize(payload);
+        return PublishErrorMessage.deserialize(payload, version: version);
       case MoQMessageType.maxRequestId:
-        return MaxRequestIdMessage.deserialize(payload);
+        return MaxRequestIdMessage.deserialize(payload, version: version);
       case MoQMessageType.requestsBlocked:
-        return RequestsBlockedMessage.deserialize(payload);
+        return RequestsBlockedMessage.deserialize(payload, version: version);
       case MoQMessageType.trackStatus:
-        return TrackStatusMessage.deserialize(payload);
+        return TrackStatusMessage.deserialize(payload, version: version);
       case MoQMessageType.trackStatusOk:
-        return TrackStatusOkMessage.deserialize(payload);
+        return TrackStatusOkMessage.deserialize(payload, version: version);
       case MoQMessageType.trackStatusError:
-        return TrackStatusErrorMessage.deserialize(payload);
+        return TrackStatusErrorMessage.deserialize(payload, version: version);
       case MoQMessageType.publishNamespace:
-        return PublishNamespaceMessage.deserialize(payload);
+        return PublishNamespaceMessage.deserialize(payload, version: version);
       case MoQMessageType.publishNamespaceOk:
-        return PublishNamespaceOkMessage.deserialize(payload);
+        return PublishNamespaceOkMessage.deserialize(payload, version: version);
       case MoQMessageType.publishNamespaceError:
-        return PublishNamespaceErrorMessage.deserialize(payload);
+        return PublishNamespaceErrorMessage.deserialize(payload, version: version);
       case MoQMessageType.publishNamespaceDone:
-        return PublishNamespaceDoneMessage.deserialize(payload);
+        return PublishNamespaceDoneMessage.deserialize(payload, version: version);
       case MoQMessageType.publishNamespaceCancel:
-        return PublishNamespaceCancelMessage.deserialize(payload);
+        return PublishNamespaceCancelMessage.deserialize(payload, version: version);
       case MoQMessageType.subscribeNamespace:
-        return SubscribeNamespaceMessage.deserialize(payload);
+        return SubscribeNamespaceMessage.deserialize(payload, version: version);
       case MoQMessageType.subscribeNamespaceOk:
-        return SubscribeNamespaceOkMessage.deserialize(payload);
+        return SubscribeNamespaceOkMessage.deserialize(payload, version: version);
       case MoQMessageType.subscribeNamespaceError:
-        return SubscribeNamespaceErrorMessage.deserialize(payload);
+        return SubscribeNamespaceErrorMessage.deserialize(payload, version: version);
       case MoQMessageType.unsubscribeNamespace:
-        return UnsubscribeNamespaceMessage.deserialize(payload);
+        return UnsubscribeNamespaceMessage.deserialize(payload, version: version);
+      // Draft-16 new messages
+      case MoQMessageType.requestOk:
+        return RequestOkMessage.deserialize(payload, version: version);
+      case MoQMessageType.requestError:
+        return RequestErrorMessage.deserialize(payload, version: version);
+      case MoQMessageType.namespace_:
+        return NamespaceMessage.deserialize(payload, version: version);
+      case MoQMessageType.namespaceDone:
+        return NamespaceDoneMessage.deserialize(payload, version: version);
       default:
         // Unknown or unimplemented message type
         return null;
