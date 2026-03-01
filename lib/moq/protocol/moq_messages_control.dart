@@ -50,19 +50,8 @@ class ClientSetupMessage extends MoQControlMessage {
       }
     }
 
-    // Parameters (uses KVP encoding helper for size calc)
-    len += MoQWireFormat._varintSize(parameters.length);
-    int lastType = 0;
-    for (final param in parameters) {
-      final typeToWrite = useDelta ? (param.type - lastType) : param.type;
-      len += MoQWireFormat._varintSize(typeToWrite);
-      if (param.isVarintType) {
-        len += MoQWireFormat._varintSize(param.intValue ?? 0);
-      } else if (param.value != null) {
-        len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
-      }
-      if (useDelta) lastType = param.type;
-    }
+    // Parameters
+    len += MoQWireFormat.encodeKeyValuePairs(parameters, useDelta: useDelta).length;
     return len;
   }
 
@@ -81,20 +70,9 @@ class ClientSetupMessage extends MoQControlMessage {
     }
 
     // Write parameters
-    offset += _writeVarint(payload, offset, parameters.length);
-    int lastType = 0;
-    for (final param in parameters) {
-      final typeToWrite = useDelta ? (param.type - lastType) : param.type;
-      offset += _writeVarint(payload, offset, typeToWrite);
-      if (param.isVarintType) {
-        offset += _writeVarint(payload, offset, param.intValue ?? 0);
-      } else if (param.value != null) {
-        offset += _writeVarint(payload, offset, param.value!.length);
-        payload.setAll(offset, param.value!);
-        offset += param.value!.length;
-      }
-      if (useDelta) lastType = param.type;
-    }
+    final kvpBytes = MoQWireFormat.encodeKeyValuePairs(parameters, useDelta: useDelta);
+    payload.setAll(offset, kvpBytes);
+    offset += kvpBytes.length;
 
     return _wrapMessage(payload);
   }
@@ -192,18 +170,7 @@ class ServerSetupMessage extends MoQControlMessage {
       len += MoQWireFormat._varintSize(selectedVersion);
     }
 
-    len += MoQWireFormat._varintSize(parameters.length);
-    int lastType = 0;
-    for (final param in parameters) {
-      final typeToWrite = useDelta ? (param.type - lastType) : param.type;
-      len += MoQWireFormat._varintSize(typeToWrite);
-      if (param.isVarintType) {
-        len += MoQWireFormat._varintSize(param.intValue ?? 0);
-      } else if (param.value != null) {
-        len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
-      }
-      if (useDelta) lastType = param.type;
-    }
+    len += MoQWireFormat.encodeKeyValuePairs(parameters, useDelta: useDelta).length;
     return len;
   }
 
@@ -219,20 +186,9 @@ class ServerSetupMessage extends MoQControlMessage {
     }
 
     // Write parameters
-    offset += _writeVarint(payload, offset, parameters.length);
-    int lastType = 0;
-    for (final param in parameters) {
-      final typeToWrite = useDelta ? (param.type - lastType) : param.type;
-      offset += _writeVarint(payload, offset, typeToWrite);
-      if (param.isVarintType) {
-        offset += _writeVarint(payload, offset, param.intValue ?? 0);
-      } else if (param.value != null) {
-        offset += _writeVarint(payload, offset, param.value!.length);
-        payload.setAll(offset, param.value!);
-        offset += param.value!.length;
-      }
-      if (useDelta) lastType = param.type;
-    }
+    final kvpBytes = MoQWireFormat.encodeKeyValuePairs(parameters, useDelta: useDelta);
+    payload.setAll(offset, kvpBytes);
+    offset += kvpBytes.length;
 
     return _wrapMessage(payload);
   }
