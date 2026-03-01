@@ -1,7 +1,6 @@
 import 'dart:ui' as ui;
 import 'package:camera/camera.dart' show CameraPreview;
 import 'package:flutter/material.dart';
-import 'package:sizer/sizer.dart';
 import '../moq/media/camera_capture.dart';
 import '../moq/media/linux_capture.dart';
 
@@ -43,20 +42,16 @@ class VideoPreview extends StatelessWidget {
               : Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const CircularProgressIndicator(
+                    children: const [
+                      CircularProgressIndicator(
                         valueColor: AlwaysStoppedAnimation<Color>(Colors.green),
                       ),
-                      SizedBox(height: 1.h),
+                      SizedBox(height: 8),
                       Text(
                         'Starting webcam...',
-                        style: TextStyle(color: Colors.white70, fontSize: 12.sp),
+                        style: TextStyle(color: Colors.white70, fontSize: 15),
                       ),
-                      SizedBox(height: 0.5.h),
-                      Text(
-                        '$publishedFrames frames',
-                        style: TextStyle(color: Colors.white54, fontSize: 10.sp),
-                      ),
+                      SizedBox(height: 4),
                     ],
                   ),
                 ),
@@ -73,17 +68,17 @@ class VideoPreview extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.videocam_off, size: 6.h, color: Colors.white54),
-              SizedBox(height: 1.h),
+              const Icon(Icons.videocam_off, size: 48, color: Colors.white54),
+              const SizedBox(height: 8),
               Text(
                 videoCapture == null ? 'Camera not available' : 'Camera initializing...',
-                style: TextStyle(color: Colors.white54, fontSize: 12.sp),
+                style: const TextStyle(color: Colors.white54, fontSize: 15),
               ),
               if (videoCapture == null) ...[
-                SizedBox(height: 0.5.h),
-                Text(
+                const SizedBox(height: 4),
+                const Text(
                   '(Publishing test frames)',
-                  style: TextStyle(color: Colors.white38, fontSize: 10.sp),
+                  style: TextStyle(color: Colors.white38, fontSize: 13),
                 ),
               ],
             ],

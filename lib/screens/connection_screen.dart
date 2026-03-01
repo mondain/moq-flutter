@@ -2,7 +2,6 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:sizer/sizer.dart';
 import '../moq/protocol/moq_messages.dart';
 import '../providers/moq_providers.dart';
 import '../widgets/connection_status_card.dart';
@@ -194,7 +193,7 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('MoQ Flutter Client', style: TextStyle(fontSize: 14.sp)),
+        title: const Text('MoQ Flutter Client', style: TextStyle(fontSize: 18)),
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
@@ -203,34 +202,34 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
         ],
       ),
       body: SingleChildScrollView(
-        padding: EdgeInsets.all(4.w),
+        padding: const EdgeInsets.all(16),
         child: Center(
           child: ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: 600),
+            constraints: const BoxConstraints(maxWidth: 600),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 // Connection Status
                 ConnectionStatusCard(statusMessage: _statusMessage),
-                SizedBox(height: 2.h),
+                const SizedBox(height: 16),
 
                 // Role selector
                 Text(
                   'Client Role',
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(fontSize: 12.sp),
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(fontSize: 15),
                 ),
-                SizedBox(height: 1.h),
+                const SizedBox(height: 8),
                 SegmentedButton<ClientRole>(
-                  segments: [
+                  segments: const [
                     ButtonSegment(
                       value: ClientRole.subscriber,
-                      label: Text('Subscribe', style: TextStyle(fontSize: 11.sp)),
-                      icon: const Icon(Icons.download),
+                      label: Text('Subscribe', style: TextStyle(fontSize: 14)),
+                      icon: Icon(Icons.download),
                     ),
                     ButtonSegment(
                       value: ClientRole.publisher,
-                      label: Text('Publish', style: TextStyle(fontSize: 11.sp)),
-                      icon: const Icon(Icons.upload),
+                      label: Text('Publish', style: TextStyle(fontSize: 14)),
+                      icon: Icon(Icons.upload),
                     ),
                   ],
                   selected: {_clientRole},
@@ -240,25 +239,25 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                           setState(() => _clientRole = newSelection.first);
                         },
                 ),
-                SizedBox(height: 2.h),
+                const SizedBox(height: 16),
 
                 // Transport type selector
                 Text(
                   'Transport Type',
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(fontSize: 12.sp),
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(fontSize: 15),
                 ),
-                SizedBox(height: 1.h),
+                const SizedBox(height: 8),
                 SegmentedButton<TransportType>(
-                  segments: [
+                  segments: const [
                     ButtonSegment(
                       value: TransportType.moqt,
-                      label: Text('Raw QUIC', style: TextStyle(fontSize: 11.sp)),
-                      icon: const Icon(Icons.router),
+                      label: Text('Raw QUIC', style: TextStyle(fontSize: 14)),
+                      icon: Icon(Icons.router),
                     ),
                     ButtonSegment(
                       value: TransportType.webtransport,
-                      label: Text('WebTransport', style: TextStyle(fontSize: 11.sp)),
-                      icon: const Icon(Icons.http),
+                      label: Text('WebTransport', style: TextStyle(fontSize: 14)),
+                      icon: Icon(Icons.http),
                     ),
                   ],
                   selected: {_transportType},
@@ -270,7 +269,7 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                           ref.read(transportTypeProvider.notifier).setTransportType(newType);
                         },
                 ),
-                SizedBox(height: 2.h),
+                const SizedBox(height: 16),
 
                 // Server configuration
                 ServerConfigCard(
@@ -285,7 +284,7 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                   },
                   enabled: !isConnected && !_isLoading,
                 ),
-                SizedBox(height: 2.h),
+                const SizedBox(height: 16),
 
                 // Track configuration
                 TrackConfigCard(
@@ -294,16 +293,16 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                   isPublisher: _clientRole == ClientRole.publisher,
                   enabled: !isConnected && !_isLoading,
                 ),
-                SizedBox(height: 3.h),
+                const SizedBox(height: 24),
 
                 // Connect button
                 FilledButton.icon(
                   onPressed: (isConnected || _isLoading) ? null : _connect,
                   icon: _isLoading
-                      ? SizedBox(
-                          height: 2.5.h,
-                          width: 2.5.h,
-                          child: const CircularProgressIndicator(
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
                             strokeWidth: 2,
                             color: Colors.white,
                           ),
@@ -317,7 +316,7 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                         : _clientRole == ClientRole.subscriber
                             ? 'Connect & Subscribe'
                             : 'Connect & Publish',
-                    style: TextStyle(fontSize: 12.sp),
+                    style: const TextStyle(fontSize: 15),
                   ),
                 ),
               ],
