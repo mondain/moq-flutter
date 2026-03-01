@@ -936,8 +936,10 @@ class SubscribeOkMessage extends MoQControlMessage {
         switch (param.type) {
           case TrackPropertyType.expires:
             expires = Int64(param.intValue ?? 0);
+            break;
           case SubscribeParameterType.groupOrder:
             groupOrder = GroupOrder.fromValue(param.intValue ?? 0) ?? GroupOrder.none;
+            break;
           case TrackPropertyType.largestObject:
             // Buffer containing Location
             if (param.value != null && param.value!.isNotEmpty) {
@@ -945,8 +947,10 @@ class SubscribeOkMessage extends MoQControlMessage {
               largestLocation = loc;
               contentExists = 1;
             }
+            break;
           default:
             remainingParams.add(param);
+            break;
         }
       }
 
