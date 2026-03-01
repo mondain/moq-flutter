@@ -50,7 +50,7 @@ class ClientSetupMessage extends MoQControlMessage {
       }
     }
 
-    // Parameters
+    // Parameters: use encodeKeyValuePairs for correct sorting and null-value handling
     len += MoQWireFormat.encodeKeyValuePairs(parameters, useDelta: useDelta).length;
     return len;
   }
@@ -69,7 +69,7 @@ class ClientSetupMessage extends MoQControlMessage {
       }
     }
 
-    // Write parameters
+    // Write parameters (includes count, sorted and null-safe via encodeKeyValuePairs)
     final kvpBytes = MoQWireFormat.encodeKeyValuePairs(parameters, useDelta: useDelta);
     payload.setAll(offset, kvpBytes);
     offset += kvpBytes.length;
@@ -170,6 +170,7 @@ class ServerSetupMessage extends MoQControlMessage {
       len += MoQWireFormat._varintSize(selectedVersion);
     }
 
+    // Parameters: use encodeKeyValuePairs for correct sorting and null-value handling
     len += MoQWireFormat.encodeKeyValuePairs(parameters, useDelta: useDelta).length;
     return len;
   }
@@ -185,7 +186,7 @@ class ServerSetupMessage extends MoQControlMessage {
       offset += _writeVarint(payload, offset, selectedVersion);
     }
 
-    // Write parameters
+    // Write parameters (includes count, sorted and null-safe via encodeKeyValuePairs)
     final kvpBytes = MoQWireFormat.encodeKeyValuePairs(parameters, useDelta: useDelta);
     payload.setAll(offset, kvpBytes);
     offset += kvpBytes.length;
