@@ -2326,36 +2326,22 @@ class RequestOkMessage extends MoQControlMessage {
   @override
   int get payloadLength {
     int len = MoQWireFormat._varintSize64(requestId);
-    len += MoQWireFormat._varintSize(parameters.length);
-    int lastType = 0;
-    for (final param in parameters) {
-      final delta = param.type - lastType;
-      len += MoQWireFormat._varintSize(delta);
-      if (param.isVarintType) {
-        len += MoQWireFormat._varintSize(param.intValue ?? 0);
-      } else if (param.value != null) {
-        len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
-      } else {
-        len += MoQWireFormat._varintSize(0);
-      }
-      lastType = param.type;
-    }
+    len += MoQWireFormat.encodeKeyValuePairs(parameters, useDelta: true).length;
     return len;
   }
 
   @override
   Uint8List serialize({int version = MoQVersion.draft14}) {
-    final payload = Uint8List(payloadLength);
-    int offset = 0;
-
     final reqIdBytes = MoQWireFormat.encodeVarint64(requestId);
+    // Always delta KVP (this is a draft-16 message); encodeKeyValuePairs sorts
+    // parameters by type before encoding, so compute kvpBytes first to size the
+    // payload buffer correctly regardless of the caller's parameter order.
+    final kvpBytes = MoQWireFormat.encodeKeyValuePairs(parameters, useDelta: true);
+    final payload = Uint8List(reqIdBytes.length + kvpBytes.length);
+    int offset = 0;
     payload.setAll(offset, reqIdBytes);
     offset += reqIdBytes.length;
-
-    // Always delta KVP (this is a draft-16 message)
-    final kvpBytes = MoQWireFormat.encodeKeyValuePairs(parameters, useDelta: true);
     payload.setAll(offset, kvpBytes);
-
     return _wrapMessage(payload);
   }
 
