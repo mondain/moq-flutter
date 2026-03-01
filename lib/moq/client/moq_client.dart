@@ -1153,21 +1153,6 @@ class MoQClient {
     _logger.d('Delivered ${isVideo ? "video" : isAudio ? "audio" : "unknown"} object ${obj.objectId} to subscription ${targetSubscription.id}');
   }
 
-  /// Check if subscription matches track info
-  bool _tracksMatch(MoQSubscription sub, TrackInfo trackInfo) {
-    // Compare namespace
-    if (sub.trackNamespace.length != trackInfo.namespace.length) {
-      return false;
-    }
-    for (int i = 0; i < sub.trackNamespace.length; i++) {
-      if (!_bytesEqual(sub.trackNamespace[i], trackInfo.namespace[i])) {
-        return false;
-      }
-    }
-    // Compare track name
-    return _bytesEqual(sub.trackName, trackInfo.name);
-  }
-
   /// Compare two byte arrays for equality
   bool _bytesEqual(Uint8List a, Uint8List b) {
     if (a.length != b.length) return false;
@@ -2341,7 +2326,6 @@ class MoQFetch {
   GroupOrder? _groupOrder;
   bool? _endOfTrack;
   Location? _endLocation;
-  List<KeyValuePair>? _parameters;
 
   final Completer<FetchResult> _responseCompleter = Completer<FetchResult>();
   final _objectController = StreamController<MoQObject>.broadcast();
@@ -2402,7 +2386,6 @@ class MoQFetch {
     _groupOrder = groupOrder;
     _endOfTrack = endOfTrack;
     _endLocation = endLocation;
-    _parameters = parameters;
 
     _responseCompleter.complete(FetchResult(
       groupOrder: groupOrder,

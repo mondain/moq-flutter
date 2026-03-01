@@ -30,9 +30,6 @@ class MoQDataStreamParser {
   /// Whether extensions are present (determined by header type)
   bool _extensionsPresent = false;
 
-  /// Whether the stream contains end of group
-  bool _containsEndOfGroup = false;
-
   MoQDataStreamParser({Logger? logger, this.version = MoQVersion.draft14})
       : _logger = logger ?? Logger();
 
@@ -109,7 +106,6 @@ class MoQDataStreamParser {
 
       // Decode type flags
       _extensionsPresent = _hasExtensions(type);
-      _containsEndOfGroup = _hasEndOfGroup(type);
       final hasSubgroupIdField = _hasSubgroupIdField(type);
       final subgroupIdIsFirstObjectId = _subgroupIdIsFirstObjectId(type);
 
@@ -310,16 +306,6 @@ class MoQDataStreamParser {
     return (type & 0x01) == 1;
   }
 
-  /// Check if type indicates end of group
-  bool _hasEndOfGroup(int type) {
-    if (MoQVersion.isDraft16OrLater(version)) {
-      // Draft-16: bit 3 (0x08) is END_OF_GROUP
-      return (type & 0x08) != 0;
-    }
-    // Draft-14: types 0x18-0x1D contain end of group
-    return type >= 0x18;
-  }
-
   /// Check if type has explicit Subgroup ID field
   bool _hasSubgroupIdField(int type) {
     // Mask out bit 5 (0x20) to normalize draft-16 types into the 0x10-0x1D range
@@ -344,7 +330,6 @@ class MoQDataStreamParser {
     _buffer.clear();
     _currentObjectId = Int64(0);
     _extensionsPresent = false;
-    _containsEndOfGroup = false;
   }
 
   /// Get remaining buffered bytes

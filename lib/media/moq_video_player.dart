@@ -45,7 +45,6 @@ class MoQVideoPlayer {
 
   // Media paths
   String? _videoPath;
-  String? _audioPath;
 
   MoQVideoPlayer({Logger? logger})
       : _logger = logger ?? Logger(),
@@ -287,7 +286,6 @@ class MoQVideoPlayer {
 
   void _handleAudioReady(String audioPath) {
     _logger.i('Audio file ready at: $audioPath');
-    _audioPath = audioPath;
 
     // We prefer to wait for video before starting playback
     // If video becomes available, we'll play video

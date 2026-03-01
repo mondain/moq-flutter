@@ -108,7 +108,6 @@ class FFmpegMediaEncoder implements MediaEncoder {
 
   // Frame counters
   int _videoFrameCount = 0;
-  int _audioFrameCount = 0;
 
   // Buffer for incomplete frames
   final _videoBuffer = <Uint8List>[];
@@ -135,7 +134,6 @@ class FFmpegMediaEncoder implements MediaEncoder {
     _logger.i('Starting FFmpeg encoder');
     _isRunning = true;
     _videoFrameCount = 0;
-    _audioFrameCount = 0;
 
     // Create temp directory if needed
     final dir = Directory(_tempDir);
@@ -173,7 +171,6 @@ class FFmpegMediaEncoder implements MediaEncoder {
     if (!_isRunning) return;
 
     _audioBuffer.add(samples);
-    _audioFrameCount++;
 
     // Encode audio segments periodically
     final samplesPerSegment =
