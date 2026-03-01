@@ -63,6 +63,32 @@ void main() {
       expect(result.parameters[1].type, equals(0x08));
       expect(result.parameters[1].intValue, equals(300));
     });
+
+    test('out-of-order parameters are sorted and round-trip correctly', () {
+      // Parameters passed in descending type order; encodeKeyValuePairs sorts
+      // them ascending before delta-encoding, so payloadLength must agree.
+      final msg = RequestOkMessage(
+        requestId: Int64(5),
+        parameters: [
+          KeyValuePair.varint(0x08, 200),
+          KeyValuePair.varint(0x02, 50),
+        ],
+      );
+
+      final bytes = msg.serialize(version: MoQVersion.draft16);
+      final (parsed, _) =
+          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft16);
+
+      final result = parsed as RequestOkMessage;
+      expect(result.requestId, equals(Int64(5)));
+      expect(result.parameters.length, equals(2));
+      // After sort-by-type the lower type comes first
+      final types = result.parameters.map((p) => p.type).toList();
+      expect(types, containsAll([0x02, 0x08]));
+      final byType = {for (final p in result.parameters) p.type: p.intValue};
+      expect(byType[0x02], equals(50));
+      expect(byType[0x08], equals(200));
+    });
   });
 
   group('RequestErrorMessage', () {
@@ -251,6 +277,19 @@ void main() {
       // Should come back sorted
       expect(decoded[0].type, equals(0x02));
       expect(decoded[1].type, equals(0x20));
+    });
+
+    test('throws FormatException when buffer length exceeds remaining data', () {
+      // Odd type (0x01), advertises 5 bytes but only 2 are present.
+      // Layout: count=1 (1 byte), type=0x01 (1 byte), length=5 (1 byte), 2 data bytes.
+      final truncated =
+          Uint8List.fromList([0x01, 0x01, 0x05, 0xAA, 0xBB]);
+      final (count, countBytes) = MoQWireFormat.decodeVarint(truncated, 0);
+      expect(
+        () => MoQWireFormat.decodeKeyValuePairs(
+            truncated, countBytes, count),
+        throwsA(isA<FormatException>()),
+      );
     });
   });
 

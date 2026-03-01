@@ -398,13 +398,15 @@ class MoQWireFormat {
         params.add(KeyValuePair(type: absoluteType, intValue: intValue));
       } else {
         // Odd types: value is length-prefixed buffer
-        Uint8List? value;
         final (length, lengthLen) = decodeVarint(data, offset);
         offset += lengthLen;
-        if (length > 0 && offset + length <= data.length) {
-          value = data.sublist(offset, offset + length);
-          offset += length;
+        if (length > 0 && offset + length > data.length) {
+          throw FormatException(
+              'Unexpected end of key-value pair buffer: need $length bytes, have ${data.length - offset}');
         }
+        final value =
+            length > 0 ? data.sublist(offset, offset + length) : null;
+        offset += length;
         params.add(KeyValuePair(type: absoluteType, value: value));
       }
       if (useDelta) lastType = absoluteType;
