@@ -252,6 +252,19 @@ void main() {
       expect(decoded[0].type, equals(0x02));
       expect(decoded[1].type, equals(0x20));
     });
+
+    test('throws FormatException when buffer length exceeds remaining data', () {
+      // Odd type (0x01), advertises 5 bytes but only 2 are present.
+      // Layout: count=1 (1 byte), type=0x01 (1 byte), length=5 (1 byte), 2 data bytes.
+      final truncated =
+          Uint8List.fromList([0x01, 0x01, 0x05, 0xAA, 0xBB]);
+      final (count, countBytes) = MoQWireFormat.decodeVarint(truncated, 0);
+      expect(
+        () => MoQWireFormat.decodeKeyValuePairs(
+            truncated, countBytes, count),
+        throwsA(isA<FormatException>()),
+      );
+    });
   });
 
   // ============================================================
