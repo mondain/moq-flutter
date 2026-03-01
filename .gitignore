@@ -16,8 +16,8 @@ migrate_working_dir/
 native/moq_quic/build/
 
 # Cocoapods related
-**/ios/Podfile.lock
-**/macos/Podfile.lock
+ios/Podfile.lock
+macos/Podfile.lock
 
 # IntelliJ related
 *.iml
@@ -69,3 +69,4 @@ target
 **/mutants.out*/
 .claude/settings.local.json
 linux/*.so
+
