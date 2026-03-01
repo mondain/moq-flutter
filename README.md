@@ -1,6 +1,6 @@
 # MoQ Flutter
 
-Media over QUIC (MoQ) Flutter client implementation per [draft-ietf-moq-transport-14](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/14/).
+Media over QUIC (MoQ) Flutter client implementation supporting [draft-ietf-moq-transport-14](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/14/) and [draft-ietf-moq-transport-16](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/16/).
 
 ## Project Structure
 
@@ -64,27 +64,65 @@ test/
     └── data_messages_test.dart    # Data message tests
 ```
 
-## Build Configuration
+## Native QUIC Library
 
-The project includes automatic Rust library compilation during the build process:
+The `native/moq_quic/` directory contains a Rust library built on [Quinn](https://github.com/quinn-rs/quinn) that provides QUIC and WebTransport connectivity via FFI. It must be compiled before the app can establish connections.
 
-- **Desktop (Linux/macOS/Windows)**: `tool/build_rust.dart` hook
-- **Android**: Gradle tasks in `android/app/build.gradle.kts`
-- **iOS**: Xcode build phases via `build/rust_build_ios.sh`
-- **Platform-specific scripts**: `build/rust_build_*.sh`
+### Prerequisites
 
-Manual build commands:
+- **Rust toolchain** - Install from [rustup.rs](https://rustup.rs/)
+- **Cargo** - Installed automatically with Rust
+- **Android NDK** - Required for Android cross-compilation (installed via Android Studio)
+- **libmpv-dev** (optional) - Enables the embedded native media player feature; the build auto-detects its presence
 
-- **Linux/macOS/iOS**: via `scripts/build_native.sh`
-- **Windows**: `scripts/build_native.bat`
+### Automatic Build
 
-The Rust QUIC library is compiled automatically when running:
+The Rust library compiles automatically as part of the Flutter build on all supported platforms:
+
+| Platform | Build system | Trigger |
+|----------|-------------|---------|
+| **Linux** | CMake custom command in `linux/CMakeLists.txt` | `flutter build linux` / `flutter run` |
+| **macOS** | Xcode shell build phase ("Copy Native QUIC Library") | `flutter build macos` |
+| **Windows** | CMake custom command in `windows/CMakeLists.txt` | `flutter build windows` |
+| **Android** | Gradle `buildRustLibs` task in `android/app/build.gradle.kts` | `flutter build apk` |
+| **iOS** | Not yet automated | Requires manual build (see below) |
+
+On macOS, the build produces a universal binary (arm64 + x86_64) via `lipo`. On Android, it cross-compiles for all four ABIs (`arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`). The `media-player` feature (libmpv integration) is auto-detected and enabled when libmpv is found on the system.
+
+If cargo is not installed, the build prints a warning and continues without the native library. The app falls back to a stub transport that cannot make real connections.
+
+### Manual Build
+
+For development or when you need to rebuild the native library independently:
 
 ```bash
-flutter build apk
-flutter build ios
-flutter run
+# Linux / macOS (creates platform-appropriate .so or .dylib)
+scripts/build_native.sh
+
+# Windows (creates moq_quic.dll)
+scripts/build_native.bat
+
+# Direct cargo build (Linux example)
+cd native/moq_quic && cargo build --release
+
+# macOS universal binary
+cd native/moq_quic
+cargo build --release --target aarch64-apple-darwin
+cargo build --release --target x86_64-apple-darwin
+lipo -create \
+  target/aarch64-apple-darwin/release/libmoq_quic.dylib \
+  target/x86_64-apple-darwin/release/libmoq_quic.dylib \
+  -output target/release/libmoq_quic.dylib
 ```
+
+### Output Locations
+
+| Platform | Library | Path |
+|----------|---------|------|
+| Linux | `libmoq_quic.so` | `native/moq_quic/target/release/` |
+| macOS | `libmoq_quic.dylib` | `native/moq_quic/target/release/` (universal) |
+| Windows | `moq_quic.dll` | `native/moq_quic/target/release/` |
+| Android | `libmoq_quic.so` | `native/moq_quic/target/{abi}/release/` (per ABI) |
 
 ## MoQ Draft-14 Support
 
@@ -177,7 +215,7 @@ This ensures clean playback startup even when relays don't properly implement `n
 
 ### Prerequisites
 
-- Flutter SDK (3.8.1 or higher)
+- Flutter SDK (3.41.2 or higher, see .fvmrc)
 - Rust toolchain (for native QUIC library compilation)
 - Android/iOS/Desktop build tools
 
@@ -202,9 +240,16 @@ sudo pacman -S mpv ffmpeg libpulse v4l-utils
 - `pulseaudio-utils` - Audio capture via `parec` (PulseAudio)
 - `v4l-utils` - Webcam device enumeration
 
-#### macOS Dependencies
+#### Apple Dependencies
 
-No additional dependencies required for video playback.
+For video playback or capture on iOS/macOS:
+
+```bash
+# Install Homebrew if not already installed
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+# Install mpv for media playback support
+brew install mpv
+```
 
 #### Windows Dependencies
 
@@ -286,7 +331,7 @@ The application supports publishing live audio and video with platform-specific 
 
 ## Current Status
 
-Draft-14 implementation with:
+Draft-14 and draft-16 dual-version implementation with:
 
 - Full message type definitions for all control and data messages
 - Complete wire format utilities (varint, tuple, location encoding/decoding)
@@ -345,6 +390,7 @@ The application saves user preferences using Flutter's shared_preferences packag
 
 ## References
 
+- [draft-ietf-moq-transport-16](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/16/)
 - [draft-ietf-moq-transport-14](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/14/)
 - [MoQ Working Group](https://datatracker.ietf.org/wg/moq/about/)
 - [Dart Language Documentation](https://dart.dev/guides)
