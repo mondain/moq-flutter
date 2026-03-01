@@ -608,10 +608,13 @@ class SubscribeMessage extends MoQControlMessage {
         switch (param.type) {
           case SubscribeParameterType.subscriberPriority:
             subscriberPriority = param.intValue ?? 0;
+            break;
           case SubscribeParameterType.groupOrder:
             groupOrder = GroupOrder.fromValue(param.intValue ?? 0) ?? GroupOrder.none;
+            break;
           case SubscribeParameterType.forward:
             forward = param.intValue ?? 0;
+            break;
           case SubscribeParameterType.subscriptionFilter:
             // Decode filter buffer: FilterType(i) [StartLocation] [EndGroup(i)]
             if (param.value != null && param.value!.isNotEmpty) {
@@ -634,6 +637,7 @@ class SubscribeMessage extends MoQControlMessage {
                 endGroup = eg;
               }
             }
+            break;
           default:
             remainingParams.add(param);
         }
@@ -936,8 +940,10 @@ class SubscribeOkMessage extends MoQControlMessage {
         switch (param.type) {
           case TrackPropertyType.expires:
             expires = Int64(param.intValue ?? 0);
+            break;
           case SubscribeParameterType.groupOrder:
             groupOrder = GroupOrder.fromValue(param.intValue ?? 0) ?? GroupOrder.none;
+            break;
           case TrackPropertyType.largestObject:
             // Buffer containing Location
             if (param.value != null && param.value!.isNotEmpty) {
@@ -945,6 +951,7 @@ class SubscribeOkMessage extends MoQControlMessage {
               largestLocation = loc;
               contentExists = 1;
             }
+            break;
           default:
             remainingParams.add(param);
         }
@@ -1324,8 +1331,10 @@ class SubscribeUpdateMessage extends MoQControlMessage {
         switch (param.type) {
           case SubscribeParameterType.subscriberPriority:
             subscriberPriority = param.intValue ?? 0;
+            break;
           case SubscribeParameterType.forward:
             forward = param.intValue ?? 0;
+            break;
           case SubscribeParameterType.subscriptionFilter:
             // Decode filter buffer: StartLocation (Location) + EndGroup (i)
             if (param.value != null && param.value!.isNotEmpty) {
@@ -1338,6 +1347,7 @@ class SubscribeUpdateMessage extends MoQControlMessage {
                 endGroup = eg;
               }
             }
+            break;
           default:
             remainingParams.add(param);
         }
