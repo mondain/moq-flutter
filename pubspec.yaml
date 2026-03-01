@@ -78,9 +78,6 @@ dependencies:
   # Navigation
   go_router: ^17.0.0
 
-  # Responsive sizing
-  sizer: ^3.0.4
-
   # Local storage
   shared_preferences: ^2.3.4
 

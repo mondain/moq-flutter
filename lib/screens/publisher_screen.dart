@@ -8,7 +8,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:logger/logger.dart';
-import 'package:sizer/sizer.dart';
 import '../moq/media/audio_capture.dart';
 import '../moq/media/audio_encoder.dart';
 import '../moq/media/camera_capture.dart';
@@ -517,7 +516,7 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
                 // Video preview
                 Card(
                   clipBehavior: Clip.antiAlias,
-                  margin: EdgeInsets.all(4.w),
+                  margin: const EdgeInsets.all(16),
                   child: Column(
                     children: [
                       VideoPreview(
@@ -540,26 +539,26 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
                 // Info
                 Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 4.w),
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: ConnectionStatusCard(statusMessage: _statusMessage),
                 ),
 
-                SizedBox(height: 2.h),
+                const SizedBox(height: 16),
 
                 // Track info
                 Padding(
-                  padding: EdgeInsets.all(4.w),
+                  padding: const EdgeInsets.all(16),
                   child: Card(
                     child: Padding(
-                      padding: EdgeInsets.all(4.w),
+                      padding: const EdgeInsets.all(16),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
                             'Publishing Info',
-                            style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 13.sp),
+                            style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
                           ),
-                          SizedBox(height: 1.h),
+                          const SizedBox(height: 8),
                           _buildInfoRow('Namespace', widget.namespace),
                           _buildInfoRow('Packaging', _packagingFormat.label),
                           _buildInfoRow('Video Track', _getVideoTrackName()),
@@ -640,14 +639,14 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
   Widget _buildInfoRow(String label, String value) {
     return Padding(
-      padding: EdgeInsets.symmetric(vertical: 0.5.h),
+      padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
           Text(
             '$label: ',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11.sp),
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
           ),
-          Expanded(child: Text(value, style: TextStyle(fontSize: 11.sp))),
+          Expanded(child: Text(value, style: const TextStyle(fontSize: 14))),
         ],
       ),
     );

@@ -187,7 +187,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ListTile(
             leading: const Icon(Icons.description),
             title: const Text('Protocol'),
-            subtitle: const Text('draft-ietf-moq-transport-14'),
+            subtitle: const Text('draft-ietf-moq-transport-14, draft-ietf-moq-transport-16'),
           ),
           ListTile(
             leading: const Icon(Icons.code),
