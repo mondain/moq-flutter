@@ -61,7 +61,6 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
   // Audio capture and encoding
   AudioCapture? _audioCapture;
-  OpusEncoder? _opusEncoder;
   NativeOpusEncoder? _nativeOpusEncoder;
   StreamSubscription<AudioSamples>? _audioSamplesSubscription;
   StreamSubscription<OpusFrame>? _opusFrameSubscription;
@@ -357,39 +356,21 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
       application: 'audio',
     );
 
-    // Use native Opus encoder on Android/iOS (no FFmpeg available)
-    // Use FFmpeg-based encoder on desktop where FFmpeg is typically installed
-    final useNativeEncoder = Platform.isAndroid || Platform.isIOS;
+    // Use native Opus encoder on all platforms (FFI to libopus)
+    // On macOS/Linux, loads system-installed libopus directly
+    _nativeOpusEncoder = NativeOpusEncoder(
+      config: encoderConfig,
+      logger: _logger,
+    );
+    await _nativeOpusEncoder!.start();
 
-    if (useNativeEncoder) {
-      _nativeOpusEncoder = NativeOpusEncoder(
-        config: encoderConfig,
-        logger: _logger,
-      );
-      await _nativeOpusEncoder!.start();
+    _audioSamplesSubscription = _audioCapture!.audioStream.listen((samples) {
+      _nativeOpusEncoder?.addSamples(samples);
+    });
 
-      _audioSamplesSubscription = _audioCapture!.audioStream.listen((samples) {
-        _nativeOpusEncoder?.addSamples(samples);
-      });
-
-      _opusFrameSubscription = _nativeOpusEncoder!.frames.listen((opusFrame) {
-        _onOpusFrame(opusFrame, audioTrackName);
-      });
-    } else {
-      _opusEncoder = OpusEncoder(
-        config: encoderConfig,
-        logger: _logger,
-      );
-      await _opusEncoder!.start();
-
-      _audioSamplesSubscription = _audioCapture!.audioStream.listen((samples) {
-        _opusEncoder?.addSamples(samples);
-      });
-
-      _opusFrameSubscription = _opusEncoder!.frames.listen((opusFrame) {
-        _onOpusFrame(opusFrame, audioTrackName);
-      });
-    }
+    _opusFrameSubscription = _nativeOpusEncoder!.frames.listen((opusFrame) {
+      _onOpusFrame(opusFrame, audioTrackName);
+    });
 
     await _audioCapture!.startCapture();
   }
@@ -471,12 +452,6 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
       await _audioCapture!.stopCapture();
       _audioCapture!.dispose();
       _audioCapture = null;
-    }
-
-    if (_opusEncoder != null) {
-      await _opusEncoder!.stop();
-      _opusEncoder!.dispose();
-      _opusEncoder = null;
     }
 
     if (_nativeOpusEncoder != null) {

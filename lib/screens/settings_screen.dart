@@ -42,6 +42,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final settings = ref.read(settingsServiceProvider);
     settings.setHost(host);
     settings.setPort(port);
+    // Also update the WebTransport URL so the connection page stays in sync
+    settings.setUrl('https://$host:$port/moq');
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Server set to $host:$port')),
     );

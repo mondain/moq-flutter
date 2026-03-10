@@ -188,6 +188,11 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
       }
     } catch (e) {
       _setStatus('Error: $e');
+      // Disconnect so the UI returns to a connectable state
+      try {
+        final client = ref.read(moqClientProvider);
+        await client.disconnect();
+      } catch (_) {}
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(

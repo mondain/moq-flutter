@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:ffi';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:logger/logger.dart';
 import 'package:opus_dart/opus_dart.dart' as opus_dart;
@@ -7,7 +9,8 @@ import 'audio_capture.dart';
 import 'audio_encoder.dart';
 
 /// Native Opus encoder using opus_dart FFI bindings to libopus.
-/// Works on Android, iOS, Windows without requiring FFmpeg.
+/// Works on Android, iOS, macOS, Linux, and Windows.
+/// On macOS/Linux, loads the system-installed libopus directly.
 class NativeOpusEncoder {
   final OpusEncoderConfig config;
   final Logger _logger;
@@ -37,12 +40,46 @@ class NativeOpusEncoder {
   bool get isRunning => _isRunning;
 
   /// Initialize the native opus library. Safe to call multiple times.
+  /// On Android/iOS/Windows, uses opus_flutter plugin.
+  /// On macOS/Linux, loads the system-installed libopus directly.
   static Future<void> _ensureInitialized() async {
     if (!_opusInitialized) {
-      final lib = await opus_flutter.load();
-      opus_dart.initOpus(lib);
+      if (Platform.isMacOS || Platform.isLinux) {
+        final lib = _loadSystemLibopus();
+        // Cast to dynamic to satisfy opus_dart's proxy_ffi conditional import
+        opus_dart.initOpus(lib as dynamic);
+      } else {
+        final lib = await opus_flutter.load();
+        opus_dart.initOpus(lib);
+      }
       _opusInitialized = true;
     }
+  }
+
+  /// Load libopus from system paths on macOS/Linux.
+  static DynamicLibrary _loadSystemLibopus() {
+    final paths = Platform.isMacOS
+        ? [
+            '/opt/homebrew/lib/libopus.dylib', // Apple Silicon Homebrew
+            '/usr/local/lib/libopus.dylib', // Intel Homebrew
+            'libopus.dylib', // System path
+          ]
+        : [
+            'libopus.so.0', // Linux system
+            'libopus.so', // Linux fallback
+          ];
+
+    for (final path in paths) {
+      try {
+        return DynamicLibrary.open(path);
+      } catch (_) {
+        continue;
+      }
+    }
+    throw UnsupportedError(
+      'libopus not found. Install it with: '
+      '${Platform.isMacOS ? "brew install opus" : "sudo apt install libopus-dev"}',
+    );
   }
 
   /// Start the encoder
