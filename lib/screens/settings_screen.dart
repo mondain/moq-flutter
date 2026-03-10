@@ -38,6 +38,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     ref.read(audioTrackNameProvider.notifier).setAudioTrackName(_audioTrackController.text);
   }
 
+  void _applyPreset(String host, String port) {
+    final settings = ref.read(settingsServiceProvider);
+    settings.setHost(host);
+    settings.setPort(port);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Server set to $host:$port')),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -56,34 +65,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             leading: const Icon(Icons.cloud),
             title: const Text('Local Development'),
             subtitle: const Text('localhost:8443'),
-            onTap: () {
-              // TODO: Apply preset
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Preset applied')),
-              );
-            },
+            onTap: () => _applyPreset('localhost', '8443'),
           ),
           ListTile(
             leading: const Icon(Icons.cloud),
             title: const Text('Red5 Server'),
             subtitle: const Text('moq-relay.red5.net:4433'),
-            onTap: () {
-              // TODO: Apply preset
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Preset applied')),
-              );
-            },
+            onTap: () => _applyPreset('moq-relay.red5.net', '4433'),
           ),
           ListTile(
             leading: const Icon(Icons.cloud),
             title: const Text('Moq.dev Development'),
             subtitle: const Text('cdn.moq.dev:4443'),
-            onTap: () {
-              // TODO: Apply preset
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Preset applied')),
-              );
-            },
+            onTap: () => _applyPreset('cdn.moq.dev', '4443'),
           ),
           const Divider(),
 

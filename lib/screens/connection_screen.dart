@@ -63,6 +63,23 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
   void _saveNamespace() => ref.read(settingsServiceProvider).setNamespace(_namespaceController.text);
   void _saveTrackName() => ref.read(settingsServiceProvider).setTrackName(_trackNameController.text);
 
+  /// Refresh controllers from settings (e.g. after returning from settings screen)
+  void _refreshFromSettings() {
+    final settings = ref.read(settingsServiceProvider);
+    if (_hostController.text != settings.host) {
+      _hostController.text = settings.host;
+    }
+    if (_portController.text != settings.port) {
+      _portController.text = settings.port;
+    }
+    if (_urlController.text != settings.url) {
+      _urlController.text = settings.url;
+    }
+    if (_namespaceController.text != settings.namespace) {
+      _namespaceController.text = settings.namespace;
+    }
+  }
+
   @override
   void dispose() {
     _hostController.removeListener(_saveHost);
@@ -197,7 +214,10 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
-            onPressed: () => context.push('/settings'),
+            onPressed: () async {
+              await context.push('/settings');
+              _refreshFromSettings();
+            },
           ),
         ],
       ),
