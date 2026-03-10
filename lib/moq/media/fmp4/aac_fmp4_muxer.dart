@@ -151,6 +151,9 @@ class AacFmp4Muxer {
     _initSegment = null;
   }
 
+  /// Build the audio trak box for use in a combined init segment.
+  Uint8List buildTrak() => _createTrak();
+
   /// Strip ADTS headers from AAC data and return raw frames
   ///
   /// ADTS header is 7 bytes (or 9 with CRC)

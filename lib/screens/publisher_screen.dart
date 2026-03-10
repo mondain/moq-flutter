@@ -10,6 +10,7 @@ import 'package:go_router/go_router.dart';
 import 'package:logger/logger.dart';
 import '../moq/media/audio_capture.dart';
 import '../moq/media/audio_encoder.dart';
+import '../moq/media/native_opus_encoder.dart';
 import '../moq/media/camera_capture.dart';
 import '../moq/media/linux_capture.dart';
 import '../moq/media/video_encoder.dart';
@@ -61,6 +62,7 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   // Audio capture and encoding
   AudioCapture? _audioCapture;
   OpusEncoder? _opusEncoder;
+  NativeOpusEncoder? _nativeOpusEncoder;
   StreamSubscription<AudioSamples>? _audioSamplesSubscription;
   StreamSubscription<OpusFrame>? _opusFrameSubscription;
 
@@ -347,63 +349,89 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
     );
     await _audioCapture!.initialize();
 
-    _opusEncoder = OpusEncoder(
-      config: const OpusEncoderConfig(
-        sampleRate: 48000,
-        channels: 2,
-        bitrate: 128000,
-        frameDurationMs: 20,
-        application: 'audio',
-      ),
+    const encoderConfig = OpusEncoderConfig(
+      sampleRate: 48000,
+      channels: 2,
+      bitrate: 128000,
+      frameDurationMs: 20,
+      application: 'audio',
     );
-    await _opusEncoder!.start();
 
-    _audioSamplesSubscription = _audioCapture!.audioStream.listen((samples) {
-      _opusEncoder?.addSamples(samples);
-    });
+    // Use native Opus encoder on Android/iOS (no FFmpeg available)
+    // Use FFmpeg-based encoder on desktop where FFmpeg is typically installed
+    final useNativeEncoder = Platform.isAndroid || Platform.isIOS;
 
-    _opusFrameSubscription = _opusEncoder!.frames.listen((opusFrame) async {
-      if (!_isPublishing || _isAudioMuted) return;
+    if (useNativeEncoder) {
+      _nativeOpusEncoder = NativeOpusEncoder(
+        config: encoderConfig,
+        logger: _logger,
+      );
+      await _nativeOpusEncoder!.start();
 
-      try {
-        switch (_packagingFormat) {
-          case PackagingFormat.cmaf:
-            if (_cmafPublisher == null) return;
-            await _cmafPublisher!.publishAudioFrame(audioTrackName, opusFrame.data);
+      _audioSamplesSubscription = _audioCapture!.audioStream.listen((samples) {
+        _nativeOpusEncoder?.addSamples(samples);
+      });
 
-          case PackagingFormat.loc:
-            if (_locPublisher == null) return;
-            await _locPublisher!.publishFrame(
-              audioTrackName,
-              opusFrame.data,
-              newGroup: true, // Audio: new group per frame
-            );
+      _opusFrameSubscription = _nativeOpusEncoder!.frames.listen((opusFrame) {
+        _onOpusFrame(opusFrame, audioTrackName);
+      });
+    } else {
+      _opusEncoder = OpusEncoder(
+        config: encoderConfig,
+        logger: _logger,
+      );
+      await _opusEncoder!.start();
 
-          case PackagingFormat.moqMi:
-            if (_moqMiPublisher == null) return;
-            // Convert ms to microseconds for moq-mi
-            final ptsUs = Int64(opusFrame.timestampMs) * Int64(1000);
-            await _moqMiPublisher!.publishOpusFrame(
-              payload: opusFrame.data,
-              pts: ptsUs,
-              sampleRate: 48000,
-              numChannels: 2,
-            );
-        }
+      _audioSamplesSubscription = _audioCapture!.audioStream.listen((samples) {
+        _opusEncoder?.addSamples(samples);
+      });
 
-        _publishedAudioFrames++;
-
-        if (_publishedAudioFrames % 50 == 0 && mounted) {
-          setState(() {
-            _statusMessage = 'Publishing... $_publishedFrames video, $_publishedAudioFrames audio';
-          });
-        }
-      } catch (e) {
-        debugPrint('Error publishing audio frame: $e');
-      }
-    });
+      _opusFrameSubscription = _opusEncoder!.frames.listen((opusFrame) {
+        _onOpusFrame(opusFrame, audioTrackName);
+      });
+    }
 
     await _audioCapture!.startCapture();
+  }
+
+  void _onOpusFrame(OpusFrame opusFrame, String audioTrackName) async {
+    if (!_isPublishing || _isAudioMuted) return;
+
+    try {
+      switch (_packagingFormat) {
+        case PackagingFormat.cmaf:
+          if (_cmafPublisher == null) return;
+          await _cmafPublisher!.publishAudioFrame(audioTrackName, opusFrame.data);
+
+        case PackagingFormat.loc:
+          if (_locPublisher == null) return;
+          await _locPublisher!.publishFrame(
+            audioTrackName,
+            opusFrame.data,
+            newGroup: true,
+          );
+
+        case PackagingFormat.moqMi:
+          if (_moqMiPublisher == null) return;
+          final ptsUs = Int64(opusFrame.timestampMs) * Int64(1000);
+          await _moqMiPublisher!.publishOpusFrame(
+            payload: opusFrame.data,
+            pts: ptsUs,
+            sampleRate: 48000,
+            numChannels: 2,
+          );
+      }
+
+      _publishedAudioFrames++;
+
+      if (_publishedAudioFrames % 50 == 0 && mounted) {
+        setState(() {
+          _statusMessage = 'Publishing... $_publishedFrames video, $_publishedAudioFrames audio';
+        });
+      }
+    } catch (e) {
+      debugPrint('Error publishing audio frame: $e');
+    }
   }
 
   Future<void> _stopPublishing() async {
@@ -449,6 +477,12 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
       await _opusEncoder!.stop();
       _opusEncoder!.dispose();
       _opusEncoder = null;
+    }
+
+    if (_nativeOpusEncoder != null) {
+      await _nativeOpusEncoder!.stop();
+      _nativeOpusEncoder!.dispose();
+      _nativeOpusEncoder = null;
     }
 
     // Stop publisher (whichever is active)

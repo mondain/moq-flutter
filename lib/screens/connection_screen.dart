@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../moq/protocol/moq_messages.dart';
 import '../providers/moq_providers.dart';
-import '../widgets/connection_status_card.dart';
 import '../widgets/server_config_card.dart';
 import '../widgets/track_config_card.dart';
 
@@ -229,10 +228,6 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Connection Status
-                ConnectionStatusCard(statusMessage: _statusMessage),
-                const SizedBox(height: 16),
-
                 // Role selector
                 Text(
                   'Client Role',
@@ -259,7 +254,7 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                           setState(() => _clientRole = newSelection.first);
                         },
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 4),
 
                 // Transport type selector
                 Text(

@@ -255,54 +255,49 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     ConnectionStatusCard(statusMessage: _statusMessage),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 4),
 
-                    // Statistics card
+                    // Statistics card (collapsible)
                     Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Stream Statistics',
-                              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
-                            ),
-                            const SizedBox(height: 8),
-                            _buildStatsRow('Objects Received', '$_videoObjectsReceived'),
-                            _buildStatsRow('Video Frames', '$_videoFramesDecoded'),
-                            _buildStatsRow('Audio Frames', '$_audioFramesDecoded'),
-                            if (_useNativePlayer)
-                              _buildStatsRow('Buffer Written', _formatBytes(_bytesWrittenToBuffer))
-                            else
-                              _buildStatsRow('Segments Written', '$_videoSegmentsWritten'),
-                            _buildStatsRow('Data Received', _formatBytes(_totalBytesReceived)),
-                          ],
+                      clipBehavior: Clip.antiAlias,
+                      child: ExpansionTile(
+                        title: Text(
+                          'Stream Statistics',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
                         ),
+                        initiallyExpanded: true,
+                        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                        children: [
+                          _buildStatsRow('Objects Received', '$_videoObjectsReceived'),
+                          _buildStatsRow('Video Frames', '$_videoFramesDecoded'),
+                          _buildStatsRow('Audio Frames', '$_audioFramesDecoded'),
+                          if (_useNativePlayer)
+                            _buildStatsRow('Buffer Written', _formatBytes(_bytesWrittenToBuffer))
+                          else
+                            _buildStatsRow('Segments Written', '$_videoSegmentsWritten'),
+                          _buildStatsRow('Data Received', _formatBytes(_totalBytesReceived)),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+
+                    // Track info card (collapsible)
+                    Card(
+                      clipBehavior: Clip.antiAlias,
+                      child: ExpansionTile(
+                        title: Text(
+                          'Track Info',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
+                        ),
+                        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                        children: [
+                          _buildInfoRow('Namespace', widget.namespace),
+                          _buildInfoRow('Video Track', widget.videoTrackAlias),
+                          _buildInfoRow('Audio Track', widget.audioTrackAlias),
+                        ],
                       ),
                     ),
                     const SizedBox(height: 8),
-
-                    // Track info card
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Track Info',
-                              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
-                            ),
-                            const SizedBox(height: 8),
-                            _buildInfoRow('Namespace', widget.namespace),
-                            _buildInfoRow('Video Track', widget.videoTrackAlias),
-                            _buildInfoRow('Audio Track', widget.audioTrackAlias),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
 
                     // Disconnect button
                     OutlinedButton.icon(

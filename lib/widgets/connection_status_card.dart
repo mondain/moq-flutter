@@ -32,13 +32,6 @@ class ConnectionStatusCard extends ConsumerWidget {
                   isConnected ? Icons.cloud_done : Icons.cloud_off,
                   color: isConnected ? Colors.green : Colors.red,
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    isConnected ? 'Connected' : 'Disconnected',
-                    style: Theme.of(context).textTheme.bodyLarge,
-                  ),
-                ),
               ],
             ),
             if (statusMessage != null && statusMessage!.isNotEmpty) ...[

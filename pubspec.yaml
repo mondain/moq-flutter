@@ -80,6 +80,8 @@ dependencies:
 
   # Local storage
   shared_preferences: ^2.3.4
+  opus_dart: ^3.0.1
+  opus_flutter: ^3.0.3
 
 dev_dependencies:
   flutter_test:

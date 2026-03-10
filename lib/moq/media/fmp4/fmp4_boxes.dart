@@ -604,6 +604,22 @@ Uint8List writeMvex({required int trackId}) {
   return result;
 }
 
+/// mvex box with multiple tracks - for combined A/V fMP4
+Uint8List writeMvexMultiTrack(List<int> trackIds) {
+  final trexList = trackIds.map((id) => writeTrex(trackId: id)).toList();
+  final totalTrexSize = trexList.fold<int>(0, (sum, t) => sum + t.length);
+  final size = 8 + totalTrexSize;
+  final result = Uint8List(size);
+  final header = writeBoxHeader(size, 'mvex');
+  result.setAll(0, Uint8List.view(header.buffer));
+  var offset = 8;
+  for (final trex in trexList) {
+    result.setAll(offset, trex);
+    offset += trex.length;
+  }
+  return result;
+}
+
 /// trex box - Track Extends Box
 Uint8List writeTrex({required int trackId}) {
   final size = 12 + 20;

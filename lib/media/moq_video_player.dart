@@ -24,7 +24,6 @@ class MoQVideoPlayer {
   // Stream subscriptions
   final List<StreamSubscription<MoQObject>> _objectSubscriptions = [];
   StreamSubscription<String>? _videoReadySubscription;
-  StreamSubscription<String>? _audioReadySubscription;
 
   // Playback state
   bool _isInitialized = false;
@@ -42,9 +41,6 @@ class MoQVideoPlayer {
   bool _joinedVideoMidGroup = false;
   bool _foundValidVideoStart = false;
   int _skippedVideoFrames = 0;
-
-  // Pending audio path (stored if audio ready before video)
-  String? _audioPath;
 
   MoQVideoPlayer({Logger? logger})
       : _logger = logger ?? Logger(),
@@ -154,11 +150,9 @@ class MoQVideoPlayer {
     _playbackPipeline = StreamingPlaybackPipeline();
     await _playbackPipeline!.initialize();
 
-    // Listen for video ready notification
+    // Listen for combined stream ready notification
     _videoReadySubscription =
         _playbackPipeline!.onVideoReady.listen(_handleVideoReady);
-    _audioReadySubscription =
-        _playbackPipeline!.onAudioReady.listen(_handleAudioReady);
 
     // Subscribe to incoming objects from all subscriptions
     for (final subscription in subscriptions) {
@@ -274,48 +268,16 @@ class MoQVideoPlayer {
     }
   }
 
-  void _handleVideoReady(String videoPath) {
-    _logger.i('Video file ready at: $videoPath');
+  void _handleVideoReady(String mediaPath) {
+    _logger.i('Combined stream ready at: $mediaPath');
     if (!_mediaOpened) {
-      _openMedia(videoPath);
-    }
-  }
-
-  void _handleAudioReady(String audioPath) {
-    _logger.i('Audio ready at: $audioPath');
-    _audioPath = audioPath;
-
-    if (_mediaOpened) {
-      _addAudioTrack(audioPath);
-    }
-  }
-
-  Future<void> _addAudioTrack(String audioPath) async {
-    try {
-      final nativePlayer = _player.platform;
-      if (nativePlayer is NativePlayer) {
-        _logger.i('Adding audio track: $audioPath');
-        await nativePlayer.command(['audio-add', audioPath, 'select']);
-        _logger.i('audio-add command sent');
-      }
-    } catch (e) {
-      _logger.e('Failed to add audio track: $e');
+      _openMedia(mediaPath);
     }
   }
 
   Future<void> _openMedia(String path) async {
     try {
-      // If audio URL is already known, set it before opening video
-      // so mpv opens both streams simultaneously
-      if (_audioPath != null) {
-        final nativePlayer = _player.platform;
-        if (nativePlayer is NativePlayer) {
-          _logger.i('Pre-setting audio-file: $_audioPath');
-          await nativePlayer.setProperty('audio-files', _audioPath!);
-        }
-      }
-
-      _logger.i('Opening media: $path');
+      _logger.i('Opening combined A/V media: $path');
       await _player.open(
         Media(path),
         play: true,
@@ -381,7 +343,6 @@ class MoQVideoPlayer {
     _objectSubscriptions.clear();
 
     await _videoReadySubscription?.cancel();
-    await _audioReadySubscription?.cancel();
 
     await _playbackPipeline?.dispose();
     _playbackPipeline = null;

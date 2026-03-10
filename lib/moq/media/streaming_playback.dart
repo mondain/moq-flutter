@@ -103,6 +103,10 @@ class AvccFmp4Muxer {
     _initSegment = null;
   }
 
+  /// Build the video trak box for use in a combined init segment.
+  /// Requires setAvcDecoderConfig to have been called first.
+  Uint8List buildTrak() => _createTrak();
+
   Uint8List _createInitSegment() {
     final ftyp = writeFtyp(
       majorBrand: 'isom',
@@ -460,6 +464,9 @@ class OpusStreamingMuxer {
     _initSegment = null;
   }
 
+  /// Build the audio trak box for use in a combined init segment.
+  Uint8List buildTrak() => _createTrak();
+
   Uint8List _createInitSegment() {
     final ftyp = writeFtyp(
       majorBrand: 'isom',
@@ -744,47 +751,51 @@ class OpusStreamingMuxer {
 
 /// Complete streaming playback pipeline
 ///
-/// Connects MoqMediaPipeline to FIFO-based fMP4 output for media_kit.
-/// Uses named pipes (FIFOs) on Linux/macOS so mpv block-reads instead of
-/// hitting EOF on a regular file. Falls back to regular files on Windows.
-/// Supports H.264 video, and both Opus and AAC audio.
+/// Connects MoqMediaPipeline to a single combined fMP4 stream for media_kit.
+/// Combines video (H.264) and audio (Opus or AAC) into a single multi-track
+/// fragmented MP4 served from one HTTP server. This avoids the unreliable
+/// mpv `audio-add` approach and works on all platforms including Android.
+/// Falls back to regular files on Windows or if HTTP server setup fails.
 class StreamingPlaybackPipeline {
   final MoqMediaPipeline _mediaPipeline;
   final AvccFmp4Muxer _videoMuxer;
   final OpusStreamingMuxer _opusMuxer;
   final AacFmp4Muxer _aacMuxer;
 
-  File? _videoFile;
-  File? _audioFile;
-  IOSink? _videoSink;
-  IOSink? _audioSink;
-
-  // HTTP server-based streaming (preferred for live playback)
-  HttpServer? _videoServer;
-  HttpServer? _audioServer;
-  HttpResponse? _videoResponse;
-  HttpResponse? _audioResponse;
+  // Single HTTP server for combined A/V stream
+  HttpServer? _server;
+  HttpResponse? _response;
+  bool _clientReady = false;
+  final List<Uint8List> _outputBuffer = [];
   bool _useHttp = false;
 
-  // Buffer for data received before client connects
-  final List<Uint8List> _videoBuffer = [];
-  final List<Uint8List> _audioBuffer = [];
-  bool _videoClientReady = false;
-  bool _audioClientReady = false;
+  // Fallback file output
+  File? _outputFile;
+  IOSink? _outputSink;
 
-  // Diagnostic: also write to file for ffprobe inspection
-  IOSink? _videoDiagSink;
-  IOSink? _audioDiagSink;
+  // Diagnostic: write a copy to file for ffprobe inspection
+  IOSink? _diagSink;
 
-  bool _videoInitWritten = false;
-  bool _audioInitWritten = false;
+  // Combined init segment state
+  bool _initWritten = false;
+  bool _videoConfigReady = false;
   MediaFrameType? _detectedAudioType;
+
+  // Buffer frames until combined init is ready (need both video config + audio type)
+  final List<MediaFrame> _pendingVideoFrames = [];
+  final List<MediaFrame> _pendingAudioFrames = [];
+
+  // Global moof sequence counter (shared across video and audio fragments)
+  int _globalSequenceNumber = 0;
+
+  // Video-only fallback: if no audio arrives within timeout, proceed without it
+  Timer? _audioWaitTimer;
+  bool _audioEnabled = true;
 
   StreamSubscription<MediaFrame>? _videoSubscription;
   StreamSubscription<MediaFrame>? _audioSubscription;
 
-  final _videoReadyController = StreamController<String>.broadcast();
-  final _audioReadyController = StreamController<String>.broadcast();
+  final _readyController = StreamController<String>.broadcast();
 
   int _videoSegmentsWritten = 0;
   int _audioSegmentsWritten = 0;
@@ -813,115 +824,84 @@ class StreamingPlaybackPipeline {
           trackId: 2,
         );
 
-  /// Stream that emits video file path when ready
-  Stream<String> get onVideoReady => _videoReadyController.stream;
-
-  /// Stream that emits audio file path when ready
-  Stream<String> get onAudioReady => _audioReadyController.stream;
+  /// Stream that emits the combined media URL/path when ready for playback
+  Stream<String> get onVideoReady => _readyController.stream;
 
   /// Get the underlying media pipeline for statistics
   MoqMediaPipeline get mediaPipeline => _mediaPipeline;
 
-  /// Get video path (HTTP URL or file path)
+  /// Get combined media path (HTTP URL or file path)
   String? get videoFilePath => _useHttp
-      ? (_videoServer != null ? 'http://127.0.0.1:${_videoServer!.port}/video.mp4' : null)
-      : _videoFile?.path;
-
-  /// Get audio path (HTTP URL or file path)
-  String? get audioFilePath => _useHttp
-      ? (_audioServer != null ? 'http://127.0.0.1:${_audioServer!.port}/audio.mp4' : null)
-      : _audioFile?.path;
+      ? (_server != null ? 'http://127.0.0.1:${_server!.port}/stream.mp4' : null)
+      : _outputFile?.path;
 
   /// Statistics
   int get videoSegmentsWritten => _videoSegmentsWritten;
   int get audioSegmentsWritten => _audioSegmentsWritten;
 
-  /// Initialize the pipeline and start writing segments.
-  /// Uses a local HTTP server so mpv reads from a chunked HTTP stream (no EOF).
+  /// Initialize the pipeline with a single HTTP server for combined A/V stream.
   /// Falls back to regular files if server setup fails.
   Future<void> initialize() async {
     try {
-      // Start HTTP servers for video and audio on ephemeral ports
-      _videoServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      _audioServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-
-      final videoPort = _videoServer!.port;
-      final audioPort = _audioServer!.port;
+      _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       _useHttp = true;
 
-      // Handle HTTP requests from mpv - respond with chunked fMP4 stream
-      _videoServer!.listen((request) {
-        debugPrint('StreamingPlayback: mpv connected to video HTTP (${request.method} ${request.uri})');
+      _server!.listen((request) {
+        debugPrint('StreamingPlayback: mpv connected to combined HTTP '
+            '(${request.method} ${request.uri})');
         final response = request.response;
         response.headers.contentType = ContentType('video', 'mp4');
         response.headers.set('Transfer-Encoding', 'chunked');
         response.bufferOutput = false;
-        _videoResponse = response;
-        _videoClientReady = true;
-        // Flush any buffered data
-        for (final chunk in _videoBuffer) {
+        _response = response;
+        _clientReady = true;
+        for (final chunk in _outputBuffer) {
           response.add(chunk);
         }
-        _videoBuffer.clear();
+        _outputBuffer.clear();
       });
 
-      _audioServer!.listen((request) {
-        debugPrint('StreamingPlayback: mpv connected to audio HTTP (${request.method} ${request.uri})');
-        final response = request.response;
-        response.headers.contentType = ContentType('audio', 'mp4');
-        response.headers.set('Transfer-Encoding', 'chunked');
-        response.bufferOutput = false;
-        _audioResponse = response;
-        _audioClientReady = true;
-        for (final chunk in _audioBuffer) {
-          response.add(chunk);
-        }
-        _audioBuffer.clear();
-      });
-
-      debugPrint('StreamingPlayback: HTTP servers started - video=:$videoPort, audio=:$audioPort');
+      debugPrint('StreamingPlayback: HTTP server started on port ${_server!.port}');
 
       // Diagnostic: write a copy to file for ffprobe inspection
       final tempDir = await getTemporaryDirectory();
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final diagVideoFile = File('${tempDir.path}/moq_diag_video_$timestamp.mp4');
-      final diagAudioFile = File('${tempDir.path}/moq_diag_audio_$timestamp.mp4');
-      _videoDiagSink = diagVideoFile.openWrite();
-      _audioDiagSink = diagAudioFile.openWrite();
-      debugPrint('StreamingPlayback: Diagnostic video: ${diagVideoFile.path}');
-      debugPrint('StreamingPlayback: Diagnostic audio: ${diagAudioFile.path}');
+      final diagFile = File('${tempDir.path}/moq_diag_combined_$timestamp.mp4');
+      _diagSink = diagFile.openWrite();
+      debugPrint('StreamingPlayback: Diagnostic file: ${diagFile.path}');
 
-      // Subscribe to media frames
       _videoSubscription = _mediaPipeline.videoFrames.listen(_handleVideoFrame);
       _audioSubscription = _mediaPipeline.audioFrames.listen(_handleAudioFrame);
+
+      // If no audio arrives within 3 seconds, proceed with video-only
+      _audioWaitTimer = Timer(const Duration(seconds: 3), () {
+        if (!_initWritten && _videoConfigReady && _detectedAudioType == null) {
+          debugPrint('StreamingPlayback: No audio detected after 3s, proceeding video-only');
+          _audioEnabled = false;
+          _writeCombinedInit();
+          _flushPendingFrames();
+        }
+      });
     } catch (e) {
       debugPrint('StreamingPlayback: HTTP setup failed ($e), falling back to file');
       _useHttp = false;
-      await _videoServer?.close();
-      await _audioServer?.close();
-      _videoServer = null;
-      _audioServer = null;
-      await _initializeWithFiles();
+      await _server?.close();
+      _server = null;
+      await _initializeWithFile();
     }
   }
 
   /// Fallback file-based initialization
-  Future<void> _initializeWithFiles() async {
+  Future<void> _initializeWithFile() async {
     final tempDir = await getTemporaryDirectory();
     final timestamp = DateTime.now().millisecondsSinceEpoch;
+    _outputFile = File('${tempDir.path}/moq_combined_$timestamp.mp4');
+    _outputSink = _outputFile!.openWrite();
 
-    _videoFile = File('${tempDir.path}/moq_video_$timestamp.mp4');
-    _audioFile = File('${tempDir.path}/moq_audio_$timestamp.mp4');
-
-    _videoSink = _videoFile!.openWrite();
-    _audioSink = _audioFile!.openWrite();
-
-    // Subscribe to media frames
     _videoSubscription = _mediaPipeline.videoFrames.listen(_handleVideoFrame);
     _audioSubscription = _mediaPipeline.audioFrames.listen(_handleAudioFrame);
 
-    debugPrint('StreamingPlayback: Initialized (file), video=${_videoFile!.path}');
-    debugPrint('StreamingPlayback: Initialized (file), audio=${_audioFile!.path}');
+    debugPrint('StreamingPlayback: Initialized (file), path=${_outputFile!.path}');
   }
 
   /// Process a MoQ object through the pipeline
@@ -929,114 +909,181 @@ class StreamingPlaybackPipeline {
     _mediaPipeline.processObject(object);
   }
 
-  /// Write data to the video output (HTTP response or file sink)
-  void _writeVideo(Uint8List data) {
-    // Diagnostic copy
-    _videoDiagSink?.add(data);
+  /// Write data to the single combined output stream
+  void _write(Uint8List data) {
+    _diagSink?.add(data);
 
     if (_useHttp) {
-      if (_videoClientReady) {
-        _videoResponse!.add(data);
+      if (_clientReady) {
+        _response!.add(data);
       } else {
-        _videoBuffer.add(data);
+        _outputBuffer.add(data);
       }
     } else {
-      _videoSink!.add(data);
-    }
-  }
-
-  /// Write data to the audio output (HTTP response or file sink)
-  void _writeAudio(Uint8List data) {
-    // Diagnostic copy
-    _audioDiagSink?.add(data);
-
-    if (_useHttp) {
-      if (_audioClientReady) {
-        _audioResponse!.add(data);
-      } else {
-        _audioBuffer.add(data);
-      }
-    } else {
-      _audioSink!.add(data);
+      _outputSink?.add(data);
     }
   }
 
   void _handleVideoFrame(MediaFrame frame) {
-    // Check if we need to write init segment
-    if (!_videoInitWritten && frame.codecConfig != null) {
+    // Extract AVC decoder config when available
+    if (!_videoConfigReady && frame.codecConfig != null) {
       final config = frame.codecConfig!;
       debugPrint('StreamingPlayback: AVC config ${config.length} bytes: '
           '${config.take(20).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
       _videoMuxer.setAvcDecoderConfig(config);
-      final initSegment = _videoMuxer.initSegment;
-      if (initSegment != null) {
-        _writeVideo(initSegment);
-        _videoInitWritten = true;
-        debugPrint('StreamingPlayback: Video init segment written (${initSegment.length} bytes)');
-        // Log first 32 bytes of init segment for verification
-        final preview = initSegment.take(32).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
-        debugPrint('StreamingPlayback: Init segment starts: $preview');
-      }
+      _videoConfigReady = true;
     }
 
-    // Write media segment
-    if (_videoInitWritten) {
-      if (_videoSegmentsWritten == 0) {
-        // Log first frame details
-        final dataPreview = frame.data.take(16).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
-        debugPrint('StreamingPlayback: First video frame: ${frame.data.length} bytes, '
-            'keyframe=${frame.isKeyframe}, duration=${frame.duration}, '
-            'timebase=${frame.timebase}, data: $dataPreview');
-      }
-      final segment = _videoMuxer.createMediaSegment(frame);
-      _writeVideo(segment);
-      _videoSegmentsWritten++;
-
-      // Notify when enough segments buffered for playback to start.
-      // With sockets, data buffers until mpv connects. Signal ready after
-      // 2 segments so mpv connects and receives the buffered data.
-      // With files, wait for 5 segments to ensure enough data on disk.
-      final readyThreshold = _useHttp ? 2 : 5;
-      if (_videoSegmentsWritten == readyThreshold) {
-        final path = _useHttp
-            ? 'http://127.0.0.1:${_videoServer!.port}/video.mp4'
-            : _videoFile!.path;
-        _videoReadyController.add(path);
-        debugPrint('StreamingPlayback: Video ready at $path ($readyThreshold segments buffered)');
-      }
-
-      // Log progress periodically
-      if (_videoSegmentsWritten % 30 == 0) {
-        debugPrint('StreamingPlayback: Video segments written: $_videoSegmentsWritten');
-      }
+    if (!_initWritten) {
+      _pendingVideoFrames.add(frame);
+      _tryWriteCombinedInit();
+      return;
     }
+
+    _writeVideoSegment(frame);
   }
 
   void _handleAudioFrame(MediaFrame frame) {
-    // Detect audio type on first frame
     if (_detectedAudioType == null) {
       _detectedAudioType = frame.type;
+      _audioWaitTimer?.cancel();
       debugPrint('StreamingPlayback: Detected audio type: $_detectedAudioType');
     }
 
-    // Write init segment if not done
-    if (!_audioInitWritten) {
-      Uint8List initSegment;
-      if (_detectedAudioType == MediaFrameType.audioAac) {
-        initSegment = _aacMuxer.initSegment;
-        debugPrint('StreamingPlayback: AAC audio init segment written (${initSegment.length} bytes)');
-      } else {
-        initSegment = _opusMuxer.initSegment;
-        debugPrint('StreamingPlayback: Opus audio init segment written (${initSegment.length} bytes)');
-      }
-      _writeAudio(initSegment);
-      _audioInitWritten = true;
+    if (!_initWritten) {
+      _pendingAudioFrames.add(frame);
+      _tryWriteCombinedInit();
+      return;
     }
 
-    // Write media segment using appropriate muxer
+    if (!_audioEnabled) return;
+    _writeAudioSegment(frame);
+  }
+
+  /// Try to write the combined init segment once both video and audio info are available
+  void _tryWriteCombinedInit() {
+    if (_initWritten) return;
+    if (!_videoConfigReady) return;
+
+    // Wait for audio type detection (unless audio-wait timer expired)
+    if (_detectedAudioType == null && _audioEnabled) return;
+
+    _writeCombinedInit();
+    _flushPendingFrames();
+  }
+
+  /// Write the combined fMP4 init segment with both video and audio tracks
+  void _writeCombinedInit() {
+    final ftyp = writeFtyp(
+      majorBrand: 'isom',
+      minorVersion: 512,
+      compatibleBrands: ['isom', 'iso6', 'avc1', 'mp41'],
+    );
+
+    // Build video trak (track 1)
+    final videoTrak = _videoMuxer.buildTrak();
+
+    // Build audio trak (track 2) if audio is available
+    Uint8List? audioTrak;
+    Uint8List mvex;
+
+    final hasAudio = _audioEnabled && _detectedAudioType != null;
+    if (hasAudio) {
+      if (_detectedAudioType == MediaFrameType.audioAac) {
+        audioTrak = _aacMuxer.buildTrak();
+      } else {
+        audioTrak = _opusMuxer.buildTrak();
+      }
+      mvex = writeMvexMultiTrack([1, 2]);
+    } else {
+      mvex = writeMvex(trackId: 1);
+    }
+
+    // Movie header with generic timescale
+    final mvhd = writeMvhd(
+      timescale: 1000,
+      duration: 0,
+      nextTrackId: hasAudio ? 3 : 2,
+    );
+
+    // Assemble moov box
+    final moovContentSize = mvhd.length + videoTrak.length +
+        (audioTrak?.length ?? 0) + mvex.length;
+    final moovSize = 8 + moovContentSize;
+    final moov = Uint8List(moovSize);
+    final moovHeader = writeBoxHeader(moovSize, 'moov');
+
+    var offset = 0;
+    moov.setAll(offset, Uint8List.view(moovHeader.buffer)); offset += 8;
+    moov.setAll(offset, mvhd); offset += mvhd.length;
+    moov.setAll(offset, videoTrak); offset += videoTrak.length;
+    if (audioTrak != null) {
+      moov.setAll(offset, audioTrak); offset += audioTrak.length;
+    }
+    moov.setAll(offset, mvex);
+
+    // Write combined init segment
+    final initSegment = Uint8List(ftyp.length + moov.length);
+    initSegment.setAll(0, ftyp);
+    initSegment.setAll(ftyp.length, moov);
+
+    _write(initSegment);
+    _initWritten = true;
+
+    debugPrint('StreamingPlayback: Combined init segment written '
+        '(${initSegment.length} bytes, audio=$hasAudio, '
+        'audioType=$_detectedAudioType)');
+  }
+
+  /// Flush buffered frames after init segment is written
+  void _flushPendingFrames() {
+    for (final frame in _pendingVideoFrames) {
+      _writeVideoSegment(frame);
+    }
+    _pendingVideoFrames.clear();
+
+    if (_audioEnabled) {
+      for (final frame in _pendingAudioFrames) {
+        _writeAudioSegment(frame);
+      }
+    }
+    _pendingAudioFrames.clear();
+  }
+
+  void _writeVideoSegment(MediaFrame frame) {
+    if (!_initWritten || !_videoConfigReady) return;
+
+    if (_videoSegmentsWritten == 0) {
+      final dataPreview = frame.data.take(16).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+      debugPrint('StreamingPlayback: First video frame: ${frame.data.length} bytes, '
+          'keyframe=${frame.isKeyframe}, duration=${frame.duration}, '
+          'timebase=${frame.timebase}, data: $dataPreview');
+    }
+
+    final segment = _videoMuxer.createMediaSegment(frame);
+    _patchMoofSequence(segment, ++_globalSequenceNumber);
+    _write(segment);
+    _videoSegmentsWritten++;
+
+    final readyThreshold = _useHttp ? 2 : 5;
+    if (_videoSegmentsWritten == readyThreshold) {
+      final path = videoFilePath!;
+      _readyController.add(path);
+      debugPrint('StreamingPlayback: Combined stream ready at $path '
+          '($readyThreshold video segments buffered)');
+    }
+
+    if (_videoSegmentsWritten % 30 == 0) {
+      debugPrint('StreamingPlayback: Video=$_videoSegmentsWritten, '
+          'Audio=$_audioSegmentsWritten segments written');
+    }
+  }
+
+  void _writeAudioSegment(MediaFrame frame) {
+    if (!_initWritten) return;
+
     Uint8List segment;
     if (_detectedAudioType == MediaFrameType.audioAac) {
-      // Check if data has ADTS headers and handle accordingly
       if (AacFmp4Muxer.hasAdtsHeader(frame.data)) {
         segment = _aacMuxer.createMediaSegmentFromAdts(frame.data);
       } else {
@@ -1045,65 +1092,50 @@ class StreamingPlaybackPipeline {
     } else {
       segment = _opusMuxer.createMediaSegment(frame);
     }
-    _writeAudio(segment);
+
+    _patchMoofSequence(segment, ++_globalSequenceNumber);
+    _write(segment);
     _audioSegmentsWritten++;
+  }
 
-    // Notify when enough segments are written for playback to start
-    if (_audioSegmentsWritten == 20) {
-      final path = _useHttp
-          ? 'http://127.0.0.1:${_audioServer!.port}/audio.mp4'
-          : _audioFile!.path;
-      _audioReadyController.add(path);
-      debugPrint('StreamingPlayback: Audio ready at $path (20 segments buffered)');
-    }
-
-    // Log progress periodically
-    if (_audioSegmentsWritten % 50 == 0) {
-      debugPrint('StreamingPlayback: Audio segments written: $_audioSegmentsWritten');
+  /// Patch the mfhd sequence number in a moof+mdat segment.
+  /// moof layout: header(8) > mfhd(size(4)+'mfhd'(4)+ver/flags(4)+seq(4)) > traf
+  /// So the sequence number is at bytes [20..23] of the segment.
+  void _patchMoofSequence(Uint8List segment, int sequenceNumber) {
+    if (segment.length >= 24) {
+      segment[20] = (sequenceNumber >> 24) & 0xFF;
+      segment[21] = (sequenceNumber >> 16) & 0xFF;
+      segment[22] = (sequenceNumber >> 8) & 0xFF;
+      segment[23] = sequenceNumber & 0xFF;
     }
   }
 
-  /// Clean up current streaming resources
+  /// Clean up streaming resources
   Future<void> _cleanupStreaming() async {
-    // Close HTTP responses and servers
-    try { await _videoResponse?.close(); } catch (_) {}
-    try { await _audioResponse?.close(); } catch (_) {}
-    try { await _videoServer?.close(); } catch (_) {}
-    try { await _audioServer?.close(); } catch (_) {}
-    _videoResponse = null;
-    _audioResponse = null;
-    _videoServer = null;
-    _audioServer = null;
-    _videoClientReady = false;
-    _audioClientReady = false;
-    _videoBuffer.clear();
-    _audioBuffer.clear();
+    _audioWaitTimer?.cancel();
+    _audioWaitTimer = null;
 
-    // Close diagnostic sinks
-    await _videoDiagSink?.flush();
-    await _videoDiagSink?.close();
-    await _audioDiagSink?.flush();
-    await _audioDiagSink?.close();
-    _videoDiagSink = null;
-    _audioDiagSink = null;
+    try { await _response?.close(); } catch (_) {}
+    try { await _server?.close(); } catch (_) {}
+    _response = null;
+    _server = null;
+    _clientReady = false;
+    _outputBuffer.clear();
 
-    // Close file sinks
-    await _videoSink?.flush();
-    await _videoSink?.close();
-    await _audioSink?.flush();
-    await _audioSink?.close();
-    _videoSink = null;
-    _audioSink = null;
+    await _diagSink?.flush();
+    await _diagSink?.close();
+    _diagSink = null;
 
-    // Clean up temp files
+    await _outputSink?.flush();
+    await _outputSink?.close();
+    _outputSink = null;
+
     try {
-      await _videoFile?.delete();
-      await _audioFile?.delete();
+      await _outputFile?.delete();
     } catch (e) {
-      debugPrint('StreamingPlayback: Error cleaning up temp files: $e');
+      debugPrint('StreamingPlayback: Error cleaning up temp file: $e');
     }
-    _videoFile = null;
-    _audioFile = null;
+    _outputFile = null;
     _useHttp = false;
   }
 
@@ -1119,13 +1151,16 @@ class StreamingPlaybackPipeline {
     _opusMuxer.reset();
     _aacMuxer.reset();
 
-    _videoInitWritten = false;
-    _audioInitWritten = false;
+    _initWritten = false;
+    _videoConfigReady = false;
     _detectedAudioType = null;
+    _audioEnabled = true;
     _videoSegmentsWritten = 0;
     _audioSegmentsWritten = 0;
+    _globalSequenceNumber = 0;
+    _pendingVideoFrames.clear();
+    _pendingAudioFrames.clear();
 
-    // Reinitialize
     await initialize();
   }
 
@@ -1136,9 +1171,7 @@ class StreamingPlaybackPipeline {
 
     await _cleanupStreaming();
 
-    _videoReadyController.close();
-    _audioReadyController.close();
-
+    _readyController.close();
     _mediaPipeline.dispose();
   }
 }

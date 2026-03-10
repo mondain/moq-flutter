@@ -113,6 +113,7 @@ class MobileAudioCapture implements AudioCapture {
   final _audioController = StreamController<AudioSamples>.broadcast();
   bool _isCapturing = false;
   int _startTimeMs = 0;
+  int _actualSampleRate = 0;
 
   StreamSubscription<List<double>>? _audioSubscription;
   Timer? _silenceTimer;
@@ -156,6 +157,18 @@ class MobileAudioCapture implements AudioCapture {
         cancelOnError: false,
       );
 
+      // Query actual sample rate from the device (may differ from requested)
+      Future.delayed(const Duration(milliseconds: 100), () async {
+        try {
+          _actualSampleRate = await audio_pkg.AudioStreamer().actualSampleRate;
+          _logger.i('Actual device sample rate: $_actualSampleRate Hz'
+              '${_actualSampleRate != config.sampleRate ? ' (requested ${config.sampleRate})' : ''}');
+        } catch (e) {
+          _logger.w('Could not query actual sample rate: $e');
+          _actualSampleRate = config.sampleRate;
+        }
+      });
+
       _logger.i('Mobile audio capture started');
     } catch (e) {
       _logger.e('Failed to start mobile audio capture: $e');
@@ -168,21 +181,29 @@ class MobileAudioCapture implements AudioCapture {
     if (!_isCapturing) return;
 
     final timestampMs = DateTime.now().millisecondsSinceEpoch - _startTimeMs;
+    final sampleRate = _actualSampleRate > 0 ? _actualSampleRate : config.sampleRate;
 
-    // Convert double samples to Int16 PCM
-    final pcmData = Uint8List(audioData.length * 2);
+    // audio_streamer returns mono samples as List<double>.
+    // Convert to Int16 PCM and duplicate to stereo if configured for 2 channels.
+    final outputChannels = config.channels;
+    final pcmData = Uint8List(audioData.length * outputChannels * 2);
     final byteData = ByteData.view(pcmData.buffer);
 
     for (var i = 0; i < audioData.length; i++) {
-      // Clamp and convert to 16-bit signed integer
       final sample = (audioData[i] * 32767).clamp(-32768, 32767).toInt();
-      byteData.setInt16(i * 2, sample, Endian.little);
+      if (outputChannels == 2) {
+        // Duplicate mono sample to both left and right channels
+        byteData.setInt16(i * 4, sample, Endian.little);
+        byteData.setInt16(i * 4 + 2, sample, Endian.little);
+      } else {
+        byteData.setInt16(i * 2, sample, Endian.little);
+      }
     }
 
     _audioController.add(AudioSamples(
       data: pcmData,
-      sampleRate: config.sampleRate,
-      channels: config.channels,
+      sampleRate: sampleRate,
+      channels: outputChannels,
       timestampMs: timestampMs,
       bitsPerSample: 16,
     ));
@@ -243,6 +264,7 @@ class LinuxAudioCapture implements AudioCapture {
 
   // Process for parec
   dynamic _parecProcess;
+  Timer? _silenceTimer;
 
   LinuxAudioCapture({
     required this.config,
@@ -304,6 +326,13 @@ class LinuxAudioCapture implements AudioCapture {
         },
         onError: (error) {
           _logger.e('parec error: $error');
+          _startSilenceGenerator();
+        },
+        onDone: () {
+          if (_isCapturing) {
+            _logger.w('parec process exited unexpectedly, falling back to silence');
+            _startSilenceGenerator();
+          }
         },
       );
 
@@ -313,15 +342,15 @@ class LinuxAudioCapture implements AudioCapture {
 
       _logger.i('Linux audio capture started (PulseAudio)');
     } catch (e) {
-      _isCapturing = false;
       _logger.e('Failed to start Linux audio capture: $e');
-      // Fall back to silence
+      // Keep _isCapturing = true so silence generator continues running
       _startSilenceGenerator();
     }
   }
 
   void _startSilenceGenerator() {
-    Timer.periodic(const Duration(milliseconds: 20), (timer) {
+    _silenceTimer?.cancel();
+    _silenceTimer = Timer.periodic(const Duration(milliseconds: 20), (timer) {
       if (!_isCapturing) {
         timer.cancel();
         return;
@@ -339,6 +368,7 @@ class LinuxAudioCapture implements AudioCapture {
         bitsPerSample: 16,
       ));
     });
+    _logger.w('Falling back to silence generator');
   }
 
   @override
@@ -346,6 +376,8 @@ class LinuxAudioCapture implements AudioCapture {
     if (!_isCapturing) return;
 
     _isCapturing = false;
+    _silenceTimer?.cancel();
+    _silenceTimer = null;
 
     if (_parecProcess != null) {
       _parecProcess.kill();
