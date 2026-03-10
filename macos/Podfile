@@ -39,4 +39,36 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_macos_build_settings(target)
   end
+
+  # Add build phase to embed libopus.dylib into the app bundle
+  main_project = installer.aggregate_targets.first.user_project
+  runner_target = main_project.targets.find { |t| t.name == 'Runner' }
+  if runner_target
+    phase_name = 'Embed libopus'
+    unless runner_target.shell_script_build_phases.any? { |p| p.name == phase_name }
+      phase = runner_target.new_shell_script_build_phase(phase_name)
+      phase.shell_script = <<~SCRIPT
+        # Copy libopus.dylib into the app bundle Frameworks directory
+        OPUS_PATHS=(
+          "/opt/homebrew/lib/libopus.dylib"
+          "/usr/local/lib/libopus.dylib"
+        )
+        DEST="${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}"
+        mkdir -p "${DEST}"
+        for OPUS_PATH in "${OPUS_PATHS[@]}"; do
+          if [ -f "${OPUS_PATH}" ]; then
+            cp "${OPUS_PATH}" "${DEST}/libopus.dylib"
+            # Fix install name so the loader finds it in @rpath
+            install_name_tool -id "@rpath/libopus.dylib" "${DEST}/libopus.dylib" 2>/dev/null || true
+            # Ad-hoc codesign so macOS does not kill the process (Code Signature Invalid)
+            codesign --force --sign - "${DEST}/libopus.dylib"
+            echo "Embedded and signed libopus from ${OPUS_PATH}"
+            exit 0
+          fi
+        done
+        echo "warning: libopus.dylib not found, audio encoding will not work"
+      SCRIPT
+    end
+    main_project.save
+  end
 end

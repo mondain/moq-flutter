@@ -11,6 +11,7 @@ import 'package:logger/logger.dart';
 import '../moq/media/audio_capture.dart';
 import '../moq/media/audio_encoder.dart';
 import '../moq/media/native_opus_encoder.dart';
+import '../moq/media/native_h264_encoder.dart';
 import '../moq/media/camera_capture.dart';
 import '../moq/media/linux_capture.dart';
 import '../moq/media/video_encoder.dart';
@@ -56,6 +57,7 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   // Video capture and encoding
   VideoCapture? _videoCapture;
   H264Encoder? _h264Encoder;
+  NativeH264Encoder? _nativeH264Encoder;
   StreamSubscription<VideoFrame>? _videoFrameSubscription;
   StreamSubscription<H264Frame>? _h264FrameSubscription;
 
@@ -223,8 +225,38 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
   Future<void> _initializeVideoPublishing(String videoTrackName) async {
     try {
-      // Create platform-appropriate video capture
-      if (Platform.isLinux) {
+      final encoderConfig = H264EncoderConfig(
+        width: _resolution.width,
+        height: _resolution.height,
+        frameRate: 30,
+        bitrate: _resolution.bitrateBps,
+        gopSize: 30,
+        profile: 'baseline',
+        preset: 'ultrafast',
+        tune: 'zerolatency',
+        inputFormat: 'yuv420p',
+      );
+
+      // Create platform-appropriate video capture and H.264 encoder
+      if (Platform.isMacOS || Platform.isIOS) {
+        // Use native AVFoundation capture + VideoToolbox H.264 encoding
+        final nativeCapture = NativeVideoCapture(
+          config: CaptureConfig(
+            resolution: ResolutionPreset.high,
+            enableAudio: false,
+          ),
+          logger: _logger,
+        );
+        await nativeCapture.initialize();
+        _videoCapture = nativeCapture;
+
+        // Use native VideoToolbox H.264 encoder (no FFmpeg needed)
+        _nativeH264Encoder = NativeH264Encoder(
+          config: encoderConfig,
+          logger: _logger,
+        );
+        await _nativeH264Encoder!.start();
+      } else if (Platform.isLinux) {
         final linuxCapture = LinuxVideoCapture(
           config: CaptureConfig(
             resolution: ResolutionPreset.high,
@@ -233,6 +265,9 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
         );
         await linuxCapture.initialize();
         _videoCapture = linuxCapture;
+
+        _h264Encoder = H264Encoder(config: encoderConfig, logger: _logger);
+        await _h264Encoder!.start();
       } else {
         final cameraCapture = CameraCapture(
           config: CaptureConfig(
@@ -242,31 +277,21 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
         );
         await cameraCapture.initialize();
         _videoCapture = cameraCapture;
+
+        _h264Encoder = H264Encoder(config: encoderConfig, logger: _logger);
+        await _h264Encoder!.start();
       }
 
-      // Create H.264 encoder with selected resolution and bitrate
-      _h264Encoder = H264Encoder(
-        config: H264EncoderConfig(
-          width: _resolution.width,
-          height: _resolution.height,
-          frameRate: 30,
-          bitrate: _resolution.bitrateBps,
-          gopSize: 30,
-          profile: 'baseline',
-          preset: 'ultrafast',
-          tune: 'zerolatency',
-          inputFormat: 'yuv420p',
-        ),
-      );
-      await _h264Encoder!.start();
+      // Subscribe to video frames -> FFmpeg encoder (non-macOS/iOS only)
+      if (_h264Encoder != null) {
+        _videoFrameSubscription = _videoCapture!.videoFrames.listen((videoFrame) {
+          _h264Encoder?.addFrame(videoFrame.data, videoFrame.timestampMs);
+        });
+      }
 
-      // Subscribe to video frames
-      _videoFrameSubscription = _videoCapture!.videoFrames.listen((videoFrame) {
-        _h264Encoder?.addFrame(videoFrame.data, videoFrame.timestampMs);
-      });
-
-      // Subscribe to encoded frames
-      _h264FrameSubscription = _h264Encoder!.frames.listen((h264Frame) async {
+      // Subscribe to encoded frames (from either native or FFmpeg encoder)
+      final h264Stream = _nativeH264Encoder?.frames ?? _h264Encoder!.frames;
+      _h264FrameSubscription = h264Stream.listen((h264Frame) async {
         if (!_isPublishing || _isVideoMuted) return;
 
         try {
@@ -447,6 +472,12 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
       _h264Encoder = null;
     }
 
+    if (_nativeH264Encoder != null) {
+      await _nativeH264Encoder!.stop();
+      _nativeH264Encoder!.dispose();
+      _nativeH264Encoder = null;
+    }
+
     // Stop audio
     if (_audioCapture != null) {
       await _audioCapture!.stopCapture();
@@ -591,8 +622,8 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   /// Build AVCDecoderConfigurationRecord from SPS and PPS NAL units
   /// Format per ISO 14496-15
   Uint8List? _buildAvcDecoderConfig() {
-    final sps = _h264Encoder?.spsData;
-    final pps = _h264Encoder?.ppsData;
+    final sps = _nativeH264Encoder?.spsData ?? _h264Encoder?.spsData;
+    final pps = _nativeH264Encoder?.ppsData ?? _h264Encoder?.ppsData;
     if (sps == null || pps == null || sps.length < 4) return null;
 
     final builder = BytesBuilder();

@@ -242,6 +242,7 @@
 				3399D490228B24CF009A79C7 /* ShellScript */,
 				BCA54351A565A77FF63C5182 /* [CP] Embed Pods Frameworks */,
 				MOQ12345678901234567890AB /* Copy Native QUIC Library */,
+				F158C04A073E6FA4ADE9B2F5 /* Embed libopus */,
 			);
 			buildRules = (
 			);
@@ -422,6 +423,24 @@
 			shellPath = /bin/sh;
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
+		};
+		F158C04A073E6FA4ADE9B2F5 /* Embed libopus */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Embed libopus";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Copy libopus.dylib into the app bundle Frameworks directory\nOPUS_PATHS=(\n  \"/opt/homebrew/lib/libopus.dylib\"\n  \"/usr/local/lib/libopus.dylib\"\n)\nDEST=\"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\nmkdir -p \"${DEST}\"\nfor OPUS_PATH in \"${OPUS_PATHS[@]}\"; do\n  if [ -f \"${OPUS_PATH}\" ]; then\n    cp \"${OPUS_PATH}\" \"${DEST}/libopus.dylib\"\n    # Fix install name so the loader finds it in @rpath\n    install_name_tool -id \"@rpath/libopus.dylib\" \"${DEST}/libopus.dylib\" 2>/dev/null || true\n    # Ad-hoc codesign so macOS does not kill the process (Code Signature Invalid)\n    codesign --force --sign - \"${DEST}/libopus.dylib\"\n    echo \"Embedded and signed libopus from ${OPUS_PATH}\"\n    exit 0\n  fi\ndone\necho \"warning: libopus.dylib not found, audio encoding will not work\"\n";
 		};
 		MOQ12345678901234567890AB /* Copy Native QUIC Library */ = {
 			isa = PBXShellScriptBuildPhase;

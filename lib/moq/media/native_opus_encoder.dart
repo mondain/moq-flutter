@@ -56,18 +56,24 @@ class NativeOpusEncoder {
     }
   }
 
-  /// Load libopus from system paths on macOS/Linux.
+  /// Load libopus from the app bundle or system paths on macOS/Linux.
   static DynamicLibrary _loadSystemLibopus() {
-    final paths = Platform.isMacOS
-        ? [
-            '/opt/homebrew/lib/libopus.dylib', // Apple Silicon Homebrew
-            '/usr/local/lib/libopus.dylib', // Intel Homebrew
-            'libopus.dylib', // System path
-          ]
-        : [
-            'libopus.so.0', // Linux system
-            'libopus.so', // Linux fallback
-          ];
+    final paths = <String>[];
+    if (Platform.isMacOS) {
+      // Try app bundle first (works inside sandbox)
+      final execDir = File(Platform.resolvedExecutable).parent.path;
+      paths.addAll([
+        '$execDir/../Frameworks/libopus.dylib', // Embedded in .app bundle
+        '/opt/homebrew/lib/libopus.dylib', // Apple Silicon Homebrew
+        '/usr/local/lib/libopus.dylib', // Intel Homebrew
+        'libopus.dylib', // System path
+      ]);
+    } else {
+      paths.addAll([
+        'libopus.so.0', // Linux system
+        'libopus.so', // Linux fallback
+      ]);
+    }
 
     for (final path in paths) {
       try {

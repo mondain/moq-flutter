@@ -1,6 +1,7 @@
 import Cocoa
 import FlutterMacOS
 import AVFoundation
+import VideoToolbox
 
 @main
 class AppDelegate: FlutterAppDelegate {
@@ -28,9 +29,11 @@ public class NativeCapturePlugin: NSObject, FlutterPlugin {
     private var methodChannel: FlutterMethodChannel?
     private var audioEventChannel: FlutterEventChannel?
     private var videoEventChannel: FlutterEventChannel?
+    private var h264EventChannel: FlutterEventChannel?
 
     private var audioStreamHandler: MacOSAudioStreamHandler?
     private var videoStreamHandler: MacOSVideoStreamHandler?
+    private var h264StreamHandler: MacOSVideoStreamHandler?
 
     private var captureSession: AVCaptureSession?
     private var audioOutput: AVCaptureAudioDataOutput?
@@ -40,6 +43,7 @@ public class NativeCapturePlugin: NSObject, FlutterPlugin {
     private var videoDevice: AVCaptureDevice?
 
     private let captureQueue = DispatchQueue(label: "com.moq_flutter.capture", qos: .userInteractive)
+    private let encoderQueue = DispatchQueue(label: "com.moq_flutter.encoder", qos: .userInteractive)
 
     // Configuration
     private var audioSampleRate: Int = 48000
@@ -49,6 +53,14 @@ public class NativeCapturePlugin: NSObject, FlutterPlugin {
     private var videoWidth: Int = 1280
     private var videoHeight: Int = 720
     private var videoFrameRate: Int = 30
+
+    // H.264 encoder (VideoToolbox)
+    private var compressionSession: VTCompressionSession?
+    private var h264EncoderInitialized = false
+    private var h264Encoding = false
+    private var h264Bitrate: Int = 2_000_000
+    private var h264GopSize: Int = 30
+    private var h264FrameCount: Int = 0
 
     // State
     private var isAudioCapturing = false
@@ -80,6 +92,14 @@ public class NativeCapturePlugin: NSObject, FlutterPlugin {
             binaryMessenger: registrar.messenger
         )
         instance.videoEventChannel?.setStreamHandler(instance.videoStreamHandler)
+
+        // H.264 encoded frames event channel
+        instance.h264StreamHandler = MacOSVideoStreamHandler()
+        instance.h264EventChannel = FlutterEventChannel(
+            name: "com.moq_flutter/h264_frames",
+            binaryMessenger: registrar.messenger
+        )
+        instance.h264EventChannel?.setStreamHandler(instance.h264StreamHandler)
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -108,6 +128,12 @@ public class NativeCapturePlugin: NSObject, FlutterPlugin {
             handleRequestCameraPermission(result: result)
         case "requestMicrophonePermission":
             handleRequestMicrophonePermission(result: result)
+        case "initializeH264Encoder":
+            handleInitializeH264Encoder(call, result: result)
+        case "startH264Encoding":
+            handleStartH264Encoding(result: result)
+        case "stopH264Encoding":
+            handleStopH264Encoding(result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -588,9 +614,16 @@ extension NativeCapturePlugin: AVCaptureAudioDataOutputSampleBufferDelegate, AVC
     }
 
     private func processVideoSampleBuffer(_ sampleBuffer: CMSampleBuffer, timestampMs: Int) {
-        guard let eventSink = videoStreamHandler?.eventSink else { return }
-
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // If H.264 encoding is active, encode the frame
+        if h264Encoding {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            encodeVideoFrame(pixelBuffer, presentationTimeStamp: pts)
+        }
+
+        // Only send raw frames if there's a listener (skip if only encoding)
+        guard let eventSink = videoStreamHandler?.eventSink else { return }
 
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
@@ -625,6 +658,250 @@ extension NativeCapturePlugin: AVCaptureAudioDataOutputSampleBufferDelegate, AVC
             "format": formatString,
             "bytesPerRow": bytesPerRow,
             "timestampMs": timestampMs
+        ]
+
+        DispatchQueue.main.async {
+            eventSink(frameData)
+        }
+    }
+}
+
+// MARK: - H.264 Encoder (VideoToolbox)
+
+extension NativeCapturePlugin {
+
+    func handleInitializeH264Encoder(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any] else {
+            result(FlutterError(code: "INVALID_ARGS", message: "Invalid arguments", details: nil))
+            return
+        }
+
+        let width = args["width"] as? Int ?? videoWidth
+        let height = args["height"] as? Int ?? videoHeight
+        h264Bitrate = args["bitrate"] as? Int ?? 2_000_000
+        h264GopSize = args["gopSize"] as? Int ?? 30
+        let frameRate = args["frameRate"] as? Int ?? videoFrameRate
+
+        encoderQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            // Tear down existing session
+            if let session = self.compressionSession {
+                VTCompressionSessionInvalidate(session)
+                self.compressionSession = nil
+            }
+
+            // Create compression session
+            var session: VTCompressionSession?
+            let status = VTCompressionSessionCreate(
+                allocator: kCFAllocatorDefault,
+                width: Int32(width),
+                height: Int32(height),
+                codecType: kCMVideoCodecType_H264,
+                encoderSpecification: nil,
+                imageBufferAttributes: nil,
+                compressedDataAllocator: nil,
+                outputCallback: nil,
+                refcon: nil,
+                compressionSessionOut: &session
+            )
+
+            guard status == noErr, let session = session else {
+                DispatchQueue.main.async {
+                    result(FlutterError(code: "ENCODER_ERROR",
+                                       message: "Failed to create VTCompressionSession: \(status)",
+                                       details: nil))
+                }
+                return
+            }
+
+            // Configure encoder properties
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
+                                value: kVTProfileLevel_H264_Baseline_AutoLevel)
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
+                                value: self.h264Bitrate as CFNumber)
+            // Data rate limits: [bytes per second, duration in seconds]
+            let dataRateLimit = [Double(self.h264Bitrate / 8) * 1.5, 1.0] as CFArray
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: dataRateLimit)
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                                value: self.h264GopSize as CFNumber)
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+                                value: (Double(self.h264GopSize) / Double(frameRate)) as CFNumber)
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering,
+                                value: kCFBooleanFalse)
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,
+                                value: frameRate as CFNumber)
+
+            VTCompressionSessionPrepareToEncodeFrames(session)
+
+            self.compressionSession = session
+            self.h264EncoderInitialized = true
+            self.h264FrameCount = 0
+
+            DispatchQueue.main.async {
+                result(nil)
+            }
+        }
+    }
+
+    func handleStartH264Encoding(result: @escaping FlutterResult) {
+        guard h264EncoderInitialized else {
+            result(FlutterError(code: "NOT_INITIALIZED",
+                               message: "H.264 encoder not initialized",
+                               details: nil))
+            return
+        }
+        h264Encoding = true
+        result(nil)
+    }
+
+    func handleStopH264Encoding(result: @escaping FlutterResult) {
+        h264Encoding = false
+
+        encoderQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            if let session = self.compressionSession {
+                VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+                VTCompressionSessionInvalidate(session)
+                self.compressionSession = nil
+            }
+            self.h264EncoderInitialized = false
+
+            DispatchQueue.main.async {
+                result(nil)
+            }
+        }
+    }
+
+    /// Encode a CVPixelBuffer to H.264 using VideoToolbox
+    func encodeVideoFrame(_ pixelBuffer: CVPixelBuffer, presentationTimeStamp: CMTime) {
+        guard h264Encoding, let session = compressionSession else { return }
+
+        // Force keyframe at GOP boundaries
+        var properties: CFDictionary? = nil
+        if h264FrameCount % h264GopSize == 0 {
+            properties = [
+                kVTEncodeFrameOptionKey_ForceKeyFrame: true
+            ] as CFDictionary
+        }
+        h264FrameCount += 1
+
+        let encodeStatus = VTCompressionSessionEncodeFrame(
+            session,
+            imageBuffer: pixelBuffer,
+            presentationTimeStamp: presentationTimeStamp,
+            duration: .invalid,
+            frameProperties: properties,
+            infoFlagsOut: nil
+        ) { [weak self] status, infoFlags, sampleBuffer in
+            guard status == noErr, let sampleBuffer = sampleBuffer else { return }
+            self?.handleEncodedH264Frame(sampleBuffer)
+        }
+
+        if encodeStatus != noErr {
+            NSLog("VTCompressionSession encode error: \(encodeStatus)")
+        }
+    }
+
+    /// Process encoded H.264 sample buffer and send NAL units to Flutter
+    private func handleEncodedH264Frame(_ sampleBuffer: CMSampleBuffer) {
+        guard let eventSink = h264StreamHandler?.eventSink else { return }
+
+        // Check if keyframe
+        let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+        var isKeyframe = false
+        if let attachments = attachments, CFArrayGetCount(attachments) > 0 {
+            let attachment = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFDictionary.self)
+            var notSync: CFBoolean = kCFBooleanFalse
+            if CFDictionaryGetValueIfPresent(attachment, Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque(), nil) {
+                let value = CFDictionaryGetValue(attachment, Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque())
+                notSync = unsafeBitCast(value, to: CFBoolean.self)
+            }
+            isKeyframe = !CFBooleanGetValue(notSync)
+        }
+
+        // Get format description for SPS/PPS
+        guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
+
+        var nalData = Data()
+
+        // For keyframes, prepend SPS and PPS
+        if isKeyframe {
+            // Extract SPS
+            var spsSize: Int = 0
+            var spsCount: Int = 0
+            var spsPointer: UnsafePointer<UInt8>?
+            let spsStatus = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                formatDesc, parameterSetIndex: 0,
+                parameterSetPointerOut: &spsPointer, parameterSetSizeOut: &spsSize,
+                parameterSetCountOut: &spsCount, nalUnitHeaderLengthOut: nil)
+
+            if spsStatus == noErr, let sps = spsPointer {
+                // Annex B start code + SPS
+                nalData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+                nalData.append(sps, count: spsSize)
+            }
+
+            // Extract PPS
+            var ppsSize: Int = 0
+            var ppsPointer: UnsafePointer<UInt8>?
+            let ppsStatus = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                formatDesc, parameterSetIndex: 1,
+                parameterSetPointerOut: &ppsPointer, parameterSetSizeOut: &ppsSize,
+                parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil)
+
+            if ppsStatus == noErr, let pps = ppsPointer {
+                // Annex B start code + PPS
+                nalData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+                nalData.append(pps, count: ppsSize)
+            }
+        }
+
+        // Extract NAL units from the data buffer
+        guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+
+        var totalLength: Int = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        let blockStatus = CMBlockBufferGetDataPointer(
+            dataBuffer, atOffset: 0, lengthAtOffsetOut: nil,
+            totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
+
+        guard blockStatus == kCMBlockBufferNoErr, let pointer = dataPointer else { return }
+
+        // Convert AVCC (length-prefixed) to Annex B (start-code prefixed)
+        var offset = 0
+        while offset < totalLength - 4 {
+            // Read 4-byte NAL unit length (big-endian)
+            var nalLength: UInt32 = 0
+            memcpy(&nalLength, pointer + offset, 4)
+            nalLength = CFSwapInt32BigToHost(nalLength)
+            offset += 4
+
+            guard nalLength > 0, offset + Int(nalLength) <= totalLength else { break }
+
+            // Annex B start code + NAL unit data
+            nalData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+            nalData.append(Data(bytes: pointer + offset, count: Int(nalLength)))
+            offset += Int(nalLength)
+        }
+
+        guard !nalData.isEmpty else { return }
+
+        // Get timestamp
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let timestampMs: Int
+        if let start = startTimestamp {
+            timestampMs = Int(CMTimeGetSeconds(CMTimeSubtract(pts, start)) * 1000)
+        } else {
+            timestampMs = Int(CMTimeGetSeconds(pts) * 1000)
+        }
+
+        let frameData: [String: Any] = [
+            "data": FlutterStandardTypedData(bytes: nalData),
+            "isKeyframe": isKeyframe,
+            "timestampMs": timestampMs,
         ]
 
         DispatchQueue.main.async {
