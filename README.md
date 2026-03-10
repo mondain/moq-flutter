@@ -287,6 +287,26 @@ flutter build macos        # macOS
 flutter build windows      # Windows
 ```
 
+#### iOS Code Signing
+
+Building for an iOS device requires a valid Apple code signing certificate and provisioning profile. If you see "No valid code signing certificates were found", follow these steps:
+
+1. Open the Xcode workspace:
+   ```bash
+   open ios/Runner.xcworkspace
+   ```
+2. Select the **Runner** project in the navigator, then the **Runner** target in the project settings.
+3. Under **Signing & Capabilities**, check **"Automatically manage signing"** and select a **Development Team** (sign in with your Apple ID if needed).
+4. Ensure the **Bundle Identifier** is unique (e.g., `com.moqapp.moqFlutter`).
+5. If deploying to a physical device, register it with your Apple Developer Account and trust the development certificate on the device via **Settings > General > Device Management**.
+6. Run `flutter build ios` again.
+
+To build for the **iOS Simulator** without code signing:
+
+```bash
+flutter build ios --simulator
+```
+
 For the APK install, just use the generated APK from the build output:
 
 ```sh
