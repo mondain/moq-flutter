@@ -70,3 +70,4 @@ target
 .claude/settings.local.json
 linux/*.so
 
+android/build/reports/problems/problems-report.html

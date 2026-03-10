@@ -245,67 +245,69 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
             ),
           ),
 
-          // Info and controls
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 600),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    ConnectionStatusCard(statusMessage: _statusMessage),
-                    const SizedBox(height: 4),
+          // Info and controls (scrollable so collapse works on small screens)
+          Flexible(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 600),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      ConnectionStatusCard(statusMessage: _statusMessage),
+                      const SizedBox(height: 4),
 
-                    // Statistics card (collapsible)
-                    Card(
-                      clipBehavior: Clip.antiAlias,
-                      child: ExpansionTile(
-                        title: Text(
-                          'Stream Statistics',
-                          style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
+                      // Statistics card (collapsible)
+                      Card(
+                        clipBehavior: Clip.antiAlias,
+                        child: ExpansionTile(
+                          title: Text(
+                            'Stream Statistics',
+                            style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
+                          ),
+                          initiallyExpanded: true,
+                          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                          children: [
+                            _buildStatsRow('Objects Received', '$_videoObjectsReceived'),
+                            _buildStatsRow('Video Frames', '$_videoFramesDecoded'),
+                            _buildStatsRow('Audio Frames', '$_audioFramesDecoded'),
+                            if (_useNativePlayer)
+                              _buildStatsRow('Buffer Written', _formatBytes(_bytesWrittenToBuffer))
+                            else
+                              _buildStatsRow('Segments Written', '$_videoSegmentsWritten'),
+                            _buildStatsRow('Data Received', _formatBytes(_totalBytesReceived)),
+                          ],
                         ),
-                        initiallyExpanded: true,
-                        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                        children: [
-                          _buildStatsRow('Objects Received', '$_videoObjectsReceived'),
-                          _buildStatsRow('Video Frames', '$_videoFramesDecoded'),
-                          _buildStatsRow('Audio Frames', '$_audioFramesDecoded'),
-                          if (_useNativePlayer)
-                            _buildStatsRow('Buffer Written', _formatBytes(_bytesWrittenToBuffer))
-                          else
-                            _buildStatsRow('Segments Written', '$_videoSegmentsWritten'),
-                          _buildStatsRow('Data Received', _formatBytes(_totalBytesReceived)),
-                        ],
                       ),
-                    ),
-                    const SizedBox(height: 4),
+                      const SizedBox(height: 4),
 
-                    // Track info card (collapsible)
-                    Card(
-                      clipBehavior: Clip.antiAlias,
-                      child: ExpansionTile(
-                        title: Text(
-                          'Track Info',
-                          style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
+                      // Track info card (collapsible)
+                      Card(
+                        clipBehavior: Clip.antiAlias,
+                        child: ExpansionTile(
+                          title: Text(
+                            'Track Info',
+                            style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
+                          ),
+                          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                          children: [
+                            _buildInfoRow('Namespace', widget.namespace),
+                            _buildInfoRow('Video Track', widget.videoTrackAlias),
+                            _buildInfoRow('Audio Track', widget.audioTrackAlias),
+                          ],
                         ),
-                        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                        children: [
-                          _buildInfoRow('Namespace', widget.namespace),
-                          _buildInfoRow('Video Track', widget.videoTrackAlias),
-                          _buildInfoRow('Audio Track', widget.audioTrackAlias),
-                        ],
                       ),
-                    ),
-                    const SizedBox(height: 8),
+                      const SizedBox(height: 8),
 
-                    // Disconnect button
-                    OutlinedButton.icon(
-                      onPressed: isConnected ? _disconnect : null,
-                      icon: const Icon(Icons.stop),
-                      label: const Text('Disconnect', style: TextStyle(fontSize: 15)),
-                    ),
-                  ],
+                      // Disconnect button
+                      OutlinedButton.icon(
+                        onPressed: isConnected ? _disconnect : null,
+                        icon: const Icon(Icons.stop),
+                        label: const Text('Disconnect', style: TextStyle(fontSize: 15)),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
