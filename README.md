@@ -287,6 +287,18 @@ flutter build macos        # macOS
 flutter build windows      # Windows
 ```
 
+For the APK install, just use the generated APK from the build output:
+
+```sh
+adb install build/app/outputs/flutter-apk/app-release.apk
+```
+
+Or if a previous version is already installed:
+
+```sh
+adb install -r build/app/outputs/flutter-apk/app-release.apk
+```
+
 ## Media Capture
 
 The application supports publishing live audio and video with platform-specific capture implementations:
