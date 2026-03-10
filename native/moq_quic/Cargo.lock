@@ -698,6 +698,7 @@ dependencies = [
  "parking_lot",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pemfile",
  "tokio",
  "url",

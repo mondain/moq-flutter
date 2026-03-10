@@ -1800,7 +1800,8 @@ class MoQClient {
     _incomingPublishController.close();
     _incomingSubscribeController.close();
     _goawayController.close();
-    _transport.dispose();
+    // Note: transport is NOT disposed here - it's owned by the provider
+    // and managed by Riverpod's lifecycle (ref.onDispose in the transport provider)
   }
 }
 

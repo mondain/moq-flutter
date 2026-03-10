@@ -65,8 +65,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           ListTile(
             leading: const Icon(Icons.cloud),
-            title: const Text('moq-rs Server'),
-            subtitle: const Text('moq.rs:4443'),
+            title: const Text('Red5 Server'),
+            subtitle: const Text('moq-relay.red5.net:4433'),
+            onTap: () {
+              // TODO: Apply preset
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Preset applied')),
+              );
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.cloud),
+            title: const Text('Moq.dev Development'),
+            subtitle: const Text('cdn.moq.dev:4443'),
             onTap: () {
               // TODO: Apply preset
               ScaffoldMessenger.of(context).showSnackBar(
@@ -192,7 +203,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ListTile(
             leading: const Icon(Icons.code),
             title: const Text('Source Code'),
-            subtitle: const Text('github.com/user/moq-flutter'),
+            subtitle: const Text('github.com/mondain/moq-flutter'),
             onTap: () {
               // TODO: Open GitHub URL
             },

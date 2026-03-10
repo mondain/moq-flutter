@@ -831,8 +831,9 @@ Uint8List writeTrun({
   required List<int> sampleDurations,
   required List<int> sampleFlags,
 }) {
-  // Flags: data-offset-present, sample-duration-present, sample-size-present, sample-flags-present
-  const flags = 0x000F01; // data offset + first sample flags + sample duration + sample size + sample flags
+  // Flags: data-offset-present (0x01), sample-duration-present (0x100),
+  // sample-size-present (0x200), sample-flags-present (0x400)
+  const flags = 0x000701;
 
   final sampleCount = sampleSizes.length;
   final perSampleSize = 4 + 4 + 4; // duration + size + flags

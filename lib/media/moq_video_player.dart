@@ -43,8 +43,8 @@ class MoQVideoPlayer {
   bool _foundValidVideoStart = false;
   int _skippedVideoFrames = 0;
 
-  // Media paths
-  String? _videoPath;
+  // Pending audio path (stored if audio ready before video)
+  String? _audioPath;
 
   MoQVideoPlayer({Logger? logger})
       : _logger = logger ?? Logger(),
@@ -55,24 +55,23 @@ class MoQVideoPlayer {
     _configureLivePlayback();
   }
 
-  /// Configure mpv for live/growing file playback
+  /// Configure mpv for live streaming playback via TCP socket
   Future<void> _configureLivePlayback() async {
     try {
-      // Access the native player to set mpv properties
       final nativePlayer = _player.platform;
       if (nativePlayer is NativePlayer) {
-        // Tell demuxer this is a live/untimed stream
-        await nativePlayer.setProperty('demuxer-lavf-o', 'live=1');
-        // Use low-latency profile
+        // Low-latency profile reduces internal buffering
         await nativePlayer.setProperty('profile', 'low-latency');
-        // Reduce cache for live playback
+        // Disable cache - data comes live from the socket
         await nativePlayer.setProperty('cache', 'no');
         await nativePlayer.setProperty('cache-pause', 'no');
-        // Don't wait for full file
-        await nativePlayer.setProperty('demuxer-readahead-secs', '1');
-        // Force continuous reading
-        await nativePlayer.setProperty('stream-buffer-size', '4k');
-        _logger.i('Configured mpv for live playback');
+        // Don't pause when demuxer runs low on data
+        await nativePlayer.setProperty('cache-pause-wait', '0');
+        // Minimal read-ahead for live content
+        await nativePlayer.setProperty('demuxer-readahead-secs', '2');
+        // Don't force a format - let ffmpeg auto-detect fMP4
+        // The mov/mp4 demuxer handles fragmented mp4 over non-seekable streams
+        _logger.i('Configured mpv for live TCP playback');
       }
     } catch (e) {
       _logger.w('Could not configure live playback options: $e');
@@ -277,40 +276,52 @@ class MoQVideoPlayer {
 
   void _handleVideoReady(String videoPath) {
     _logger.i('Video file ready at: $videoPath');
-    _videoPath = videoPath;
-
     if (!_mediaOpened) {
       _openMedia(videoPath);
     }
   }
 
   void _handleAudioReady(String audioPath) {
-    _logger.i('Audio file ready at: $audioPath');
+    _logger.i('Audio ready at: $audioPath');
+    _audioPath = audioPath;
 
-    // We prefer to wait for video before starting playback
-    // If video becomes available, we'll play video
-    // Only play audio-only if explicitly needed (video track not subscribed)
-    // For now, log that audio is ready and wait for video
-    if (!_mediaOpened && _videoPath == null) {
-      _logger.i('Audio ready, waiting for video before starting playback...');
-      // Don't start audio-only playback - wait for video keyframe
-      // The streaming file approach doesn't work well with audio-only
-      // because mpv sees the file as complete after the initial data
+    if (_mediaOpened) {
+      _addAudioTrack(audioPath);
+    }
+  }
+
+  Future<void> _addAudioTrack(String audioPath) async {
+    try {
+      final nativePlayer = _player.platform;
+      if (nativePlayer is NativePlayer) {
+        _logger.i('Adding audio track: $audioPath');
+        await nativePlayer.command(['audio-add', audioPath, 'select']);
+        _logger.i('audio-add command sent');
+      }
+    } catch (e) {
+      _logger.e('Failed to add audio track: $e');
     }
   }
 
   Future<void> _openMedia(String path) async {
     try {
-      _logger.i('Opening media file: $path');
+      // If audio URL is already known, set it before opening video
+      // so mpv opens both streams simultaneously
+      if (_audioPath != null) {
+        final nativePlayer = _player.platform;
+        if (nativePlayer is NativePlayer) {
+          _logger.i('Pre-setting audio-file: $_audioPath');
+          await nativePlayer.setProperty('audio-files', _audioPath!);
+        }
+      }
 
-      // Open the fMP4 file with options for streaming
+      _logger.i('Opening media: $path');
       await _player.open(
         Media(path),
-        play: true, // Auto-play when opened
+        play: true,
       );
       _mediaOpened = true;
-
-      _logger.i('Media opened successfully, playback started');
+      _logger.i('Media opened, playback started');
     } catch (e) {
       _logger.e('Failed to open media: $e');
     }

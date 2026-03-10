@@ -59,7 +59,7 @@ dependencies:
   media_kit_libs_video: ^1.0.5
 
   # Camera and audio capture
-  camera: ^0.11.1
+  camera: ^0.12.0
   # Audio streaming (mobile platforms - Android/iOS)
   audio_streamer: ^4.3.0
 

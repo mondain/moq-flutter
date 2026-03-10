@@ -258,7 +258,7 @@ pub extern "C" fn moq_webtransport_connect(
     host: *const c_char,
     port: u16,
     path: *const c_char,
-    _insecure: u8,
+    insecure: u8,
     out_session_id: *mut u64,
 ) -> i32 {
     let host_str = unsafe {
@@ -302,19 +302,31 @@ pub extern "C" fn moq_webtransport_connect(
             }
         };
 
-        // Create client configuration
-        // For now, we use NoVerification for both modes since:
-        // 1. Development servers typically use self-signed certificates
-        // 2. Loading system root certs requires additional dependencies
-        // 3. The user can enable 'insecure' mode checkbox in the UI
-        //
-        // IMPORTANT: ALPN protocols for MoQ over WebTransport
+        // Create client configuration with cert verification
+        // ALPN protocols for MoQ over WebTransport
         // Per draft-ietf-moq-transport-14, WebTransport uses h3 ALPN
-        // But we also advertise moq protocol for compatibility
-        let mut crypto = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoVerification))
-            .with_no_client_auth();
+        let mut crypto = if insecure != 0 {
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerification))
+                .with_no_client_auth()
+        } else {
+            // Load system root certificates for TLS validation
+            let mut certs = rustls::RootCertStore::empty();
+            let native_certs_result = rustls_native_certs::load_native_certs();
+            if let Some(ref e) = native_certs_result.errors.first() {
+                log::warn!("Error loading some native certs: {:?}", e);
+            }
+            for cert in native_certs_result.certs {
+                if let Err(e) = certs.add(cert) {
+                    log::warn!("Failed to add native cert: {:?}", e);
+                }
+            }
+            log::info!("Loaded {} system root certificates for WebTransport", certs.len());
+            rustls::ClientConfig::builder()
+                .with_root_certificates(certs)
+                .with_no_client_auth()
+        };
         // Set ALPN protocols - include both h3 (for WebTransport) and moq (for MoQ)
         crypto.alpn_protocols = vec![
             b"moq-00".to_vec(),      // MoQ protocol (draft-00)

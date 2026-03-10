@@ -13,6 +13,7 @@ quinn = { version = "0.11.9", default-features = false, features = ["rustls", "r
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 rustls = { version = "0.23.37", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2.2"
+rustls-native-certs = "0.8"
 log = "0.4"
 futures = "0.3.32"
 dashmap = "6.1"

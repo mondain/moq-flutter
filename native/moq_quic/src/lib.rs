@@ -288,7 +288,18 @@ pub extern "C" fn moq_quic_connect(
         };
 
         // Create client configuration with proper transport settings
-        let certs = rustls::RootCertStore::empty();
+        // Load system root certificates for TLS validation
+        let mut certs = rustls::RootCertStore::empty();
+        let native_certs_result = rustls_native_certs::load_native_certs();
+        if let Some(ref e) = native_certs_result.errors.first() {
+            log::warn!("Error loading some native certs: {:?}", e);
+        }
+        for cert in native_certs_result.certs {
+            if let Err(e) = certs.add(cert) {
+                log::warn!("Failed to add native cert: {:?}", e);
+            }
+        }
+        log::info!("Loaded {} system root certificates", certs.len());
 
         // Build transport config with standard settings (from moq-native-ietf)
         let mut transport = TransportConfig::default();
