@@ -19,7 +19,8 @@ class QuicTransport extends MoQTransport {
 
   final _connectionStateController = StreamController<bool>.broadcast();
   final _incomingDataController = StreamController<Uint8List>.broadcast();
-  final _incomingDataStreamController = StreamController<DataStreamChunk>.broadcast();
+  final _incomingDataStreamController =
+      StreamController<DataStreamChunk>.broadcast();
   final _incomingDatagramController = StreamController<Uint8List>.broadcast();
 
   bool _isConnected = false;
@@ -45,6 +46,7 @@ class QuicTransport extends MoQTransport {
   _StreamFinishFunc? _moqQuicStreamFinish;
   _CloseFunc? _moqQuicClose;
   _CleanupFunc? _moqQuicCleanup;
+  _GetLastErrorFunc? _moqQuicGetLastError;
   _GetDataStreamsFunc? _moqQuicGetDataStreams;
   _RecvDataFunc? _moqQuicRecvData;
   _CloseDataStreamFunc? _moqQuicCloseDataStream;
@@ -67,54 +69,111 @@ class QuicTransport extends MoQTransport {
           .lookup<NativeFunction<Void Function()>>('moq_quic_init')
           .asFunction();
       _moqQuicConnect = _nativeLib!
-          .lookup<NativeFunction<NativeInt32 Function(Pointer<Int8>, NativeUint16, Uint8, Pointer<NativeUint64>)>>(
-              'moq_quic_connect')
+          .lookup<
+            NativeFunction<
+              NativeInt32 Function(
+                Pointer<Int8>,
+                NativeUint16,
+                Uint8,
+                Uint32,
+                Pointer<Int8>,
+                Pointer<NativeUint64>,
+              )
+            >
+          >('moq_quic_connect')
           .asFunction();
       _moqQuicSend = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
-              'moq_quic_send')
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)
+            >
+          >('moq_quic_send')
           .asFunction();
       _moqQuicSendData = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
-              'moq_quic_send_data')
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)
+            >
+          >('moq_quic_send_data')
           .asFunction();
       _moqQuicOpenStream = _nativeLib!
-          .lookup<NativeFunction<NativeInt32 Function(NativeUint64, Pointer<NativeUint64>)>>(
-              'moq_quic_open_stream')
+          .lookup<
+            NativeFunction<
+              NativeInt32 Function(NativeUint64, Pointer<NativeUint64>)
+            >
+          >('moq_quic_open_stream')
           .asFunction();
       _moqQuicStreamWrite = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
-              'moq_quic_stream_write')
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(
+                NativeUint64,
+                NativeUint64,
+                Pointer<Uint8>,
+                NativeIntPtr,
+              )
+            >
+          >('moq_quic_stream_write')
           .asFunction();
       _moqQuicStreamFinish = _nativeLib!
-          .lookup<NativeFunction<NativeInt32 Function(NativeUint64, NativeUint64)>>(
-              'moq_quic_stream_finish')
+          .lookup<
+            NativeFunction<NativeInt32 Function(NativeUint64, NativeUint64)>
+          >('moq_quic_stream_finish')
           .asFunction();
       _moqQuicClose = _nativeLib!
-          .lookup<NativeFunction<NativeInt32 Function(NativeUint64)>>('moq_quic_close')
+          .lookup<NativeFunction<NativeInt32 Function(NativeUint64)>>(
+            'moq_quic_close',
+          )
           .asFunction();
       _moqQuicCleanup = _nativeLib!
           .lookup<NativeFunction<Void Function()>>('moq_quic_cleanup')
           .asFunction();
+      _moqQuicGetLastError = _nativeLib!
+          .lookup<
+            NativeFunction<NativeInt32 Function(Pointer<Uint8>, NativeIntPtr)>
+          >('moq_quic_get_last_error')
+          .asFunction();
       _moqQuicGetDataStreams = _nativeLib!
-          .lookup<NativeFunction<NativeInt32 Function(NativeUint64, Pointer<NativeUint64>, NativeIntPtr)>>(
-              'moq_quic_get_data_streams')
+          .lookup<
+            NativeFunction<
+              NativeInt32 Function(
+                NativeUint64,
+                Pointer<NativeUint64>,
+                NativeIntPtr,
+              )
+            >
+          >('moq_quic_get_data_streams')
           .asFunction();
       _moqQuicRecvData = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
-              'moq_quic_recv_data')
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(
+                NativeUint64,
+                NativeUint64,
+                Pointer<Uint8>,
+                NativeIntPtr,
+              )
+            >
+          >('moq_quic_recv_data')
           .asFunction();
       _moqQuicCloseDataStream = _nativeLib!
-          .lookup<NativeFunction<NativeInt32 Function(NativeUint64, NativeUint64)>>(
-              'moq_quic_close_data_stream')
+          .lookup<
+            NativeFunction<NativeInt32 Function(NativeUint64, NativeUint64)>
+          >('moq_quic_close_data_stream')
           .asFunction();
       _moqQuicSendDatagram = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
-              'moq_quic_send_datagram')
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)
+            >
+          >('moq_quic_send_datagram')
           .asFunction();
       _moqQuicRecvDatagram = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
-              'moq_quic_recv_datagram')
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)
+            >
+          >('moq_quic_recv_datagram')
           .asFunction();
 
       // Initialize the native library
@@ -148,7 +207,9 @@ class QuicTransport extends MoQTransport {
         }
       }
 
-      throw Exception('Could not find libmoq_quic.so in any of the expected paths');
+      throw Exception(
+        'Could not find libmoq_quic.so in any of the expected paths',
+      );
     } else if (Platform.isIOS) {
       // Try DynamicLibrary.process() first (for statically linked libraries)
       try {
@@ -190,7 +251,9 @@ class QuicTransport extends MoQTransport {
         }
       }
 
-      throw Exception('Could not find libmoq_quic.dylib in any of the expected paths');
+      throw Exception(
+        'Could not find libmoq_quic.dylib in any of the expected paths',
+      );
     } else if (Platform.isWindows) {
       // Try multiple paths for the native library on Windows
       final paths = [
@@ -208,9 +271,13 @@ class QuicTransport extends MoQTransport {
         }
       }
 
-      throw Exception('Could not find moq_quic.dll in any of the expected paths');
+      throw Exception(
+        'Could not find moq_quic.dll in any of the expected paths',
+      );
     } else {
-      throw UnsupportedError('Platform not supported: ${Platform.operatingSystem}');
+      throw UnsupportedError(
+        'Platform not supported: ${Platform.operatingSystem}',
+      );
     }
   }
 
@@ -221,7 +288,11 @@ class QuicTransport extends MoQTransport {
   Stream<bool> get connectionStateStream => _connectionStateController.stream;
 
   @override
-  Future<void> connect(String host, int port, {Map<String, String>? options}) async {
+  Future<void> connect(
+    String host,
+    int port, {
+    Map<String, String>? options,
+  }) async {
     if (_isConnected) {
       _logger.w('Already connected');
       return;
@@ -240,7 +311,10 @@ class QuicTransport extends MoQTransport {
 
       // Check for insecure flag in options (for self-signed certificates)
       final insecureValue = options?['insecure'];
-      final insecure = (insecureValue == 'true' || insecureValue?.toString() == 'true') ? 1 : 0;
+      final insecure =
+          (insecureValue == 'true' || insecureValue?.toString() == 'true')
+          ? 1
+          : 0;
       if (insecure != 0) {
         _logger.w('Certificate verification DISABLED (insecure mode)');
       }
@@ -249,14 +323,28 @@ class QuicTransport extends MoQTransport {
       final hostPtr = host.toNativeUtf8();
       final connectionIdPtr = calloc<Uint64>();
 
+      final versionValue = int.tryParse(
+        options?['moq_version'] ?? options?['target_version'] ?? '',
+      );
+      final moqVersion = (versionValue ?? 0).toUnsigned(32);
+      final alpn = options?['moq_alpn'] ?? '';
+      final alpnPtr = alpn.toNativeUtf8();
+
       final result = _moqQuicConnect!(
-          hostPtr.cast<Int8>(), port.toUnsigned(16), insecure, connectionIdPtr);
+        hostPtr.cast<Int8>(),
+        port.toUnsigned(16),
+        insecure,
+        moqVersion,
+        alpnPtr.cast<Int8>(),
+        connectionIdPtr,
+      );
 
       calloc.free(hostPtr);
+      calloc.free(alpnPtr);
 
       if (result != 0) {
         calloc.free(connectionIdPtr);
-        throw Exception('QUIC connection failed with error code: $result');
+        throw Exception(_buildConnectionError(result));
       }
 
       _connectionId = connectionIdPtr.value;
@@ -423,7 +511,12 @@ class QuicTransport extends MoQTransport {
       final nativeData = dataPtr.asTypedList(data.length);
       nativeData.setAll(0, data);
 
-      final sent = _moqQuicStreamWrite!(_connectionId, streamId, dataPtr, data.length);
+      final sent = _moqQuicStreamWrite!(
+        _connectionId,
+        streamId,
+        dataPtr,
+        data.length,
+      );
 
       calloc.free(dataPtr);
 
@@ -512,7 +605,8 @@ class QuicTransport extends MoQTransport {
   Stream<Uint8List> get incomingData => _incomingDataController.stream;
 
   @override
-  Stream<DataStreamChunk> get incomingDataStreams => _incomingDataStreamController.stream;
+  Stream<DataStreamChunk> get incomingDataStreams =>
+      _incomingDataStreamController.stream;
 
   @override
   Stream<Uint8List> get incomingDatagrams => _incomingDatagramController.stream;
@@ -565,7 +659,11 @@ class QuicTransport extends MoQTransport {
     try {
       // Get list of active data streams (up to 64)
       final streamIdsPtr = calloc<Uint64>(64);
-      final streamCount = _moqQuicGetDataStreams!(_connectionId, streamIdsPtr, 64);
+      final streamCount = _moqQuicGetDataStreams!(
+        _connectionId,
+        streamIdsPtr,
+        64,
+      );
 
       if (streamCount > 0) {
         final streamIds = streamIdsPtr.asTypedList(streamCount);
@@ -578,7 +676,12 @@ class QuicTransport extends MoQTransport {
 
           // Keep reading until no more data available
           while (true) {
-            final received = _moqQuicRecvData!(_connectionId, streamId, buffer, 65536);
+            final received = _moqQuicRecvData!(
+              _connectionId,
+              streamId,
+              buffer,
+              65536,
+            );
 
             if (received <= 0) break; // No more data
 
@@ -599,10 +702,9 @@ class QuicTransport extends MoQTransport {
             }
 
             _logger.d('Received $received bytes on data stream $streamId');
-            _incomingDataStreamController.add(DataStreamChunk(
-              streamId: streamId,
-              data: data,
-            ));
+            _incomingDataStreamController.add(
+              DataStreamChunk(streamId: streamId, data: data),
+            );
           }
 
           calloc.free(buffer);
@@ -667,8 +769,11 @@ class QuicTransport extends MoQTransport {
     if (_nativeLib == null) return 0;
     try {
       final func = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
-              'moq_quic_recv');
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)
+            >
+          >('moq_quic_recv');
       final recv = func.asFunction<int Function(int, Pointer<Uint8>, int)>();
       return recv(connectionId, buffer, bufferLen);
     } catch (e) {
@@ -689,29 +794,58 @@ class QuicTransport extends MoQTransport {
     _incomingDatagramController.close();
     _knownDataStreams.clear();
   }
+
+  String _buildConnectionError(int result) {
+    var errorMsg = 'QUIC connection failed with error code: $result';
+    if (_moqQuicGetLastError != null) {
+      final errorBuffer = calloc<Uint8>(512);
+      final errorLen = _moqQuicGetLastError!(errorBuffer, 512);
+      if (errorLen > 0) {
+        final errorBytes = errorBuffer.asTypedList(errorLen);
+        errorMsg = '$errorMsg: ${String.fromCharCodes(errorBytes)}';
+      }
+      calloc.free(errorBuffer);
+    }
+    return errorMsg;
+  }
 }
 
 // FFI function signatures
 typedef _InitFunc = void Function();
-typedef _ConnectFunc = int Function(
-    Pointer<Int8> host, int port, int insecure, Pointer<Uint64> outConnectionId);
-typedef _SendFunc = int Function(
-    int connectionId, Pointer<Uint8> data, int len);
-typedef _OpenStreamFunc = int Function(
-    int connectionId, Pointer<Uint64> outStreamId);
-typedef _StreamWriteFunc = int Function(
-    int connectionId, int streamId, Pointer<Uint8> data, int len);
-typedef _StreamFinishFunc = int Function(
-    int connectionId, int streamId);
+typedef _ConnectFunc =
+    int Function(
+      Pointer<Int8> host,
+      int port,
+      int insecure,
+      int moqVersion,
+      Pointer<Int8> alpn,
+      Pointer<Uint64> outConnectionId,
+    );
+typedef _SendFunc =
+    int Function(int connectionId, Pointer<Uint8> data, int len);
+typedef _OpenStreamFunc =
+    int Function(int connectionId, Pointer<Uint64> outStreamId);
+typedef _StreamWriteFunc =
+    int Function(int connectionId, int streamId, Pointer<Uint8> data, int len);
+typedef _StreamFinishFunc = int Function(int connectionId, int streamId);
 typedef _CloseFunc = int Function(int connectionId);
 typedef _CleanupFunc = void Function();
-typedef _GetDataStreamsFunc = int Function(
-    int connectionId, Pointer<Uint64> outStreamIds, int maxStreams);
-typedef _RecvDataFunc = int Function(
-    int connectionId, int streamId, Pointer<Uint8> buffer, int bufferLen);
-typedef _CloseDataStreamFunc = int Function(
-    int connectionId, int streamId);
-typedef _SendDatagramFunc = int Function(
-    int connectionId, Pointer<Uint8> data, int len);
-typedef _RecvDatagramFunc = int Function(
-    int connectionId, Pointer<Uint8> buffer, int bufferLen);
+typedef _GetLastErrorFunc = int Function(Pointer<Uint8> buffer, int bufferLen);
+typedef _GetDataStreamsFunc =
+    int Function(
+      int connectionId,
+      Pointer<Uint64> outStreamIds,
+      int maxStreams,
+    );
+typedef _RecvDataFunc =
+    int Function(
+      int connectionId,
+      int streamId,
+      Pointer<Uint8> buffer,
+      int bufferLen,
+    );
+typedef _CloseDataStreamFunc = int Function(int connectionId, int streamId);
+typedef _SendDatagramFunc =
+    int Function(int connectionId, Pointer<Uint8> data, int len);
+typedef _RecvDatagramFunc =
+    int Function(int connectionId, Pointer<Uint8> buffer, int bufferLen);

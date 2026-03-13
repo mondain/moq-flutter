@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:logger/logger.dart';
 import '../moq/transport/moq_transport.dart';
+import '../moq/protocol/moq_messages.dart';
 
 // FFI type aliases
 typedef NativeInt32 = Int32;
@@ -23,7 +24,8 @@ class WebTransportQuinnTransport extends MoQTransport {
 
   final _connectionStateController = StreamController<bool>.broadcast();
   final _incomingDataController = StreamController<Uint8List>.broadcast();
-  final _incomingDataStreamController = StreamController<DataStreamChunk>.broadcast();
+  final _incomingDataStreamController =
+      StreamController<DataStreamChunk>.broadcast();
   final _incomingDatagramController = StreamController<Uint8List>.broadcast();
 
   bool _isConnected = false;
@@ -55,8 +57,8 @@ class WebTransportQuinnTransport extends MoQTransport {
   bool _nativeLibraryLoaded = false;
 
   WebTransportQuinnTransport({Logger? logger, String path = '/moq'})
-      : _logger = logger ?? Logger(),
-        _path = path {
+    : _logger = logger ?? Logger(),
+      _path = path {
     _loadNativeLibrary();
   }
 
@@ -69,46 +71,96 @@ class WebTransportQuinnTransport extends MoQTransport {
           .lookup<NativeFunction<Void Function()>>('moq_webtransport_init')
           .asFunction();
       _moqWtConnect = _nativeLib!
-          .lookup<NativeFunction<NativeInt32 Function(Pointer<Int8>, NativeUint16, Pointer<Int8>, Uint8, Pointer<NativeUint64>)>>(
-              'moq_webtransport_connect')
+          .lookup<
+            NativeFunction<
+              NativeInt32 Function(
+                Pointer<Int8>,
+                NativeUint16,
+                Pointer<Int8>,
+                Pointer<Int8>,
+                Uint8,
+                Pointer<NativeUint64>,
+              )
+            >
+          >('moq_webtransport_connect')
           .asFunction();
       _moqWtSend = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
-              'moq_webtransport_send')
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)
+            >
+          >('moq_webtransport_send')
           .asFunction();
       _moqWtRecv = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
-              'moq_webtransport_recv')
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)
+            >
+          >('moq_webtransport_recv')
           .asFunction();
       _moqWtRecvData = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<NativeUint64>, Pointer<Uint8>, NativeIntPtr, Pointer<NativeInt32>)>>(
-              'moq_webtransport_recv_data')
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(
+                NativeUint64,
+                Pointer<NativeUint64>,
+                Pointer<Uint8>,
+                NativeIntPtr,
+                Pointer<NativeInt32>,
+              )
+            >
+          >('moq_webtransport_recv_data')
           .asFunction();
       _moqWtClose = _nativeLib!
-          .lookup<NativeFunction<NativeInt32 Function(NativeUint64)>>('moq_webtransport_close')
+          .lookup<NativeFunction<NativeInt32 Function(NativeUint64)>>(
+            'moq_webtransport_close',
+          )
           .asFunction();
       _moqWtCleanup = _nativeLib!
           .lookup<NativeFunction<Void Function()>>('moq_webtransport_cleanup')
           .asFunction();
       _moqWtGetLastError = _nativeLib!
-          .lookup<NativeFunction<NativeInt32 Function(Pointer<Uint8>, NativeIntPtr)>>('moq_webtransport_get_last_error')
+          .lookup<
+            NativeFunction<NativeInt32 Function(Pointer<Uint8>, NativeIntPtr)>
+          >('moq_webtransport_get_last_error')
           .asFunction();
       _moqWtOpenUniStream = _nativeLib!
-          .lookup<NativeFunction<NativeInt32 Function(NativeUint64, Pointer<NativeUint64>)>>('moq_webtransport_open_uni_stream')
+          .lookup<
+            NativeFunction<
+              NativeInt32 Function(NativeUint64, Pointer<NativeUint64>)
+            >
+          >('moq_webtransport_open_uni_stream')
           .asFunction();
       _moqWtStreamWrite = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, NativeUint64, Pointer<Uint8>, NativeIntPtr)>>('moq_webtransport_stream_write')
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(
+                NativeUint64,
+                NativeUint64,
+                Pointer<Uint8>,
+                NativeIntPtr,
+              )
+            >
+          >('moq_webtransport_stream_write')
           .asFunction();
       _moqWtStreamFinish = _nativeLib!
-          .lookup<NativeFunction<NativeInt32 Function(NativeUint64, NativeUint64)>>('moq_webtransport_stream_finish')
+          .lookup<
+            NativeFunction<NativeInt32 Function(NativeUint64, NativeUint64)>
+          >('moq_webtransport_stream_finish')
           .asFunction();
       _moqWtSendDatagram = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
-              'moq_webtransport_send_datagram')
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)
+            >
+          >('moq_webtransport_send_datagram')
           .asFunction();
       _moqWtRecvDatagram = _nativeLib!
-          .lookup<NativeFunction<NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)>>(
-              'moq_webtransport_recv_datagram')
+          .lookup<
+            NativeFunction<
+              NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)
+            >
+          >('moq_webtransport_recv_datagram')
           .asFunction();
 
       // Initialize the native library
@@ -141,7 +193,9 @@ class WebTransportQuinnTransport extends MoQTransport {
         }
       }
 
-      throw Exception('Could not find libmoq_quic.so in any of the expected paths');
+      throw Exception(
+        'Could not find libmoq_quic.so in any of the expected paths',
+      );
     } else if (Platform.isIOS) {
       // Try DynamicLibrary.process() first (for statically linked libraries)
       try {
@@ -183,7 +237,9 @@ class WebTransportQuinnTransport extends MoQTransport {
         }
       }
 
-      throw Exception('Could not find libmoq_quic.dylib in any of the expected paths');
+      throw Exception(
+        'Could not find libmoq_quic.dylib in any of the expected paths',
+      );
     } else if (Platform.isWindows) {
       final paths = [
         'moq_quic.dll',
@@ -200,9 +256,13 @@ class WebTransportQuinnTransport extends MoQTransport {
         }
       }
 
-      throw Exception('Could not find moq_quic.dll in any of the expected paths');
+      throw Exception(
+        'Could not find moq_quic.dll in any of the expected paths',
+      );
     } else {
-      throw UnsupportedError('Platform not supported: ${Platform.operatingSystem}');
+      throw UnsupportedError(
+        'Platform not supported: ${Platform.operatingSystem}',
+      );
     }
   }
 
@@ -213,7 +273,11 @@ class WebTransportQuinnTransport extends MoQTransport {
   Stream<bool> get connectionStateStream => _connectionStateController.stream;
 
   @override
-  Future<void> connect(String host, int port, {Map<String, String>? options}) async {
+  Future<void> connect(
+    String host,
+    int port, {
+    Map<String, String>? options,
+  }) async {
     if (_isConnected) {
       _logger.w('Already connected');
       return;
@@ -233,7 +297,10 @@ class WebTransportQuinnTransport extends MoQTransport {
 
       // Check for insecure flag in options
       final insecureValue = options?['insecure'];
-      final insecure = (insecureValue == 'true' || insecureValue?.toString() == 'true') ? 1 : 0;
+      final insecure =
+          (insecureValue == 'true' || insecureValue?.toString() == 'true')
+          ? 1
+          : 0;
       if (insecure != 0) {
         _logger.w('Certificate verification DISABLED (insecure mode)');
       }
@@ -241,18 +308,28 @@ class WebTransportQuinnTransport extends MoQTransport {
       // Convert host and path to native strings
       final hostPtr = host.toNativeUtf8();
       final pathPtr = path.toNativeUtf8();
+      final protocol = _protocolForOptions(options);
+      final protocolPtr = protocol.toNativeUtf8();
       final sessionIdPtr = calloc<Uint64>();
 
       final result = _moqWtConnect!(
-          hostPtr.cast<Int8>(), port.toUnsigned(16), pathPtr.cast<Int8>(), insecure, sessionIdPtr);
+        hostPtr.cast<Int8>(),
+        port.toUnsigned(16),
+        pathPtr.cast<Int8>(),
+        protocolPtr.cast<Int8>(),
+        insecure,
+        sessionIdPtr,
+      );
 
       calloc.free(hostPtr);
       calloc.free(pathPtr);
+      calloc.free(protocolPtr);
 
       if (result != 0) {
         calloc.free(sessionIdPtr);
         // Try to get the detailed error message
-        String errorMsg = 'WebTransport connection failed with error code: $result';
+        String errorMsg =
+            'WebTransport connection failed with error code: $result';
         if (_moqWtGetLastError != null) {
           final errorBuffer = calloc<Uint8>(512);
           final errorLen = _moqWtGetLastError!(errorBuffer, 512);
@@ -345,7 +422,9 @@ class WebTransportQuinnTransport extends MoQTransport {
   Future<void> sendData(Uint8List data) async {
     // WebTransport data streams are not yet implemented
     // For now, fall back to control stream send
-    _logger.w('sendData not yet implemented for WebTransport, using control stream');
+    _logger.w(
+      'sendData not yet implemented for WebTransport, using control stream',
+    );
     return send(data);
   }
 
@@ -356,7 +435,9 @@ class WebTransportQuinnTransport extends MoQTransport {
     }
 
     if (!_nativeLibraryLoaded || _moqWtOpenUniStream == null) {
-      _logger.e('Cannot open stream: Native WebTransport library is not available');
+      _logger.e(
+        'Cannot open stream: Native WebTransport library is not available',
+      );
       throw StateError('Native WebTransport library not available');
     }
 
@@ -365,7 +446,9 @@ class WebTransportQuinnTransport extends MoQTransport {
 
     if (result != 0) {
       calloc.free(streamIdPtr);
-      throw Exception('Failed to open unidirectional stream: error code $result');
+      throw Exception(
+        'Failed to open unidirectional stream: error code $result',
+      );
     }
 
     final streamId = streamIdPtr.value;
@@ -382,7 +465,9 @@ class WebTransportQuinnTransport extends MoQTransport {
     }
 
     if (!_nativeLibraryLoaded || _moqWtStreamWrite == null) {
-      _logger.e('Cannot write to stream: Native WebTransport library is not available');
+      _logger.e(
+        'Cannot write to stream: Native WebTransport library is not available',
+      );
       throw StateError('Native WebTransport library not available');
     }
 
@@ -390,12 +475,19 @@ class WebTransportQuinnTransport extends MoQTransport {
     final nativeData = dataPtr.asTypedList(data.length);
     nativeData.setAll(0, data);
 
-    final result = _moqWtStreamWrite!(_sessionId, streamId, dataPtr, data.length);
+    final result = _moqWtStreamWrite!(
+      _sessionId,
+      streamId,
+      dataPtr,
+      data.length,
+    );
 
     calloc.free(dataPtr);
 
     if (result < 0) {
-      throw Exception('Failed to write to stream $streamId: error code $result');
+      throw Exception(
+        'Failed to write to stream $streamId: error code $result',
+      );
     }
 
     _stats = _stats.copyWith(
@@ -414,7 +506,9 @@ class WebTransportQuinnTransport extends MoQTransport {
     }
 
     if (!_nativeLibraryLoaded || _moqWtStreamFinish == null) {
-      _logger.e('Cannot finish stream: Native WebTransport library is not available');
+      _logger.e(
+        'Cannot finish stream: Native WebTransport library is not available',
+      );
       throw StateError('Native WebTransport library not available');
     }
 
@@ -431,7 +525,8 @@ class WebTransportQuinnTransport extends MoQTransport {
   Stream<Uint8List> get incomingData => _incomingDataController.stream;
 
   @override
-  Stream<DataStreamChunk> get incomingDataStreams => _incomingDataStreamController.stream;
+  Stream<DataStreamChunk> get incomingDataStreams =>
+      _incomingDataStreamController.stream;
 
   @override
   Future<void> sendDatagram(Uint8List data) async {
@@ -440,7 +535,9 @@ class WebTransportQuinnTransport extends MoQTransport {
     }
 
     if (!_nativeLibraryLoaded || _moqWtSendDatagram == null) {
-      _logger.e('Cannot send datagram: Native WebTransport library is not available');
+      _logger.e(
+        'Cannot send datagram: Native WebTransport library is not available',
+      );
       throw StateError('Native WebTransport library not available');
     }
 
@@ -541,7 +638,13 @@ class WebTransportQuinnTransport extends MoQTransport {
         final streamIdPtr = calloc<Uint64>();
         final isCompletePtr = calloc<Int32>();
 
-        final received = _moqWtRecvData!(_sessionId, streamIdPtr, buffer, 65536, isCompletePtr);
+        final received = _moqWtRecvData!(
+          _sessionId,
+          streamIdPtr,
+          buffer,
+          65536,
+          isCompletePtr,
+        );
 
         if (received > 0) {
           final streamId = streamIdPtr.value;
@@ -558,14 +661,18 @@ class WebTransportQuinnTransport extends MoQTransport {
             lastActivity: DateTime.now(),
           );
 
-          _logger.d('Received $received bytes on data stream $streamId (complete: $isComplete)');
+          _logger.d(
+            'Received $received bytes on data stream $streamId (complete: $isComplete)',
+          );
 
           // Emit as DataStreamChunk
-          _incomingDataStreamController.add(DataStreamChunk(
-            streamId: streamId,
-            data: data,
-            isComplete: isComplete,
-          ));
+          _incomingDataStreamController.add(
+            DataStreamChunk(
+              streamId: streamId,
+              data: data,
+              isComplete: isComplete,
+            ),
+          );
 
           calloc.free(buffer);
           calloc.free(streamIdPtr);
@@ -607,7 +714,9 @@ class WebTransportQuinnTransport extends MoQTransport {
             lastActivity: DateTime.now(),
           );
 
-          _logger.d('Received datagram (${received.toInt()} bytes) via WebTransport');
+          _logger.d(
+            'Received datagram (${received.toInt()} bytes) via WebTransport',
+          );
           _incomingDatagramController.add(data);
 
           calloc.free(buffer);
@@ -639,23 +748,47 @@ class WebTransportQuinnTransport extends MoQTransport {
   }
 }
 
+String _protocolForOptions(Map<String, String>? options) {
+  final version = int.tryParse(
+    options?['moq_version'] ?? options?['target_version'] ?? '',
+  );
+  if (version != null && MoQVersion.isDraft16OrLater(version)) {
+    return 'moqt-16';
+  }
+  return 'moq-00';
+}
+
 // FFI function signatures
 typedef _InitFunc = void Function();
-typedef _ConnectFunc = int Function(
-    Pointer<Int8> host, int port, Pointer<Int8> path, int insecure, Pointer<Uint64> outSessionId);
-typedef _SendFunc = int Function(
-    int sessionId, Pointer<Uint8> data, int len);
-typedef _RecvFunc = int Function(
-    int sessionId, Pointer<Uint8> buffer, int bufferLen);
-typedef _RecvDataFunc = int Function(
-    int sessionId, Pointer<Uint64> outStreamId, Pointer<Uint8> buffer, int bufferLen, Pointer<Int32> outIsComplete);
+typedef _ConnectFunc =
+    int Function(
+      Pointer<Int8> host,
+      int port,
+      Pointer<Int8> path,
+      Pointer<Int8> protocol,
+      int insecure,
+      Pointer<Uint64> outSessionId,
+    );
+typedef _SendFunc = int Function(int sessionId, Pointer<Uint8> data, int len);
+typedef _RecvFunc =
+    int Function(int sessionId, Pointer<Uint8> buffer, int bufferLen);
+typedef _RecvDataFunc =
+    int Function(
+      int sessionId,
+      Pointer<Uint64> outStreamId,
+      Pointer<Uint8> buffer,
+      int bufferLen,
+      Pointer<Int32> outIsComplete,
+    );
 typedef _CloseFunc = int Function(int sessionId);
 typedef _CleanupFunc = void Function();
 typedef _GetLastErrorFunc = int Function(Pointer<Uint8> buffer, int bufferLen);
-typedef _OpenUniStreamFunc = int Function(int sessionId, Pointer<Uint64> outStreamId);
-typedef _StreamWriteFunc = int Function(int sessionId, int streamId, Pointer<Uint8> data, int len);
+typedef _OpenUniStreamFunc =
+    int Function(int sessionId, Pointer<Uint64> outStreamId);
+typedef _StreamWriteFunc =
+    int Function(int sessionId, int streamId, Pointer<Uint8> data, int len);
 typedef _StreamFinishFunc = int Function(int sessionId, int streamId);
-typedef _SendDatagramFunc = int Function(
-    int sessionId, Pointer<Uint8> data, int len);
-typedef _RecvDatagramFunc = int Function(
-    int sessionId, Pointer<Uint8> buffer, int bufferLen);
+typedef _SendDatagramFunc =
+    int Function(int sessionId, Pointer<Uint8> data, int len);
+typedef _RecvDatagramFunc =
+    int Function(int sessionId, Pointer<Uint8> buffer, int bufferLen);

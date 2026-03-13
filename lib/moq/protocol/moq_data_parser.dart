@@ -29,9 +29,10 @@ class MoQDataStreamParser {
 
   /// Whether extensions are present (determined by header type)
   bool _extensionsPresent = false;
+  bool _subgroupIdFromFirstObject = false;
 
   MoQDataStreamParser({Logger? logger, this.version = MoQVersion.draft14})
-      : _logger = logger ?? Logger();
+    : _logger = logger ?? Logger();
 
   /// Parse a chunk of data from the stream
   ///
@@ -75,7 +76,10 @@ class MoQDataStreamParser {
 
     // Debug: log first 20 bytes of the buffer
     final previewLen = data.length < 20 ? data.length : 20;
-    final preview = data.sublist(0, previewLen).map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ');
+    final preview = data
+        .sublist(0, previewLen)
+        .map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}')
+        .join(' ');
     _logger.d('Header parse: first $previewLen bytes: $preview');
 
     try {
@@ -91,7 +95,9 @@ class MoQDataStreamParser {
         // Draft-16: accept 0x10-0x1D and 0x30-0x3D
         final masked = type & ~0x20; // mask out bit 5 for validation
         if (masked < 0x10 || masked > 0x1D) {
-          _logger.w('Invalid draft-16 subgroup header type: 0x${type.toRadixString(16)}');
+          _logger.w(
+            'Invalid draft-16 subgroup header type: 0x${type.toRadixString(16)}',
+          );
           return null;
         }
         defaultPriority = (type & 0x20) != 0;
@@ -99,7 +105,9 @@ class MoQDataStreamParser {
       } else {
         // Draft-14: validate 0x10-0x1D
         if (type < 0x10 || type > 0x1D) {
-          _logger.w('Invalid subgroup header type: 0x${type.toRadixString(16)}');
+          _logger.w(
+            'Invalid subgroup header type: 0x${type.toRadixString(16)}',
+          );
           return null;
         }
       }
@@ -108,9 +116,12 @@ class MoQDataStreamParser {
       _extensionsPresent = _hasExtensions(type);
       final hasSubgroupIdField = _hasSubgroupIdField(type);
       final subgroupIdIsFirstObjectId = _subgroupIdIsFirstObjectId(type);
+      _subgroupIdFromFirstObject = subgroupIdIsFirstObjectId;
 
-      _logger.d('Header type 0x${type.toRadixString(16)}: extensions=$_extensionsPresent, '
-          'hasSubgroupId=$hasSubgroupIdField, subgroupIdIsFirstObjectId=$subgroupIdIsFirstObjectId');
+      _logger.d(
+        'Header type 0x${type.toRadixString(16)}: extensions=$_extensionsPresent, '
+        'hasSubgroupId=$hasSubgroupIdField, subgroupIdIsFirstObjectId=$subgroupIdIsFirstObjectId',
+      );
 
       // Read Track Alias
       final (trackAlias, aliasLen) = MoQWireFormat.decodeVarint64(data, offset);
@@ -139,7 +150,9 @@ class MoQDataStreamParser {
       int publisherPriority = 0;
       if (MoQVersion.isDraft16OrLater(version) && defaultPriority) {
         // DEFAULT_PRIORITY bit set: Publisher Priority field is omitted
-        _logger.d('Draft-16 DEFAULT_PRIORITY set, skipping Publisher Priority byte');
+        _logger.d(
+          'Draft-16 DEFAULT_PRIORITY set, skipping Publisher Priority byte',
+        );
       } else {
         if (offset >= data.length) return null;
         publisherPriority = data[offset++];
@@ -164,8 +177,10 @@ class MoQDataStreamParser {
       // Remove parsed bytes from buffer
       _buffer.removeRange(0, offset);
 
-      _logger.d('Parsed SUBGROUP_HEADER: trackAlias=$trackAlias, '
-          'groupId=$groupId, subgroupId=$subgroupId');
+      _logger.d(
+        'Parsed SUBGROUP_HEADER: trackAlias=$trackAlias, '
+        'groupId=$groupId, subgroupId=$subgroupId',
+      );
 
       return header;
     } catch (e) {
@@ -183,56 +198,81 @@ class MoQDataStreamParser {
 
     // Debug: log first 10 bytes of object data
     final previewLen = data.length < 10 ? data.length : 10;
-    final preview = data.sublist(0, previewLen).map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ');
-    _logger.d('Object parse: first $previewLen bytes: $preview, currentObjId=$_currentObjectId');
+    final preview = data
+        .sublist(0, previewLen)
+        .map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}')
+        .join(' ');
+    _logger.d(
+      'Object parse: first $previewLen bytes: $preview, currentObjId=$_currentObjectId',
+    );
 
     try {
       // Read Object ID Delta (varint)
-      final (objectIdDelta, deltaLen) = MoQWireFormat.decodeVarint64(data, offset);
+      final (objectIdDelta, deltaLen) = MoQWireFormat.decodeVarint64(
+        data,
+        offset,
+      );
       offset += deltaLen;
 
-      _logger.d('Read delta=$objectIdDelta (deltaLen=$deltaLen), offset now=$offset');
+      _logger.d(
+        'Read delta=$objectIdDelta (deltaLen=$deltaLen), offset now=$offset',
+      );
 
       // Calculate actual Object ID
       // Per spec: Object ID = previous Object ID + delta + 1 (if not first)
       // For first object, Object ID = delta
       final Int64 objectId;
-      final bool isFirstObject = _currentObjectId == Int64(0) && !_parsedFirstObject;
+      final bool isFirstObject =
+          _currentObjectId == Int64(0) && !_parsedFirstObject;
       if (isFirstObject) {
         objectId = objectIdDelta;
         _logger.d('First object: objectId = delta = $objectIdDelta');
       } else {
         objectId = _currentObjectId + objectIdDelta + Int64(1);
-        _logger.d('Subsequent object: objectId = $_currentObjectId + $objectIdDelta + 1 = $objectId');
+        _logger.d(
+          'Subsequent object: objectId = $_currentObjectId + $objectIdDelta + 1 = $objectId',
+        );
       }
 
       // Read Extension Headers Length if extensions present
       final extensionHeaders = <KeyValuePair>[];
       if (_extensionsPresent) {
         final (extLen, extLenLen) = MoQWireFormat.decodeVarint(data, offset);
-        _logger.d('Extension headers: len=$extLen (lenLen=$extLenLen), offset before=$offset');
+        _logger.d(
+          'Extension headers: len=$extLen (lenLen=$extLenLen), offset before=$offset',
+        );
         offset += extLenLen;
 
         // Parse extension headers if length > 0
         if (extLen > 0) {
           final extEnd = offset + extLen;
+          var lastType = 0;
           while (offset < extEnd) {
-            final (headerType, typeLen) = MoQWireFormat.decodeVarint(data, offset);
+            final (rawType, typeLen) = MoQWireFormat.decodeVarint(data, offset);
             offset += typeLen;
+            final headerType = MoQVersion.usesDeltaKvp(version)
+                ? lastType + rawType
+                : rawType;
 
             Uint8List? value;
+            int? intValue;
             // Even types have varint value, odd types have length-prefixed buffer
             // Per moq-mi spec: "Even types indicate value coded by a single varint.
             // Odd types indicates value is byte buffer with prefixed varint to indicate length"
             if (headerType % 2 == 0) {
               // Even type: value is a single varint
-              final (varintValue, varintLen) = MoQWireFormat.decodeVarint(data, offset);
+              final (varintValue, varintLen) = MoQWireFormat.decodeVarint(
+                data,
+                offset,
+              );
               offset += varintLen;
-              // Store varint as single-byte array for consistency
-              value = Uint8List.fromList([varintValue & 0xFF]);
+              intValue = varintValue;
             } else {
               // Odd type: value is length-prefixed buffer
-              final (valueLen, valueLenLen) = MoQWireFormat.decodeVarint(data, offset);
+              final (valueLen, valueLenLen) = MoQWireFormat.decodeVarint(
+                data,
+                offset,
+              );
               offset += valueLenLen;
 
               if (valueLen > 0) {
@@ -242,15 +282,27 @@ class MoQDataStreamParser {
               }
             }
 
-            extensionHeaders.add(KeyValuePair(type: headerType, value: value));
+            extensionHeaders.add(
+              KeyValuePair(type: headerType, value: value, intValue: intValue),
+            );
+            if (MoQVersion.usesDeltaKvp(version)) {
+              lastType = headerType;
+            }
           }
-          _logger.d('Extension headers parsed, offset now=$offset (extEnd was $extEnd)');
+          _logger.d(
+            'Extension headers parsed, offset now=$offset (extEnd was $extEnd)',
+          );
         }
       }
 
       // Read Object Payload Length
-      final (payloadLen, payloadLenLen) = MoQWireFormat.decodeVarint(data, offset);
-      _logger.d('Payload: len=$payloadLen (lenLen=$payloadLenLen), offset before=$offset');
+      final (payloadLen, payloadLenLen) = MoQWireFormat.decodeVarint(
+        data,
+        offset,
+      );
+      _logger.d(
+        'Payload: len=$payloadLen (lenLen=$payloadLenLen), offset before=$offset',
+      );
       offset += payloadLenLen;
 
       // Determine if this is a status object (zero-length payload)
@@ -260,8 +312,12 @@ class MoQDataStreamParser {
       if (payloadLen == 0) {
         // Zero-length payload - need to read status
         if (offset >= data.length) return null;
-        final statusByte = data[offset++];
-        status = ObjectStatus.fromValue(statusByte) ?? ObjectStatus.normal;
+        final (statusValue, statusLen) = MoQWireFormat.decodeVarint(
+          data,
+          offset,
+        );
+        offset += statusLen;
+        status = ObjectStatus.fromValue(statusValue) ?? ObjectStatus.normal;
       } else {
         // Read payload
         if (offset + payloadLen > data.length) return null;
@@ -282,11 +338,24 @@ class MoQDataStreamParser {
       _currentObjectId = objectId;
       if (!_parsedFirstObject) {
         _parsedFirstObject = true;
+        if (_subgroupIdFromFirstObject && header != null) {
+          header = SubgroupHeader(
+            trackAlias: header!.trackAlias,
+            groupId: header!.groupId,
+            subgroupId: objectId,
+            publisherPriority: header!.publisherPriority,
+            extensionHeaders: header!.extensionHeaders,
+            useDefaultPriority: header!.useDefaultPriority,
+            endOfGroup: header!.endOfGroup,
+          );
+        }
       }
 
-      _logger.d('Object parsed: consumed $offset bytes, '
-          'objectId=$objectId, payloadLen=${payload?.length ?? 0}, '
-          'bufferLen before=${_buffer.length}');
+      _logger.d(
+        'Object parsed: consumed $offset bytes, '
+        'objectId=$objectId, payloadLen=${payload?.length ?? 0}, '
+        'bufferLen before=${_buffer.length}',
+      );
 
       // Remove parsed bytes from buffer
       _buffer.removeRange(0, offset);
@@ -311,8 +380,10 @@ class MoQDataStreamParser {
     // Mask out bit 5 (0x20) to normalize draft-16 types into the 0x10-0x1D range
     final normalized = type & ~0x20;
     // Types 0x14, 0x15, 0x1C, 0x1D have explicit Subgroup ID
-    return normalized == 0x14 || normalized == 0x15 ||
-           normalized == 0x1C || normalized == 0x1D;
+    return normalized == 0x14 ||
+        normalized == 0x15 ||
+        normalized == 0x1C ||
+        normalized == 0x1D;
   }
 
   /// Check if Subgroup ID is derived from first Object ID
@@ -320,8 +391,10 @@ class MoQDataStreamParser {
     // Mask out bit 5 (0x20) to normalize draft-16 types into the 0x10-0x1D range
     final normalized = type & ~0x20;
     // Types 0x12, 0x13, 0x1A, 0x1B use first Object ID as Subgroup ID
-    return normalized == 0x12 || normalized == 0x13 ||
-           normalized == 0x1A || normalized == 0x1B;
+    return normalized == 0x12 ||
+        normalized == 0x13 ||
+        normalized == 0x1A ||
+        normalized == 0x1B;
   }
 
   /// Reset the parser state
@@ -330,6 +403,7 @@ class MoQDataStreamParser {
     _buffer.clear();
     _currentObjectId = Int64(0);
     _extensionsPresent = false;
+    _subgroupIdFromFirstObject = false;
   }
 
   /// Get remaining buffered bytes

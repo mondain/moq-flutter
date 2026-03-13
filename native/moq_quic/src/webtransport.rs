@@ -2,6 +2,7 @@
 // Uses web-transport-quinn crate for WebTransport over HTTP/3
 
 use web_transport_quinn::{Session, Client as WebTransportClient, SendStream};
+use web_transport_quinn::proto::ConnectRequest;
 use quinn::{Endpoint, ClientConfig, TokioRuntime, EndpointConfig, TransportConfig};
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{ServerName, CertificateDer, UnixTime};
@@ -258,6 +259,7 @@ pub extern "C" fn moq_webtransport_connect(
     host: *const c_char,
     port: u16,
     path: *const c_char,
+    protocol: *const c_char,
     insecure: u8,
     out_session_id: *mut u64,
 ) -> i32 {
@@ -276,6 +278,16 @@ pub extern "C" fn moq_webtransport_connect(
             return -1;
         }
         match std::ffi::CStr::from_ptr(path).to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => return -2,
+        }
+    };
+
+    let protocol_str = unsafe {
+        if protocol.is_null() {
+            return -1;
+        }
+        match std::ffi::CStr::from_ptr(protocol).to_str() {
             Ok(s) => s.to_string(),
             Err(_) => return -2,
         }
@@ -302,9 +314,9 @@ pub extern "C" fn moq_webtransport_connect(
             }
         };
 
-        // Create client configuration with cert verification
-        // ALPN protocols for MoQ over WebTransport
-        // Per draft-ietf-moq-transport-14, WebTransport uses h3 ALPN
+        // Create client configuration with cert verification.
+        // WebTransport itself negotiates via its ALPN, while MoQ draft
+        // selection is carried as a WebTransport subprotocol.
         let mut crypto = if insecure != 0 {
             rustls::ClientConfig::builder()
                 .dangerous()
@@ -327,13 +339,7 @@ pub extern "C" fn moq_webtransport_connect(
                 .with_root_certificates(certs)
                 .with_no_client_auth()
         };
-        // Set ALPN protocols - include both h3 (for WebTransport) and moq (for MoQ)
-        crypto.alpn_protocols = vec![
-            b"moq-00".to_vec(),      // MoQ protocol (draft-00)
-            b"h3".to_vec(),           // HTTP/3 (for WebTransport)
-            b"h3-29".to_vec(),        // HTTP/3 draft-29
-            b"h3-28".to_vec(),        // HTTP/3 draft-28
-        ];
+        crypto.alpn_protocols = vec![web_transport_quinn::ALPN.as_bytes().to_vec()];
 
         let quic_crypto = match QuicClientConfig::try_from(crypto.clone()) {
             Ok(c) => c,
@@ -384,7 +390,9 @@ pub extern "C" fn moq_webtransport_connect(
         // Connect using WebTransport
         let client = WebTransportClient::new(endpoint.clone(), client_config);
 
-        match client.connect(parsed_url).await {
+        let request = ConnectRequest::new(parsed_url).with_protocol(protocol_str);
+
+        match client.connect(request).await {
             Ok(session) => {
                 log::info!("WebTransport session established");
                 Ok((session, endpoint))

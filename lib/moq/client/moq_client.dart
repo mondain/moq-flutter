@@ -46,19 +46,23 @@ class MoQClient {
   final _activeFetches = <Int64, MoQFetch>{};
 
   // Incoming publish requests (server mode)
-  final _incomingPublishController = StreamController<MoQPublishRequest>.broadcast();
+  final _incomingPublishController =
+      StreamController<MoQPublishRequest>.broadcast();
   final _pendingPublishRequests = <Int64, MoQPublishRequest>{};
 
   // Incoming subscribe requests (publisher mode)
-  final _incomingSubscribeController = StreamController<MoQSubscribeRequest>.broadcast();
+  final _incomingSubscribeController =
+      StreamController<MoQSubscribeRequest>.broadcast();
   final _pendingSubscribeRequests = <Int64, MoQSubscribeRequest>{};
-  final _activePublisherSubscriptions = <Int64, MoQSubscribeRequest>{}; // Accepted subscriptions
+  final _activePublisherSubscriptions =
+      <Int64, MoQSubscribeRequest>{}; // Accepted subscriptions
 
   // Track aliases mapping
   final _trackAliases = <Int64, TrackInfo>{};
 
   // Data stream parsers (stream_id -> parser)
   final _dataStreamParsers = <int, MoQDataStreamParser>{};
+  final _outgoingStreamObjects = <int, Int64>{};
 
   // Data stream subscription
   StreamSubscription<DataStreamChunk>? _dataStreamSubscription;
@@ -92,11 +96,9 @@ class MoQClient {
   /// Get the underlying transport (for advanced usage)
   MoQTransport get transport => _transport;
 
-  MoQClient({
-    required MoQTransport transport,
-    Logger? logger,
-  })  : _transport = transport,
-        _logger = logger ?? Logger();
+  MoQClient({required MoQTransport transport, Logger? logger})
+    : _transport = transport,
+      _logger = logger ?? Logger();
 
   /// Connection state
   bool get isConnected => _isConnected;
@@ -109,7 +111,8 @@ class MoQClient {
   int get selectedVersion => _selectedVersion;
 
   /// Get server setup parameters
-  List<KeyValuePair> get serverSetupParameters => List.unmodifiable(_serverSetupParameters);
+  List<KeyValuePair> get serverSetupParameters =>
+      List.unmodifiable(_serverSetupParameters);
 
   /// Get max subscription ID from server
   int get maxSubscriptionId => _maxSubscriptionId;
@@ -121,13 +124,15 @@ class MoQClient {
   ///
   /// Listen to this stream to receive PUBLISH requests from publishers.
   /// Use [acceptPublish] or [rejectPublish] to respond.
-  Stream<MoQPublishRequest> get incomingPublishRequests => _incomingPublishController.stream;
+  Stream<MoQPublishRequest> get incomingPublishRequests =>
+      _incomingPublishController.stream;
 
   /// Stream of incoming SUBSCRIBE requests (publisher mode)
   ///
   /// Listen to this stream to receive SUBSCRIBE requests from subscribers/relays.
   /// Use [acceptSubscribe] or [rejectSubscribe] to respond.
-  Stream<MoQSubscribeRequest> get incomingSubscribeRequests => _incomingSubscribeController.stream;
+  Stream<MoQSubscribeRequest> get incomingSubscribeRequests =>
+      _incomingSubscribeController.stream;
 
   /// Get active publisher subscriptions (tracks being published to subscribers)
   Map<Int64, MoQSubscribeRequest> get activePublisherSubscriptions =>
@@ -145,8 +150,13 @@ class MoQClient {
   Stream<GoawayEvent> get goawayEvents => _goawayController.stream;
 
   /// Connect to a MoQ server
-  Future<void> connect(String host, int port,
-      {List<int>? supportedVersions, int? targetVersion, Map<String, String>? options}) async {
+  Future<void> connect(
+    String host,
+    int port, {
+    List<int>? supportedVersions,
+    int? targetVersion,
+    Map<String, String>? options,
+  }) async {
     if (_isConnected) {
       _logger.w('Already connected');
       return;
@@ -206,9 +216,18 @@ class MoQClient {
       rethrow;
     }
 
+    // Draft versions use 0xff000000 + draft number format per spec section 9.3.1
+    // Draft-14 = 0xff00000E (confirmed by moqt.js reference implementation)
+    // Draft-16: version is negotiated via ALPN/subprotocol before CLIENT_SETUP.
+    final effectiveVersion = targetVersion ?? MoQVersion.draft14;
+
     // Connect to transport
     try {
-      await _transport.connect(host, port, options: options);
+      final transportOptions = <String, String>{
+        ...?options,
+        'moq_version': '$effectiveVersion',
+      };
+      await _transport.connect(host, port, options: transportOptions);
     } catch (e) {
       _setupCompleter!.completeError(
         MoQException(errorCode: -1, reason: 'Failed to connect: $e'),
@@ -217,27 +236,27 @@ class MoQClient {
     }
 
     // Send CLIENT_SETUP message
-    // Draft versions use 0xff000000 + draft number format per spec section 9.3.1
-    // Draft-14 = 0xff00000E (confirmed by moqt.js reference implementation)
-    // Draft-16: version is negotiated via ALPN, not in CLIENT_SETUP
-    final effectiveVersion = targetVersion ?? MoQVersion.draft14;
     if (MoQVersion.isDraft16OrLater(effectiveVersion)) {
       _selectedVersion = effectiveVersion;
     }
 
-    final versions = supportedVersions ?? (MoQVersion.isDraft16OrLater(effectiveVersion) ? <int>[] : [0xff00000e]);
+    final versions =
+        supportedVersions ??
+        (MoQVersion.isDraft16OrLater(effectiveVersion)
+            ? <int>[]
+            : [0xff00000e]);
 
     // MAX_REQUEST_ID parameter is required per FB reference implementation
     // Value of 128 matches moqt.js MOQ_MAX_REQUEST_ID_NUM
     final setupMessage = ClientSetupMessage(
       supportedVersions: versions,
-      parameters: [
-        KeyValuePair.varint(SetupParameterType.maxRequestId, 128),
-      ],
+      parameters: [KeyValuePair.varint(SetupParameterType.maxRequestId, 128)],
     );
 
     final setupBytes = setupMessage.serialize(version: _selectedVersion);
-    _logger.d('CLIENT_SETUP bytes (${setupBytes.length}): ${setupBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
+    _logger.d(
+      'CLIENT_SETUP bytes (${setupBytes.length}): ${setupBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}',
+    );
     await _transport.send(setupBytes);
     _logger.d('Sent CLIENT_SETUP with versions: $versions');
 
@@ -331,7 +350,9 @@ class MoQClient {
       endGroup: endGroup,
     );
 
-    await _transport.send(subscribeMessage.serialize(version: _selectedVersion));
+    await _transport.send(
+      subscribeMessage.serialize(version: _selectedVersion),
+    );
 
     // Create subscription object (will be completed when SUBSCRIBE_OK arrives)
     final subscription = MoQSubscription(
@@ -399,7 +420,9 @@ class MoQClient {
     }
 
     final unsubscribeMessage = UnsubscribeMessage(requestId: subscriptionId);
-    await _transport.send(unsubscribeMessage.serialize(version: _selectedVersion));
+    await _transport.send(
+      unsubscribeMessage.serialize(version: _selectedVersion),
+    );
 
     final subscription = _subscriptions.remove(subscriptionId);
     if (subscription != null) {
@@ -421,7 +444,9 @@ class MoQClient {
 
     final requestId = _getNextRequestId();
 
-    _logger.i('Announcing namespace: ${trackNamespace.map((n) => String.fromCharCodes(n)).join("/")}');
+    _logger.i(
+      'Announcing namespace: ${trackNamespace.map((n) => String.fromCharCodes(n)).join("/")}',
+    );
 
     final message = PublishNamespaceMessage(
       requestId: requestId,
@@ -461,7 +486,9 @@ class MoQClient {
 
     final requestId = _getNextRequestId();
 
-    _logger.i('Subscribing to namespace: ${trackNamespacePrefix.map((n) => String.fromCharCodes(n)).join("/")}');
+    _logger.i(
+      'Subscribing to namespace: ${trackNamespacePrefix.map((n) => String.fromCharCodes(n)).join("/")}',
+    );
 
     final message = SubscribeNamespaceMessage(
       requestId: requestId,
@@ -487,12 +514,16 @@ class MoQClient {
   }
 
   /// Unsubscribe from a namespace
-  Future<void> unsubscribeNamespace(List<Uint8List> trackNamespacePrefix) async {
+  Future<void> unsubscribeNamespace(
+    List<Uint8List> trackNamespacePrefix,
+  ) async {
     if (!_isConnected) {
       throw StateError('Not connected');
     }
 
-    _logger.i('Unsubscribing from namespace: ${trackNamespacePrefix.map((n) => String.fromCharCodes(n)).join("/")}');
+    _logger.i(
+      'Unsubscribing from namespace: ${trackNamespacePrefix.map((n) => String.fromCharCodes(n)).join("/")}',
+    );
 
     final message = UnsubscribeNamespaceMessage(
       trackNamespacePrefix: trackNamespacePrefix,
@@ -506,7 +537,10 @@ class MoQClient {
         return false;
       }
       for (int i = 0; i < sub.trackNamespacePrefix.length; i++) {
-        if (!_bytesEqual(sub.trackNamespacePrefix[i], trackNamespacePrefix[i])) {
+        if (!_bytesEqual(
+          sub.trackNamespacePrefix[i],
+          trackNamespacePrefix[i],
+        )) {
           return false;
         }
       }
@@ -536,9 +570,11 @@ class MoQClient {
 
     final requestId = _getNextRequestId();
 
-    _logger.i('Fetching from track: ${String.fromCharCodes(trackName)} '
-        'range ${startLocation.group}:${startLocation.object} to '
-        '${endLocation.group}:${endLocation.object}');
+    _logger.i(
+      'Fetching from track: ${String.fromCharCodes(trackName)} '
+      'range ${startLocation.group}:${startLocation.object} to '
+      '${endLocation.group}:${endLocation.object}',
+    );
 
     final message = FetchMessage.standalone(
       requestId: requestId,
@@ -590,8 +626,10 @@ class MoQClient {
 
     final requestId = _getNextRequestId();
 
-    _logger.i('Joining fetch (relative): subscription ${subscriptionRequestId}, '
-        '$groupCount groups back');
+    _logger.i(
+      'Joining fetch (relative): subscription ${subscriptionRequestId}, '
+      '$groupCount groups back',
+    );
 
     final message = FetchMessage.relativeJoining(
       requestId: requestId,
@@ -638,8 +676,10 @@ class MoQClient {
     // This is the raw group value; the spec uses it differently
     final joiningStart = startLocation.group;
 
-    _logger.i('Joining fetch (absolute): subscription ${subscriptionRequestId}, '
-        'from group ${startLocation.group}');
+    _logger.i(
+      'Joining fetch (absolute): subscription ${subscriptionRequestId}, '
+      'from group ${startLocation.group}',
+    );
 
     final message = FetchMessage.absoluteJoining(
       requestId: requestId,
@@ -713,15 +753,18 @@ class MoQClient {
       throw StateError('Not connected');
     }
 
-    // Build subgroup header
-    final header = SubgroupHeaderMessage(
+    final header = SubgroupHeader(
       trackAlias: trackAlias,
       groupId: groupId,
       subgroupId: subgroupId,
       publisherPriority: publisherPriority,
     );
 
-    await _transport.streamWrite(streamId, header.serialize());
+    await _transport.streamWrite(
+      streamId,
+      header.serialize(version: _selectedVersion),
+    );
+    _outgoingStreamObjects.remove(streamId);
     _logger.d('Wrote subgroup header to stream $streamId');
   }
 
@@ -736,21 +779,17 @@ class MoQClient {
       throw StateError('Not connected');
     }
 
-    // Build object payload
-    // Format: object_id (varint) + object_status (varint) + payload
-    final objectIdBytes = MoQWireFormat.encodeVarint64(objectId);
-    final statusBytes = MoQWireFormat.encodeVarint(status.value);
-
-    final data = Uint8List(objectIdBytes.length + statusBytes.length + payload.length);
-    int offset = 0;
-    data.setAll(offset, objectIdBytes);
-    offset += objectIdBytes.length;
-    data.setAll(offset, statusBytes);
-    offset += statusBytes.length;
-    data.setAll(offset, payload);
-
+    final data = _serializeStreamObject(
+      streamId,
+      objectId: objectId,
+      payload: payload,
+      status: status,
+      extensionHeaders: const [],
+    );
     await _transport.streamWrite(streamId, data);
-    _logger.d('Wrote object $objectId (${payload.length} bytes) to stream $streamId');
+    _logger.d(
+      'Wrote object $objectId (${payload.length} bytes) to stream $streamId',
+    );
   }
 
   /// Write subgroup header with extension headers to a stream
@@ -769,7 +808,7 @@ class MoQClient {
       throw StateError('Not connected');
     }
 
-    final header = SubgroupHeaderMessage(
+    final header = SubgroupHeader(
       trackAlias: trackAlias,
       groupId: groupId,
       subgroupId: subgroupId,
@@ -777,8 +816,14 @@ class MoQClient {
       extensionHeaders: extensionHeaders,
     );
 
-    await _transport.streamWrite(streamId, header.serialize());
-    _logger.d('Wrote subgroup header with ${extensionHeaders.length} extension headers to stream $streamId');
+    await _transport.streamWrite(
+      streamId,
+      header.serialize(version: _selectedVersion),
+    );
+    _outgoingStreamObjects.remove(streamId);
+    _logger.d(
+      'Wrote subgroup header with ${extensionHeaders.length} extension headers to stream $streamId',
+    );
   }
 
   /// Write a media object with extension headers to a stream
@@ -796,54 +841,17 @@ class MoQClient {
       throw StateError('Not connected');
     }
 
-    // Build object with extension headers
-    // Format: object_id (varint) + object_status (varint) + num_headers (varint) + headers + payload
-    final objectIdBytes = MoQWireFormat.encodeVarint64(objectId);
-    final statusBytes = MoQWireFormat.encodeVarint(status.value);
-    final numHeadersBytes = MoQWireFormat.encodeVarint(extensionHeaders.length);
-
-    // Calculate extension headers size
-    int extensionSize = 0;
-    final headerParts = <Uint8List>[];
-    for (final header in extensionHeaders) {
-      final typeBytes = MoQWireFormat.encodeVarint(header.type);
-      headerParts.add(typeBytes);
-      extensionSize += typeBytes.length;
-      if (header.value != null) {
-        final lenBytes = MoQWireFormat.encodeVarint(header.value!.length);
-        headerParts.add(lenBytes);
-        headerParts.add(header.value!);
-        extensionSize += lenBytes.length + header.value!.length;
-      } else {
-        final lenBytes = MoQWireFormat.encodeVarint(0);
-        headerParts.add(lenBytes);
-        extensionSize += lenBytes.length;
-      }
-    }
-
-    final data = Uint8List(
-      objectIdBytes.length +
-      statusBytes.length +
-      numHeadersBytes.length +
-      extensionSize +
-      payload.length
+    final data = _serializeStreamObject(
+      streamId,
+      objectId: objectId,
+      payload: payload,
+      status: status,
+      extensionHeaders: extensionHeaders,
     );
-
-    int offset = 0;
-    data.setAll(offset, objectIdBytes);
-    offset += objectIdBytes.length;
-    data.setAll(offset, statusBytes);
-    offset += statusBytes.length;
-    data.setAll(offset, numHeadersBytes);
-    offset += numHeadersBytes.length;
-    for (final part in headerParts) {
-      data.setAll(offset, part);
-      offset += part.length;
-    }
-    data.setAll(offset, payload);
-
     await _transport.streamWrite(streamId, data);
-    _logger.d('Wrote object $objectId with ${extensionHeaders.length} extension headers (${payload.length} bytes) to stream $streamId');
+    _logger.d(
+      'Wrote object $objectId with ${extensionHeaders.length} extension headers (${payload.length} bytes) to stream $streamId',
+    );
   }
 
   /// Finish a data stream
@@ -853,11 +861,84 @@ class MoQClient {
     }
 
     await _transport.streamFinish(streamId);
+    _outgoingStreamObjects.remove(streamId);
     _logger.d('Finished data stream $streamId');
   }
 
+  Uint8List _serializeStreamObject(
+    int streamId, {
+    required Int64 objectId,
+    required Uint8List payload,
+    required ObjectStatus status,
+    required List<KeyValuePair> extensionHeaders,
+  }) {
+    final previousObjectId = _outgoingStreamObjects[streamId];
+    final delta = previousObjectId == null
+        ? objectId
+        : objectId - previousObjectId - Int64(1);
+    if (delta < Int64.ZERO) {
+      throw StateError(
+        'Object IDs must be monotonic per stream: previous=$previousObjectId current=$objectId',
+      );
+    }
+
+    final bytes = <int>[
+      ...MoQWireFormat.encodeVarint64(delta),
+      ..._encodeObjectExtensions(extensionHeaders),
+    ];
+
+    if (payload.isEmpty) {
+      bytes.addAll(MoQWireFormat.encodeVarint(0));
+      bytes.addAll(MoQWireFormat.encodeVarint(status.value));
+    } else {
+      bytes.addAll(MoQWireFormat.encodeVarint(payload.length));
+      bytes.addAll(payload);
+    }
+
+    _outgoingStreamObjects[streamId] = objectId;
+    return Uint8List.fromList(bytes);
+  }
+
+  Uint8List _encodeObjectExtensions(List<KeyValuePair> extensionHeaders) {
+    if (extensionHeaders.isEmpty) {
+      return Uint8List.fromList([0]);
+    }
+
+    final useDelta = MoQVersion.usesDeltaKvp(_selectedVersion);
+    final sorted = useDelta
+        ? (List<KeyValuePair>.from(extensionHeaders)
+            ..sort((a, b) => a.type.compareTo(b.type)))
+        : List<KeyValuePair>.from(extensionHeaders);
+
+    final bytes = <int>[];
+    var lastType = 0;
+    for (final header in sorted) {
+      final typeValue = useDelta ? header.type - lastType : header.type;
+      bytes.addAll(MoQWireFormat.encodeVarint(typeValue));
+      if (header.isVarintType) {
+        bytes.addAll(MoQWireFormat.encodeVarint(header.intValue ?? 0));
+      } else {
+        final value = header.value ?? Uint8List(0);
+        bytes.addAll(MoQWireFormat.encodeVarint(value.length));
+        bytes.addAll(value);
+      }
+      if (useDelta) {
+        lastType = header.type;
+      }
+    }
+
+    return Uint8List.fromList([
+      ...MoQWireFormat.encodeVarint(bytes.length),
+      ...bytes,
+    ]);
+  }
+
   /// Cancel a namespace announcement
-  Future<void> cancelNamespace(List<Uint8List> trackNamespace, {int statusCode = 0, String reason = ''}) async {
+  Future<void> cancelNamespace(
+    List<Uint8List> trackNamespace, {
+    int statusCode = 0,
+    String reason = '',
+  }) async {
     if (!_isConnected) {
       throw StateError('Not connected');
     }
@@ -879,7 +960,9 @@ class MoQClient {
     );
 
     await _transport.send(message.serialize(version: _selectedVersion));
-    _logger.i('Cancelled namespace: ${trackNamespace.map((n) => String.fromCharCodes(n)).join("/")}');
+    _logger.i(
+      'Cancelled namespace: ${trackNamespace.map((n) => String.fromCharCodes(n)).join("/")}',
+    );
   }
 
   /// Compare two namespace tuples for equality
@@ -906,18 +989,25 @@ class MoQClient {
         // Parse as control message
         // Note: Data streams (SUBGROUP_HEADER) now come via incomingDataStreams,
         // not through the control stream, so no need to detect them here.
-        final (message, bytesRead) = MoQControlMessageParser.parse(bufferData, version: _selectedVersion);
+        final (message, bytesRead) = MoQControlMessageParser.parse(
+          bufferData,
+          version: _selectedVersion,
+        );
 
         if (message != null && bytesRead > 0) {
           // Remove parsed bytes from buffer
           _controlBuffer.removeRange(0, bytesRead);
-          _logger.d('Parsed message: type=${message.type}, bytesRead=$bytesRead, remaining=${_controlBuffer.length}');
+          _logger.d(
+            'Parsed message: type=${message.type}, bytesRead=$bytesRead, remaining=${_controlBuffer.length}',
+          );
 
           _processControlMessage(message);
           _logger.d('Processed control message: ${message.type}');
         } else if (bytesRead == 0) {
           // Need more data
-          _logger.d('Incomplete message, waiting for more data (buffer: ${_controlBuffer.length} bytes)');
+          _logger.d(
+            'Incomplete message, waiting for more data (buffer: ${_controlBuffer.length} bytes)',
+          );
           break;
         } else {
           // Unknown message, skip the parsed bytes
@@ -948,7 +1038,9 @@ class MoQClient {
 
   /// Handle incoming data stream chunk (SUBGROUP_HEADER + objects)
   void _handleDataStreamChunk(DataStreamChunk chunk) {
-    _logger.d('Data stream chunk: streamId=${chunk.streamId}, ${chunk.data.length} bytes, complete=${chunk.isComplete}');
+    _logger.d(
+      'Data stream chunk: streamId=${chunk.streamId}, ${chunk.data.length} bytes, complete=${chunk.isComplete}',
+    );
 
     var parser = _dataStreamParsers[chunk.streamId];
 
@@ -983,11 +1075,16 @@ class MoQClient {
 
     try {
       // Parse as OBJECT_DATAGRAM
-      final datagram = ObjectDatagram.deserialize(data, version: _selectedVersion);
+      final datagram = ObjectDatagram.deserialize(
+        data,
+        version: _selectedVersion,
+      );
 
-      _logger.d('Received datagram: trackAlias=${datagram.trackAlias}, '
-          'group=${datagram.groupId}, object=${datagram.objectId}, '
-          'payload=${datagram.payload?.length ?? 0} bytes');
+      _logger.d(
+        'Received datagram: trackAlias=${datagram.trackAlias}, '
+        'group=${datagram.groupId}, object=${datagram.objectId}, '
+        'payload=${datagram.payload?.length ?? 0} bytes',
+      );
 
       // Route to subscription using the same media type logic as stream objects
       _deliverDatagram(datagram);
@@ -1003,10 +1100,12 @@ class MoQClient {
     MoqMiMediaType? mediaType;
     for (final extHeader in datagram.extensionHeaders) {
       if (extHeader.type == MoqMiExtensionHeaders.mediaType &&
-          extHeader.value != null &&
-          extHeader.value!.isNotEmpty) {
+          ((extHeader.value != null && extHeader.value!.isNotEmpty) ||
+              extHeader.intValue != null)) {
         try {
-          mediaType = MoqMiMediaType.fromValue(extHeader.value![0]);
+          mediaType = MoqMiMediaType.fromValue(
+            extHeader.intValue ?? extHeader.value!.first,
+          );
         } catch (e) {
           _logger.w('Failed to parse media type: $e');
         }
@@ -1016,7 +1115,8 @@ class MoQClient {
 
     // Determine if this is video or audio based on media type
     final bool isVideo = mediaType == MoqMiMediaType.videoH264Avcc;
-    final bool isAudio = mediaType == MoqMiMediaType.audioOpusBitstream ||
+    final bool isAudio =
+        mediaType == MoqMiMediaType.audioOpusBitstream ||
         mediaType == MoqMiMediaType.audioAacLcMpeg4;
 
     // Find the subscription that matches the media type
@@ -1046,12 +1146,16 @@ class MoQClient {
         targetSubscription = matchingByAlias.first;
       } else if (matchingByAlias.isNotEmpty) {
         targetSubscription = matchingByAlias.first;
-        _logger.d('Multiple subscriptions share trackAlias ${datagram.trackAlias}, using first');
+        _logger.d(
+          'Multiple subscriptions share trackAlias ${datagram.trackAlias}, using first',
+        );
       }
     }
 
     if (targetSubscription == null) {
-      _logger.w('No matching subscription for datagram (trackAlias=${datagram.trackAlias}, mediaType=$mediaType)');
+      _logger.w(
+        'No matching subscription for datagram (trackAlias=${datagram.trackAlias}, mediaType=$mediaType)',
+      );
       return;
     }
 
@@ -1068,7 +1172,13 @@ class MoQClient {
       payload: datagram.payload,
     );
     targetSubscription._objectController.add(moqObject);
-    _logger.d('Delivered ${isVideo ? "video" : isAudio ? "audio" : "unknown"} datagram ${datagram.objectId} to subscription ${targetSubscription.id}');
+    _logger.d(
+      'Delivered ${isVideo
+          ? "video"
+          : isAudio
+          ? "audio"
+          : "unknown"} datagram ${datagram.objectId} to subscription ${targetSubscription.id}',
+    );
   }
 
   /// Deliver a parsed object to the appropriate subscription
@@ -1082,10 +1192,12 @@ class MoQClient {
     MoqMiMediaType? mediaType;
     for (final extHeader in obj.extensionHeaders) {
       if (extHeader.type == MoqMiExtensionHeaders.mediaType &&
-          extHeader.value != null &&
-          extHeader.value!.isNotEmpty) {
+          ((extHeader.value != null && extHeader.value!.isNotEmpty) ||
+              extHeader.intValue != null)) {
         try {
-          mediaType = MoqMiMediaType.fromValue(extHeader.value![0]);
+          mediaType = MoqMiMediaType.fromValue(
+            extHeader.intValue ?? extHeader.value!.first,
+          );
         } catch (e) {
           _logger.w('Failed to parse media type: $e');
         }
@@ -1095,7 +1207,8 @@ class MoQClient {
 
     // Determine if this is video or audio based on media type
     final bool isVideo = mediaType == MoqMiMediaType.videoH264Avcc;
-    final bool isAudio = mediaType == MoqMiMediaType.audioOpusBitstream ||
+    final bool isAudio =
+        mediaType == MoqMiMediaType.audioOpusBitstream ||
         mediaType == MoqMiMediaType.audioAacLcMpeg4;
 
     // Find the subscription that matches the media type
@@ -1127,12 +1240,16 @@ class MoQClient {
         // Multiple subscriptions with same alias - use first one
         // The MoqMediaPipeline will filter by media type anyway
         targetSubscription = matchingByAlias.first;
-        _logger.d('Multiple subscriptions share trackAlias ${header.trackAlias}, using first');
+        _logger.d(
+          'Multiple subscriptions share trackAlias ${header.trackAlias}, using first',
+        );
       }
     }
 
     if (targetSubscription == null) {
-      _logger.w('No matching subscription for object (trackAlias=${header.trackAlias}, mediaType=$mediaType)');
+      _logger.w(
+        'No matching subscription for object (trackAlias=${header.trackAlias}, mediaType=$mediaType)',
+      );
       return;
     }
 
@@ -1150,7 +1267,13 @@ class MoQClient {
       payload: obj.payload,
     );
     targetSubscription._objectController.add(moqObject);
-    _logger.d('Delivered ${isVideo ? "video" : isAudio ? "audio" : "unknown"} object ${obj.objectId} to subscription ${targetSubscription.id}');
+    _logger.d(
+      'Delivered ${isVideo
+          ? "video"
+          : isAudio
+          ? "audio"
+          : "unknown"} object ${obj.objectId} to subscription ${targetSubscription.id}',
+    );
   }
 
   /// Compare two byte arrays for equality
@@ -1189,7 +1312,9 @@ class MoQClient {
         _handleSubscribeNamespaceOk(message as SubscribeNamespaceOkMessage);
         break;
       case MoQMessageType.subscribeNamespaceError:
-        _handleSubscribeNamespaceError(message as SubscribeNamespaceErrorMessage);
+        _handleSubscribeNamespaceError(
+          message as SubscribeNamespaceErrorMessage,
+        );
         break;
       case MoQMessageType.publish:
         _handlePublish(message as PublishMessage);
@@ -1267,17 +1392,25 @@ class MoQClient {
         case 0x0003: // supported_versions (odd type = buffer)
           if (param.value != null && param.value!.isNotEmpty) {
             final (versions, _) = MoQWireFormat.decodeTuple(param.value!, 0);
-            final versionList = versions.map((v) => '0x${v.map((b) => b.toRadixString(16).padLeft(2, '0')).join()}').join(', ');
+            final versionList = versions
+                .map(
+                  (v) =>
+                      '0x${v.map((b) => b.toRadixString(16).padLeft(2, '0')).join()}',
+                )
+                .join(', ');
             _logger.d('Server supported versions: [$versionList]');
           }
           break;
-        case SetupParameterType.maxAuthTokenCacheSize: // 0x0004 (even type = varint)
+        case SetupParameterType
+            .maxAuthTokenCacheSize: // 0x0004 (even type = varint)
           if (param.intValue != null) {
             _logger.d('Server max_auth_token_cache_size: ${param.intValue}');
           }
           break;
         default:
-          _logger.d('Unknown setup parameter type: 0x${param.type.toRadixString(16)}');
+          _logger.d(
+            'Unknown setup parameter type: 0x${param.type.toRadixString(16)}',
+          );
       }
     }
   }
@@ -1286,7 +1419,9 @@ class MoQClient {
     final subscription = _subscriptions[message.requestId];
     if (subscription != null) {
       final trackNameStr = String.fromCharCodes(subscription.trackName);
-      _logger.i('SUBSCRIBE_OK: requestId=${message.requestId}, trackAlias=${message.trackAlias}, trackName=$trackNameStr');
+      _logger.i(
+        'SUBSCRIBE_OK: requestId=${message.requestId}, trackAlias=${message.trackAlias}, trackName=$trackNameStr',
+      );
 
       // Check for duplicate track alias per draft-14 Section 9.8:
       // "If a subscriber receives a SUBSCRIBE_OK that uses the same Track Alias
@@ -1296,9 +1431,15 @@ class MoQClient {
       if (existingTrack != null) {
         final existingName = String.fromCharCodes(existingTrack.name);
         // Check if it's actually a different track (not the same track being re-subscribed)
-        if (!_trackInfoMatches(existingTrack, subscription.trackNamespace, subscription.trackName)) {
-          _logger.e('DUPLICATE_TRACK_ALIAS: trackAlias=${message.trackAlias} already in use by track "$existingName", '
-              'but server assigned it to "$trackNameStr". This is a protocol violation.');
+        if (!_trackInfoMatches(
+          existingTrack,
+          subscription.trackNamespace,
+          subscription.trackName,
+        )) {
+          _logger.e(
+            'DUPLICATE_TRACK_ALIAS: trackAlias=${message.trackAlias} already in use by track "$existingName", '
+            'but server assigned it to "$trackNameStr". This is a protocol violation.',
+          );
           // Per spec, we MUST close the session
           _terminateSession(
             MoQTerminationCode.duplicateTrackAlias,
@@ -1325,12 +1466,18 @@ class MoQClient {
         name: subscription.trackName,
       );
 
-      _logger.i('Subscription successful for $trackNameStr: trackAlias=${message.trackAlias}');
+      _logger.i(
+        'Subscription successful for $trackNameStr: trackAlias=${message.trackAlias}',
+      );
     }
   }
 
   /// Check if a TrackInfo matches the given namespace and name
-  bool _trackInfoMatches(TrackInfo info, List<Uint8List> namespace, Uint8List name) {
+  bool _trackInfoMatches(
+    TrackInfo info,
+    List<Uint8List> namespace,
+    Uint8List name,
+  ) {
     if (info.namespace.length != namespace.length) return false;
     for (int i = 0; i < namespace.length; i++) {
       if (!_bytesEqual(info.namespace[i], namespace[i])) return false;
@@ -1354,7 +1501,9 @@ class MoQClient {
         reason: message.errorReason.reason,
       );
       _subscriptions.remove(message.requestId);
-      _logger.e('Subscription failed: ${message.errorCode} - ${message.errorReason.reason}');
+      _logger.e(
+        'Subscription failed: ${message.errorCode} - ${message.errorReason.reason}',
+      );
     }
   }
 
@@ -1377,9 +1526,7 @@ class MoQClient {
     }
 
     // Create and emit GOAWAY event
-    final event = GoawayEvent(
-      newUri: message.newUri,
-    );
+    final event = GoawayEvent(newUri: message.newUri);
     _goawayController.add(event);
 
     // Mark as disconnecting - the application should handle reconnection
@@ -1392,9 +1539,13 @@ class MoQClient {
     if (announcement != null) {
       // Per draft-14, PUBLISH_NAMESPACE_OK has no parameters
       announcement.complete();
-      _logger.i('Namespace announcement successful: ${announcement.namespacePath}');
+      _logger.i(
+        'Namespace announcement successful: ${announcement.namespacePath}',
+      );
     } else {
-      _logger.w('Received PUBLISH_NAMESPACE_OK for unknown request: ${message.requestId}');
+      _logger.w(
+        'Received PUBLISH_NAMESPACE_OK for unknown request: ${message.requestId}',
+      );
     }
   }
 
@@ -1406,7 +1557,9 @@ class MoQClient {
         reason: message.errorReason.reason,
       );
       _namespaceAnnouncements.remove(message.requestId);
-      _logger.e('Namespace announcement failed: ${message.errorCode} - ${message.errorReason.reason}');
+      _logger.e(
+        'Namespace announcement failed: ${message.errorCode} - ${message.errorReason.reason}',
+      );
     }
   }
 
@@ -1414,9 +1567,13 @@ class MoQClient {
     final subscription = _namespaceSubscriptions[message.requestId];
     if (subscription != null) {
       subscription.complete();
-      _logger.i('Namespace subscription successful: ${subscription.namespacePrefixPath}');
+      _logger.i(
+        'Namespace subscription successful: ${subscription.namespacePrefixPath}',
+      );
     } else {
-      _logger.w('Received SUBSCRIBE_NAMESPACE_OK for unknown request: ${message.requestId}');
+      _logger.w(
+        'Received SUBSCRIBE_NAMESPACE_OK for unknown request: ${message.requestId}',
+      );
     }
   }
 
@@ -1443,9 +1600,13 @@ class MoQClient {
         reason: message.errorReason.reason,
       );
       _activeFetches.remove(message.requestId);
-      _logger.e('Fetch failed: ${message.errorCode} - ${message.errorReason.reason}');
+      _logger.e(
+        'Fetch failed: ${message.errorCode} - ${message.errorReason.reason}',
+      );
     } else {
-      _logger.w('Received FETCH_ERROR for unknown request: ${message.requestId}');
+      _logger.w(
+        'Received FETCH_ERROR for unknown request: ${message.requestId}',
+      );
     }
   }
 
@@ -1456,7 +1617,9 @@ class MoQClient {
     final announcement = _namespaceAnnouncements[message.requestId];
     if (announcement != null) {
       announcement.complete();
-      _logger.i('REQUEST_OK: namespace announcement successful: ${announcement.namespacePath}');
+      _logger.i(
+        'REQUEST_OK: namespace announcement successful: ${announcement.namespacePath}',
+      );
       return;
     }
 
@@ -1464,7 +1627,9 @@ class MoQClient {
     final nsSub = _namespaceSubscriptions[message.requestId];
     if (nsSub != null) {
       nsSub.complete();
-      _logger.i('REQUEST_OK: namespace subscription successful: ${nsSub.namespacePrefixPath}');
+      _logger.i(
+        'REQUEST_OK: namespace subscription successful: ${nsSub.namespacePrefixPath}',
+      );
       return;
     }
 
@@ -1482,7 +1647,9 @@ class MoQClient {
         reason: message.errorReason.reason,
       );
       _subscriptions.remove(message.requestId);
-      _logger.e('REQUEST_ERROR (subscription): ${message.errorCode} - ${message.errorReason.reason}');
+      _logger.e(
+        'REQUEST_ERROR (subscription): ${message.errorCode} - ${message.errorReason.reason}',
+      );
       return;
     }
 
@@ -1494,7 +1661,9 @@ class MoQClient {
         reason: message.errorReason.reason,
       );
       _activeFetches.remove(message.requestId);
-      _logger.e('REQUEST_ERROR (fetch): ${message.errorCode} - ${message.errorReason.reason}');
+      _logger.e(
+        'REQUEST_ERROR (fetch): ${message.errorCode} - ${message.errorReason.reason}',
+      );
       return;
     }
 
@@ -1506,7 +1675,9 @@ class MoQClient {
         reason: message.errorReason.reason,
       );
       _namespaceAnnouncements.remove(message.requestId);
-      _logger.e('REQUEST_ERROR (namespace): ${message.errorCode} - ${message.errorReason.reason}');
+      _logger.e(
+        'REQUEST_ERROR (namespace): ${message.errorCode} - ${message.errorReason.reason}',
+      );
       return;
     }
 
@@ -1518,11 +1689,15 @@ class MoQClient {
         reason: message.errorReason.reason,
       );
       _namespaceSubscriptions.remove(message.requestId);
-      _logger.e('REQUEST_ERROR (namespace sub): ${message.errorCode} - ${message.errorReason.reason}');
+      _logger.e(
+        'REQUEST_ERROR (namespace sub): ${message.errorCode} - ${message.errorReason.reason}',
+      );
       return;
     }
 
-    _logger.w('Received REQUEST_ERROR for unknown request: ${message.requestId}');
+    _logger.w(
+      'Received REQUEST_ERROR for unknown request: ${message.requestId}',
+    );
   }
 
   /// Handle NAMESPACE message (draft-16)
@@ -1532,7 +1707,9 @@ class MoQClient {
     // Route to namespace subscriptions that match
     for (final sub in _namespaceSubscriptions.values) {
       // Notify subscribers about namespace discovery
-      _logger.d('Namespace match for subscription ${sub.requestId}: ${message.suffixPath}');
+      _logger.d(
+        'Namespace match for subscription ${sub.requestId}: ${message.suffixPath}',
+      );
     }
   }
 
@@ -1550,12 +1727,16 @@ class MoQClient {
         reason: message.errorReason.reason,
       );
       _namespaceSubscriptions.remove(message.requestId);
-      _logger.e('Namespace subscription failed: ${message.errorCode} - ${message.errorReason.reason}');
+      _logger.e(
+        'Namespace subscription failed: ${message.errorCode} - ${message.errorReason.reason}',
+      );
     }
   }
 
   void _handlePublish(PublishMessage message) {
-    _logger.i('Received PUBLISH request: ${message.namespacePath}/${message.trackNameString}');
+    _logger.i(
+      'Received PUBLISH request: ${message.namespacePath}/${message.trackNameString}',
+    );
 
     final request = MoQPublishRequest(
       client: this,
@@ -1682,7 +1863,9 @@ class MoQClient {
     _logger.i('Received UNSUBSCRIBE for request: ${message.requestId}');
 
     // Remove from active subscriptions
-    final subscription = _activePublisherSubscriptions.remove(message.requestId);
+    final subscription = _activePublisherSubscriptions.remove(
+      message.requestId,
+    );
     if (subscription != null) {
       _logger.i('Removed active subscription: ${message.requestId}');
     }
@@ -1763,7 +1946,9 @@ class MoQClient {
         errorCode: errorCode,
         errorReason: ReasonPhrase(reason),
       );
-      await _transport.send(subscribeError.serialize(version: _selectedVersion));
+      await _transport.send(
+        subscribeError.serialize(version: _selectedVersion),
+      );
     }
     _logger.i('Rejected SUBSCRIBE request: $requestId - $reason');
   }
@@ -1867,13 +2052,15 @@ class MoQSubscription {
   }) {
     if (_responseCompleter.isCompleted) return;
 
-    _responseCompleter.complete(SubscribeResult(
-      trackAlias: trackAlias,
-      expires: expires,
-      groupOrder: groupOrder,
-      contentExists: contentExists,
-      largestLocation: largestLocation,
-    ));
+    _responseCompleter.complete(
+      SubscribeResult(
+        trackAlias: trackAlias,
+        expires: expires,
+        groupOrder: groupOrder,
+        contentExists: contentExists,
+        largestLocation: largestLocation,
+      ),
+    );
   }
 
   /// Fail the subscription
@@ -1918,10 +2105,7 @@ class TrackInfo {
   final List<Uint8List> namespace;
   final Uint8List name;
 
-  TrackInfo({
-    required this.namespace,
-    required this.name,
-  });
+  TrackInfo({required this.namespace, required this.name});
 }
 
 /// MoQ exception
@@ -1929,10 +2113,7 @@ class MoQException implements Exception {
   final int errorCode;
   final String reason;
 
-  MoQException({
-    required this.errorCode,
-    required this.reason,
-  });
+  MoQException({required this.errorCode, required this.reason});
 
   @override
   String toString() => 'MoQException(code: $errorCode, reason: $reason)';
@@ -1959,9 +2140,7 @@ class MoQNamespaceAnnouncement {
 
   /// Get namespace as a string path
   String get namespacePath {
-    return trackNamespace
-        .map((e) => String.fromCharCodes(e))
-        .join('/');
+    return trackNamespace.map((e) => String.fromCharCodes(e)).join('/');
   }
 
   /// Wait for PUBLISH_NAMESPACE_OK response
@@ -1999,9 +2178,7 @@ class MoQNamespaceSubscription {
 
   /// Get namespace prefix as a string path
   String get namespacePrefixPath {
-    return trackNamespacePrefix
-        .map((e) => String.fromCharCodes(e))
-        .join('/');
+    return trackNamespacePrefix.map((e) => String.fromCharCodes(e)).join('/');
   }
 
   /// Wait for SUBSCRIBE_NAMESPACE_OK response
@@ -2058,9 +2235,7 @@ class MoQPublishRequest {
 
   /// Get namespace as a string path
   String get namespacePath {
-    return trackNamespace
-        .map((e) => String.fromCharCodes(e))
-        .join('/');
+    return trackNamespace.map((e) => String.fromCharCodes(e)).join('/');
   }
 
   /// Get track name as a string
@@ -2093,15 +2268,8 @@ class MoQPublishRequest {
   /// Reject this PUBLISH request
   ///
   /// Sends PUBLISH_ERROR to the publisher.
-  Future<void> reject({
-    int errorCode = 0,
-    String reason = 'Rejected',
-  }) async {
-    await client.rejectPublish(
-      requestId,
-      errorCode: errorCode,
-      reason: reason,
-    );
+  Future<void> reject({int errorCode = 0, String reason = 'Rejected'}) async {
+    await client.rejectPublish(requestId, errorCode: errorCode, reason: reason);
   }
 }
 
@@ -2144,9 +2312,7 @@ class MoQSubscribeRequest {
 
   /// Get namespace as a string path
   String get namespacePath {
-    return trackNamespace
-        .map((e) => String.fromCharCodes(e))
-        .join('/');
+    return trackNamespace.map((e) => String.fromCharCodes(e)).join('/');
   }
 
   /// Get track name as a string
@@ -2178,10 +2344,7 @@ class MoQSubscribeRequest {
   /// Reject this SUBSCRIBE request
   ///
   /// Sends SUBSCRIBE_ERROR to the subscriber.
-  Future<void> reject({
-    int errorCode = 0,
-    String reason = 'Rejected',
-  }) async {
+  Future<void> reject({int errorCode = 0, String reason = 'Rejected'}) async {
     await client.rejectSubscribe(
       requestId,
       errorCode: errorCode,
@@ -2259,11 +2422,11 @@ class SubgroupHeaderMessage {
     final streamType = MoQWireFormat.encodeVarint(0x10);
     final buffer = Uint8List(
       streamType.length +
-      trackAliasBytes.length +
-      groupIdBytes.length +
-      subgroupIdBytes.length +
-      1 +
-      extensionSize
+          trackAliasBytes.length +
+          groupIdBytes.length +
+          subgroupIdBytes.length +
+          1 +
+          extensionSize,
     );
 
     int offset = 0;
@@ -2388,12 +2551,14 @@ class MoQFetch {
     _endOfTrack = endOfTrack;
     _endLocation = endLocation;
 
-    _responseCompleter.complete(FetchResult(
-      groupOrder: groupOrder,
-      endOfTrack: endOfTrack,
-      endLocation: endLocation,
-      parameters: parameters ?? [],
-    ));
+    _responseCompleter.complete(
+      FetchResult(
+        groupOrder: groupOrder,
+        endOfTrack: endOfTrack,
+        endLocation: endLocation,
+        parameters: parameters ?? [],
+      ),
+    );
   }
 
   /// Fail the fetch

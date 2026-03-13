@@ -84,8 +84,14 @@ void main() {
             final serverSetup = ServerSetupMessage(
               selectedVersion: 0xff00000e,
               parameters: [
-                KeyValuePair(type: 0x0001, value: maxSubIdBytes), // max_subscribe_id (odd=buffer)
-                KeyValuePair.varint(SetupParameterType.maxRequestId, 50), // max_request_id (even=varint)
+                KeyValuePair(
+                  type: 0x0001,
+                  value: maxSubIdBytes,
+                ), // max_subscribe_id (odd=buffer)
+                KeyValuePair.varint(
+                  SetupParameterType.maxRequestId,
+                  50,
+                ), // max_request_id (even=varint)
               ],
             );
             transport.simulateIncomingControlData(serverSetup.serialize());
@@ -171,11 +177,13 @@ void main() {
 
       expect(
         () => client.subscribe(namespace, trackName),
-        throwsA(isA<MoQException>().having(
-          (e) => e.errorCode,
-          'errorCode',
-          equals(0x04),
-        )),
+        throwsA(
+          isA<MoQException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(0x04),
+          ),
+        ),
       );
     });
 
@@ -207,7 +215,10 @@ void main() {
       await client.unsubscribe(Int64(0));
 
       expect(transport.sentControlMessages.length, equals(1));
-      expect(transport.sentControlMessages.first[0], equals(0x0A)); // UNSUBSCRIBE
+      expect(
+        transport.sentControlMessages.first[0],
+        equals(0x0A),
+      ); // UNSUBSCRIBE
     });
   });
 
@@ -288,11 +299,13 @@ void main() {
           startLocation: Location(group: Int64(100), object: Int64(0)),
           endLocation: Location(group: Int64(50), object: Int64(0)),
         ),
-        throwsA(isA<MoQException>().having(
-          (e) => e.errorCode,
-          'errorCode',
-          equals(0x05),
-        )),
+        throwsA(
+          isA<MoQException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(0x05),
+          ),
+        ),
       );
     });
 
@@ -327,7 +340,10 @@ void main() {
       await client.cancelFetch(Int64(0));
 
       expect(transport.sentControlMessages.length, equals(1));
-      expect(transport.sentControlMessages.first[0], equals(0x17)); // FETCH_CANCEL
+      expect(
+        transport.sentControlMessages.first[0],
+        equals(0x17),
+      ); // FETCH_CANCEL
 
       // The fetch future should fail (we cancelled it)
       expect(fetchFuture, throwsA(anything));
@@ -388,11 +404,13 @@ void main() {
 
       expect(
         () => client.announceNamespace(namespace),
-        throwsA(isA<MoQException>().having(
-          (e) => e.errorCode,
-          'errorCode',
-          equals(0x01),
-        )),
+        throwsA(
+          isA<MoQException>().having(
+            (e) => e.errorCode,
+            'errorCode',
+            equals(0x01),
+          ),
+        ),
       );
     });
 
@@ -438,7 +456,10 @@ void main() {
       await client.unsubscribeNamespace(prefix);
 
       expect(transport.sentControlMessages.length, equals(1));
-      expect(transport.sentControlMessages.first[0], equals(0x14)); // UNSUBSCRIBE_NAMESPACE
+      expect(
+        transport.sentControlMessages.first[0],
+        equals(0x14),
+      ); // UNSUBSCRIBE_NAMESPACE
     });
   });
 
@@ -551,7 +572,10 @@ void main() {
       );
 
       expect(transport.sentControlMessages.length, equals(1));
-      expect(transport.sentControlMessages.first[0], equals(0x04)); // SUBSCRIBE_OK
+      expect(
+        transport.sentControlMessages.first[0],
+        equals(0x04),
+      ); // SUBSCRIBE_OK
     });
 
     test('rejectSubscribe sends SUBSCRIBE_ERROR', () async {
@@ -575,7 +599,10 @@ void main() {
       );
 
       expect(transport.sentControlMessages.length, equals(1));
-      expect(transport.sentControlMessages.first[0], equals(0x05)); // SUBSCRIBE_ERROR
+      expect(
+        transport.sentControlMessages.first[0],
+        equals(0x05),
+      ); // SUBSCRIBE_ERROR
     });
 
     test('sendPublishDone sends PUBLISH_DONE', () async {
@@ -612,7 +639,10 @@ void main() {
       );
 
       expect(transport.sentControlMessages.length, equals(1));
-      expect(transport.sentControlMessages.first[0], equals(0x0B)); // PUBLISH_DONE
+      expect(
+        transport.sentControlMessages.first[0],
+        equals(0x0B),
+      ); // PUBLISH_DONE
     });
   });
 
@@ -653,6 +683,37 @@ void main() {
       // Check header starts with type 0x10
       final headerData = transport.sentStreamData[streamId]!.first;
       expect(headerData[0], equals(0x10));
+    });
+
+    test('writeObject encodes sequential object IDs as deltas', () async {
+      final streamId = await client.openDataStream();
+
+      await client.writeSubgroupHeader(
+        streamId,
+        trackAlias: Int64(1),
+        groupId: Int64(10),
+        subgroupId: Int64(0),
+        publisherPriority: 128,
+      );
+
+      await client.writeObject(
+        streamId,
+        objectId: Int64(0),
+        payload: Uint8List.fromList([0xAA]),
+      );
+      await client.writeObject(
+        streamId,
+        objectId: Int64(1),
+        payload: Uint8List.fromList([0xBB]),
+      );
+
+      final writes = transport.sentStreamData[streamId]!;
+      expect(writes.length, equals(3));
+
+      // First object: delta=0, payload len=1, payload byte.
+      expect(writes[1], equals(Uint8List.fromList([0x00, 0x00, 0x01, 0xAA])));
+      // Second sequential object must also use delta=0 rather than absolute object ID.
+      expect(writes[2], equals(Uint8List.fromList([0x00, 0x00, 0x01, 0xBB])));
     });
   });
 }

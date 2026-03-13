@@ -250,6 +250,8 @@ pub extern "C" fn moq_quic_connect(
     host: *const c_char,
     port: u16,
     insecure: u8,
+    moq_version: u32,
+    alpn: *const c_char,
     out_connection_id: *mut u64,
 ) -> i32 {
     let host_str = unsafe {
@@ -259,6 +261,17 @@ pub extern "C" fn moq_quic_connect(
         match std::ffi::CStr::from_ptr(host).to_str() {
             Ok(s) => s.to_string(),
             Err(_) => return -2, // Invalid UTF-8
+        }
+    };
+    let alpn_override = unsafe {
+        if alpn.is_null() {
+            None
+        } else {
+            match std::ffi::CStr::from_ptr(alpn).to_str() {
+                Ok("") => None,
+                Ok(s) => Some(s.to_string()),
+                Err(_) => return -2, // Invalid UTF-8
+            }
         }
     };
 
@@ -324,9 +337,17 @@ pub extern "C" fn moq_quic_connect(
                 .with_no_client_auth()
         };
 
-        // Set ALPN protocols - draft-14 specifies "moq-00"
+        // Set ALPN based on the requested MoQ draft version.
         let mut client_crypto = client_crypto;
-        client_crypto.alpn_protocols = vec![b"moq-00".to_vec()];
+        let alpn = if let Some(alpn_override) = &alpn_override {
+            alpn_override.as_bytes().to_vec()
+        } else if moq_version >= 0xff00_0010 {
+            b"moqt-16".to_vec()
+        } else {
+            b"moq-00".to_vec()
+        };
+        log::info!("Using ALPN {:?}", String::from_utf8_lossy(&alpn));
+        client_crypto.alpn_protocols = vec![alpn];
 
         let crypto = match QuicClientConfig::try_from(client_crypto) {
             Ok(c) => c,

@@ -12,15 +12,15 @@ void main() {
     test('serialize and deserialize round-trip', () {
       final msg = RequestOkMessage(
         requestId: Int64(42),
-        parameters: [
-          KeyValuePair.varint(0x02, 100),
-        ],
+        parameters: [KeyValuePair.varint(0x02, 100)],
       );
 
       final bytes = msg.serialize(version: MoQVersion.draft16);
       // Parse through the control message parser
-      final (parsed, _) =
-          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
 
       expect(parsed, isA<RequestOkMessage>());
       final result = parsed as RequestOkMessage;
@@ -34,8 +34,10 @@ void main() {
       final msg = RequestOkMessage(requestId: Int64(0));
       final bytes = msg.serialize(version: MoQVersion.draft16);
 
-      final (parsed, _) =
-          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
 
       expect(parsed, isA<RequestOkMessage>());
       final result = parsed as RequestOkMessage;
@@ -53,8 +55,10 @@ void main() {
       );
 
       final bytes = msg.serialize(version: MoQVersion.draft16);
-      final (parsed, _) =
-          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
 
       final result = parsed as RequestOkMessage;
       expect(result.parameters.length, equals(2));
@@ -76,8 +80,10 @@ void main() {
       );
 
       final bytes = msg.serialize(version: MoQVersion.draft16);
-      final (parsed, _) =
-          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
 
       final result = parsed as RequestOkMessage;
       expect(result.requestId, equals(Int64(5)));
@@ -101,8 +107,10 @@ void main() {
       );
 
       final bytes = msg.serialize(version: MoQVersion.draft16);
-      final (parsed, _) =
-          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
 
       expect(parsed, isA<RequestErrorMessage>());
       final result = parsed as RequestErrorMessage;
@@ -121,8 +129,10 @@ void main() {
       );
 
       final bytes = msg.serialize(version: MoQVersion.draft16);
-      final (parsed, _) =
-          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
 
       final result = parsed as RequestErrorMessage;
       expect(result.requestId, equals(Int64(0)));
@@ -142,27 +152,35 @@ void main() {
       );
 
       final bytes = msg.serialize(version: MoQVersion.draft16);
-      final (parsed, _) =
-          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
 
       expect(parsed, isA<NamespaceMessage>());
       final result = parsed as NamespaceMessage;
       expect(result.trackNamespaceSuffix.length, equals(2));
-      expect(String.fromCharCodes(result.trackNamespaceSuffix[0]), equals('live'));
-      expect(String.fromCharCodes(result.trackNamespaceSuffix[1]), equals('video'));
+      expect(
+        String.fromCharCodes(result.trackNamespaceSuffix[0]),
+        equals('live'),
+      );
+      expect(
+        String.fromCharCodes(result.trackNamespaceSuffix[1]),
+        equals('video'),
+      );
       expect(result.suffixPath, equals('live/video'));
     });
 
     test('serialize with single element suffix', () {
       final msg = NamespaceMessage(
-        trackNamespaceSuffix: [
-          Uint8List.fromList('audio'.codeUnits),
-        ],
+        trackNamespaceSuffix: [Uint8List.fromList('audio'.codeUnits)],
       );
 
       final bytes = msg.serialize(version: MoQVersion.draft16);
-      final (parsed, _) =
-          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
 
       final result = parsed as NamespaceMessage;
       expect(result.suffixPath, equals('audio'));
@@ -172,18 +190,75 @@ void main() {
   group('NamespaceDoneMessage', () {
     test('serialize and deserialize round-trip', () {
       final msg = NamespaceDoneMessage(
-        trackNamespaceSuffix: [
-          Uint8List.fromList('stream1'.codeUnits),
-        ],
+        trackNamespaceSuffix: [Uint8List.fromList('stream1'.codeUnits)],
       );
 
       final bytes = msg.serialize(version: MoQVersion.draft16);
-      final (parsed, _) =
-          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
 
       expect(parsed, isA<NamespaceDoneMessage>());
       final result = parsed as NamespaceDoneMessage;
       expect(result.suffixPath, equals('stream1'));
+    });
+  });
+
+  group('Draft-16 publish flow messages', () {
+    test('PublishMessage preserves migrated inline fields via params', () {
+      final msg = PublishMessage(
+        requestId: Int64(9),
+        trackNamespace: [Uint8List.fromList('live'.codeUnits)],
+        trackName: Uint8List.fromList('video'.codeUnits),
+        trackAlias: Int64(3),
+        groupOrder: GroupOrder.descending,
+        contentExists: true,
+        largestLocation: Location(group: Int64(7), object: Int64(11)),
+        forward: 1,
+      );
+
+      final bytes = msg.serialize(version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
+
+      expect(parsed, isA<PublishMessage>());
+      final result = parsed as PublishMessage;
+      expect(result.forward, equals(1));
+      expect(result.groupOrder, equals(GroupOrder.descending));
+      expect(result.contentExists, isTrue);
+      expect(result.largestLocation?.group, equals(Int64(7)));
+      expect(result.largestLocation?.object, equals(Int64(11)));
+    });
+
+    test('PublishOkMessage preserves filter and response fields', () {
+      final msg = PublishOkMessage(
+        requestId: Int64(12),
+        forward: 1,
+        subscriberPriority: 77,
+        groupOrder: GroupOrder.descending,
+        filterType: FilterType.absoluteRange,
+        startLocation: Location(group: Int64(4), object: Int64(2)),
+        endGroup: Int64(9),
+      );
+
+      final bytes = msg.serialize(version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
+
+      expect(parsed, isA<PublishOkMessage>());
+      final result = parsed as PublishOkMessage;
+      expect(result.forward, equals(1));
+      expect(result.subscriberPriority, equals(77));
+      expect(result.groupOrder, equals(GroupOrder.descending));
+      expect(result.filterType, equals(FilterType.absoluteRange));
+      expect(result.startLocation?.group, equals(Int64(4)));
+      expect(result.startLocation?.object, equals(Int64(2)));
+      expect(result.endGroup, equals(Int64(9)));
     });
   });
 
@@ -194,12 +269,14 @@ void main() {
   group('KVP Delta Encoding', () {
     test('round-trip single varint param', () {
       final params = [KeyValuePair.varint(0x04, 42)];
-      final encoded =
-          MoQWireFormat.encodeKeyValuePairs(params, useDelta: true);
+      final encoded = MoQWireFormat.encodeKeyValuePairs(params, useDelta: true);
       final (count, countBytes) = MoQWireFormat.decodeVarint(encoded, 0);
       final (decoded, _) = MoQWireFormat.decodeKeyValuePairs(
-          encoded, countBytes, count,
-          useDelta: true);
+        encoded,
+        countBytes,
+        count,
+        useDelta: true,
+      );
       expect(decoded.length, equals(1));
       expect(decoded[0].type, equals(0x04));
       expect(decoded[0].intValue, equals(42));
@@ -211,12 +288,14 @@ void main() {
         KeyValuePair.varint(0x08, 20),
         KeyValuePair.varint(0x20, 30),
       ];
-      final encoded =
-          MoQWireFormat.encodeKeyValuePairs(params, useDelta: true);
+      final encoded = MoQWireFormat.encodeKeyValuePairs(params, useDelta: true);
       final (count, countBytes) = MoQWireFormat.decodeVarint(encoded, 0);
       final (decoded, _) = MoQWireFormat.decodeKeyValuePairs(
-          encoded, countBytes, count,
-          useDelta: true);
+        encoded,
+        countBytes,
+        count,
+        useDelta: true,
+      );
       expect(decoded.length, equals(3));
       expect(decoded[0].type, equals(0x02));
       expect(decoded[0].intValue, equals(10));
@@ -231,12 +310,14 @@ void main() {
         KeyValuePair.buffer(0x01, Uint8List.fromList([0xDE, 0xAD])),
         KeyValuePair.buffer(0x03, Uint8List.fromList([0xBE, 0xEF])),
       ];
-      final encoded =
-          MoQWireFormat.encodeKeyValuePairs(params, useDelta: true);
+      final encoded = MoQWireFormat.encodeKeyValuePairs(params, useDelta: true);
       final (count, countBytes) = MoQWireFormat.decodeVarint(encoded, 0);
       final (decoded, _) = MoQWireFormat.decodeKeyValuePairs(
-          encoded, countBytes, count,
-          useDelta: true);
+        encoded,
+        countBytes,
+        count,
+        useDelta: true,
+      );
       expect(decoded.length, equals(2));
       expect(decoded[0].type, equals(0x01));
       expect(decoded[0].value, equals(Uint8List.fromList([0xDE, 0xAD])));
@@ -249,12 +330,17 @@ void main() {
         KeyValuePair.varint(0x02, 100),
         KeyValuePair.varint(0x04, 200),
       ];
-      final encoded =
-          MoQWireFormat.encodeKeyValuePairs(params, useDelta: false);
+      final encoded = MoQWireFormat.encodeKeyValuePairs(
+        params,
+        useDelta: false,
+      );
       final (count, countBytes) = MoQWireFormat.decodeVarint(encoded, 0);
       final (decoded, _) = MoQWireFormat.decodeKeyValuePairs(
-          encoded, countBytes, count,
-          useDelta: false);
+        encoded,
+        countBytes,
+        count,
+        useDelta: false,
+      );
       expect(decoded.length, equals(2));
       expect(decoded[0].type, equals(0x02));
       expect(decoded[0].intValue, equals(100));
@@ -268,12 +354,14 @@ void main() {
         KeyValuePair.varint(0x20, 30),
         KeyValuePair.varint(0x02, 10),
       ];
-      final encoded =
-          MoQWireFormat.encodeKeyValuePairs(params, useDelta: true);
+      final encoded = MoQWireFormat.encodeKeyValuePairs(params, useDelta: true);
       final (count, countBytes) = MoQWireFormat.decodeVarint(encoded, 0);
       final (decoded, _) = MoQWireFormat.decodeKeyValuePairs(
-          encoded, countBytes, count,
-          useDelta: true);
+        encoded,
+        countBytes,
+        count,
+        useDelta: true,
+      );
       // Should come back sorted
       expect(decoded[0].type, equals(0x02));
       expect(decoded[1].type, equals(0x20));
@@ -282,12 +370,10 @@ void main() {
     test('throws FormatException when buffer length exceeds remaining data', () {
       // Odd type (0x01), advertises 5 bytes but only 2 are present.
       // Layout: count=1 (1 byte), type=0x01 (1 byte), length=5 (1 byte), 2 data bytes.
-      final truncated =
-          Uint8List.fromList([0x01, 0x01, 0x05, 0xAA, 0xBB]);
+      final truncated = Uint8List.fromList([0x01, 0x01, 0x05, 0xAA, 0xBB]);
       final (count, countBytes) = MoQWireFormat.decodeVarint(truncated, 0);
       expect(
-        () => MoQWireFormat.decodeKeyValuePairs(
-            truncated, countBytes, count),
+        () => MoQWireFormat.decodeKeyValuePairs(truncated, countBytes, count),
         throwsA(isA<FormatException>()),
       );
     });
@@ -299,77 +385,113 @@ void main() {
 
   group('MoQMessageType.fromValue version dispatch', () {
     test('draft-14: 0x05 returns subscribeError', () {
-      final result = MoQMessageType.fromValue(0x05,
-          version: MoQVersion.draft14);
+      final result = MoQMessageType.fromValue(
+        0x05,
+        version: MoQVersion.draft14,
+      );
       expect(result, equals(MoQMessageType.subscribeError));
     });
 
     test('draft-16: 0x05 returns requestError', () {
-      final result = MoQMessageType.fromValue(0x05,
-          version: MoQVersion.draft16);
+      final result = MoQMessageType.fromValue(
+        0x05,
+        version: MoQVersion.draft16,
+      );
       expect(result, equals(MoQMessageType.requestError));
     });
 
     test('draft-14: 0x07 returns publishNamespaceOk', () {
-      final result = MoQMessageType.fromValue(0x07,
-          version: MoQVersion.draft14);
+      final result = MoQMessageType.fromValue(
+        0x07,
+        version: MoQVersion.draft14,
+      );
       expect(result, equals(MoQMessageType.publishNamespaceOk));
     });
 
     test('draft-16: 0x07 returns requestOk', () {
-      final result = MoQMessageType.fromValue(0x07,
-          version: MoQVersion.draft16);
+      final result = MoQMessageType.fromValue(
+        0x07,
+        version: MoQVersion.draft16,
+      );
       expect(result, equals(MoQMessageType.requestOk));
     });
 
     test('draft-14: 0x08 returns publishNamespaceError', () {
-      final result = MoQMessageType.fromValue(0x08,
-          version: MoQVersion.draft14);
+      final result = MoQMessageType.fromValue(
+        0x08,
+        version: MoQVersion.draft14,
+      );
       expect(result, equals(MoQMessageType.publishNamespaceError));
     });
 
     test('draft-16: 0x08 returns namespace_', () {
-      final result = MoQMessageType.fromValue(0x08,
-          version: MoQVersion.draft16);
+      final result = MoQMessageType.fromValue(
+        0x08,
+        version: MoQVersion.draft16,
+      );
       expect(result, equals(MoQMessageType.namespace_));
     });
 
     test('draft-14: 0x0E returns trackStatusOk', () {
-      final result = MoQMessageType.fromValue(0x0E,
-          version: MoQVersion.draft14);
+      final result = MoQMessageType.fromValue(
+        0x0E,
+        version: MoQVersion.draft14,
+      );
       expect(result, equals(MoQMessageType.trackStatusOk));
     });
 
     test('draft-16: 0x0E returns namespaceDone', () {
-      final result = MoQMessageType.fromValue(0x0E,
-          version: MoQVersion.draft16);
+      final result = MoQMessageType.fromValue(
+        0x0E,
+        version: MoQVersion.draft16,
+      );
       expect(result, equals(MoQMessageType.namespaceDone));
     });
 
     test('draft-16: removed types return null', () {
-      expect(MoQMessageType.fromValue(0x0F, version: MoQVersion.draft16),
-          isNull); // TRACK_STATUS_ERROR
-      expect(MoQMessageType.fromValue(0x12, version: MoQVersion.draft16),
-          isNull); // SUBSCRIBE_NAMESPACE_OK
-      expect(MoQMessageType.fromValue(0x13, version: MoQVersion.draft16),
-          isNull); // SUBSCRIBE_NAMESPACE_ERROR
-      expect(MoQMessageType.fromValue(0x14, version: MoQVersion.draft16),
-          isNull); // UNSUBSCRIBE_NAMESPACE
-      expect(MoQMessageType.fromValue(0x19, version: MoQVersion.draft16),
-          isNull); // FETCH_ERROR
-      expect(MoQMessageType.fromValue(0x1F, version: MoQVersion.draft16),
-          isNull); // PUBLISH_ERROR
+      expect(
+        MoQMessageType.fromValue(0x0F, version: MoQVersion.draft16),
+        isNull,
+      ); // TRACK_STATUS_ERROR
+      expect(
+        MoQMessageType.fromValue(0x12, version: MoQVersion.draft16),
+        isNull,
+      ); // SUBSCRIBE_NAMESPACE_OK
+      expect(
+        MoQMessageType.fromValue(0x13, version: MoQVersion.draft16),
+        isNull,
+      ); // SUBSCRIBE_NAMESPACE_ERROR
+      expect(
+        MoQMessageType.fromValue(0x14, version: MoQVersion.draft16),
+        isNull,
+      ); // UNSUBSCRIBE_NAMESPACE
+      expect(
+        MoQMessageType.fromValue(0x19, version: MoQVersion.draft16),
+        isNull,
+      ); // FETCH_ERROR
+      expect(
+        MoQMessageType.fromValue(0x1F, version: MoQVersion.draft16),
+        isNull,
+      ); // PUBLISH_ERROR
     });
 
     test('shared types resolve the same in both versions', () {
-      expect(MoQMessageType.fromValue(0x03, version: MoQVersion.draft14),
-          equals(MoQMessageType.subscribe));
-      expect(MoQMessageType.fromValue(0x03, version: MoQVersion.draft16),
-          equals(MoQMessageType.subscribe));
-      expect(MoQMessageType.fromValue(0x20, version: MoQVersion.draft14),
-          equals(MoQMessageType.clientSetup));
-      expect(MoQMessageType.fromValue(0x20, version: MoQVersion.draft16),
-          equals(MoQMessageType.clientSetup));
+      expect(
+        MoQMessageType.fromValue(0x03, version: MoQVersion.draft14),
+        equals(MoQMessageType.subscribe),
+      );
+      expect(
+        MoQMessageType.fromValue(0x03, version: MoQVersion.draft16),
+        equals(MoQMessageType.subscribe),
+      );
+      expect(
+        MoQMessageType.fromValue(0x20, version: MoQVersion.draft14),
+        equals(MoQMessageType.clientSetup),
+      );
+      expect(
+        MoQMessageType.fromValue(0x20, version: MoQVersion.draft16),
+        equals(MoQMessageType.clientSetup),
+      );
     });
   });
 
@@ -381,14 +503,14 @@ void main() {
     test('draft-16 serializes without version list', () {
       final msg = ClientSetupMessage(
         supportedVersions: [MoQVersion.draft16], // ignored in draft-16
-        parameters: [
-          KeyValuePair.varint(SetupParameterType.maxRequestId, 100),
-        ],
+        parameters: [KeyValuePair.varint(SetupParameterType.maxRequestId, 100)],
       );
 
       final bytes = msg.serialize(version: MoQVersion.draft16);
-      final (parsed, _) =
-          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
 
       expect(parsed, isA<ClientSetupMessage>());
       final result = parsed as ClientSetupMessage;
@@ -405,8 +527,10 @@ void main() {
       );
 
       final bytes = msg.serialize(version: MoQVersion.draft14);
-      final (parsed, _) =
-          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft14);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft14,
+      );
 
       expect(parsed, isA<ClientSetupMessage>());
       final result = parsed as ClientSetupMessage;
@@ -418,14 +542,14 @@ void main() {
     test('draft-16 serializes without selected version', () {
       final msg = ServerSetupMessage(
         selectedVersion: MoQVersion.draft16,
-        parameters: [
-          KeyValuePair.varint(SetupParameterType.maxRequestId, 50),
-        ],
+        parameters: [KeyValuePair.varint(SetupParameterType.maxRequestId, 50)],
       );
 
       final bytes = msg.serialize(version: MoQVersion.draft16);
-      final (parsed, _) =
-          MoQControlMessageParser.parse(bytes, version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
 
       expect(parsed, isA<ServerSetupMessage>());
       final result = parsed as ServerSetupMessage;

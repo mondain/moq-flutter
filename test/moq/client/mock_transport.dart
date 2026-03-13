@@ -7,7 +7,8 @@ class MockMoQTransport implements MoQTransport {
   bool _isConnected = false;
   final _connectionStateController = StreamController<bool>.broadcast();
   final _incomingDataController = StreamController<Uint8List>.broadcast();
-  final _incomingDataStreamsController = StreamController<DataStreamChunk>.broadcast();
+  final _incomingDataStreamsController =
+      StreamController<DataStreamChunk>.broadcast();
   final _incomingDatagramsController = StreamController<Uint8List>.broadcast();
 
   // Track sent data for assertions
@@ -24,6 +25,7 @@ class MockMoQTransport implements MoQTransport {
 
   // Callbacks for custom response handling
   void Function(Uint8List data)? onControlMessageSent;
+  Map<String, String>? lastConnectOptions;
 
   @override
   bool get isConnected => _isConnected;
@@ -35,19 +37,27 @@ class MockMoQTransport implements MoQTransport {
   Stream<Uint8List> get incomingData => _incomingDataController.stream;
 
   @override
-  Stream<DataStreamChunk> get incomingDataStreams => _incomingDataStreamsController.stream;
+  Stream<DataStreamChunk> get incomingDataStreams =>
+      _incomingDataStreamsController.stream;
 
   @override
   MoQTransportStats get stats => MoQTransportStats(
-        bytesSent: _bytesSent,
-        bytesReceived: _bytesReceived,
-        packetsSent: sentControlMessages.length,
-        packetsReceived: 0,
-        lastActivity: DateTime.now(),
-      );
+    bytesSent: _bytesSent,
+    bytesReceived: _bytesReceived,
+    packetsSent: sentControlMessages.length,
+    packetsReceived: 0,
+    lastActivity: DateTime.now(),
+  );
 
   @override
-  Future<void> connect(String host, int port, {Map<String, String>? options}) async {
+  Future<void> connect(
+    String host,
+    int port, {
+    Map<String, String>? options,
+  }) async {
+    lastConnectOptions = options == null
+        ? null
+        : Map<String, String>.from(options);
     _isConnected = true;
     _connectionStateController.add(true);
   }
@@ -99,7 +109,8 @@ class MockMoQTransport implements MoQTransport {
   }
 
   @override
-  Stream<Uint8List> get incomingDatagrams => _incomingDatagramsController.stream;
+  Stream<Uint8List> get incomingDatagrams =>
+      _incomingDatagramsController.stream;
 
   @override
   void dispose() {
@@ -118,13 +129,15 @@ class MockMoQTransport implements MoQTransport {
   }
 
   /// Simulate receiving data stream chunk
-  void simulateIncomingDataStream(int streamId, Uint8List data, {bool isComplete = false}) {
+  void simulateIncomingDataStream(
+    int streamId,
+    Uint8List data, {
+    bool isComplete = false,
+  }) {
     _bytesReceived += data.length;
-    _incomingDataStreamsController.add(DataStreamChunk(
-      streamId: streamId,
-      data: data,
-      isComplete: isComplete,
-    ));
+    _incomingDataStreamsController.add(
+      DataStreamChunk(streamId: streamId, data: data, isComplete: isComplete),
+    );
   }
 
   /// Simulate receiving a datagram from server
