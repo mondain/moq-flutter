@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:camera/camera.dart';
 import 'package:logger/logger.dart';
 import 'audio_capture.dart';
@@ -47,7 +48,7 @@ class CaptureConfig {
 /// Uses platform-specific audio capture:
 /// - Android/iOS: audio_streamer package
 /// - Linux: PulseAudio via parec
-/// - macOS/iOS/Windows: Native capture via Platform Channels (AVFoundation/Media Foundation)
+/// - Android/macOS/iOS/Windows: Native capture via Platform Channels
 class CameraCapture implements VideoCapture {
   final CaptureConfig config;
   final Logger _logger;
@@ -63,11 +64,9 @@ class CameraCapture implements VideoCapture {
   // Platform-specific audio capture
   AudioCapture? _audioCapture;
 
-  CameraCapture({
-    CaptureConfig? config,
-    Logger? logger,
-  })  : config = config ?? const CaptureConfig(),
-        _logger = logger ?? Logger();
+  CameraCapture({CaptureConfig? config, Logger? logger})
+    : config = config ?? const CaptureConfig(),
+      _logger = logger ?? Logger();
 
   /// Get available cameras
   Future<List<CameraDescription>> getAvailableCameras() async {
@@ -139,7 +138,8 @@ class CameraCapture implements VideoCapture {
     _isCapturing = false;
 
     // Stop video streaming
-    if (_cameraController != null && _cameraController!.value.isStreamingImages) {
+    if (_cameraController != null &&
+        _cameraController!.value.isStreamingImages) {
       await _cameraController!.stopImageStream();
     }
     _logger.i('Video capture stopped');
@@ -167,7 +167,10 @@ class CameraCapture implements VideoCapture {
       frameData = image.planes.first.bytes;
       format = 'bgra8888';
     } else {
-      final totalBytes = image.planes.fold<int>(0, (sum, p) => sum + p.bytes.length);
+      final totalBytes = image.planes.fold<int>(
+        0,
+        (sum, p) => sum + p.bytes.length,
+      );
       frameData = Uint8List(totalBytes);
       int offset = 0;
       for (final plane in image.planes) {
@@ -232,7 +235,10 @@ class CameraCapture implements VideoCapture {
     final cfg = config ?? const CaptureConfig();
     final log = logger ?? Logger();
 
-    if (Platform.isIOS || Platform.isMacOS || Platform.isWindows) {
+    if (Platform.isAndroid ||
+        Platform.isIOS ||
+        Platform.isMacOS ||
+        Platform.isWindows) {
       return NativeVideoCapture(config: cfg, logger: log);
     } else if (Platform.isLinux) {
       // Use FFmpeg-based V4L2 capture on Linux
@@ -269,13 +275,13 @@ abstract class VideoCapture {
   void dispose();
 }
 
-
-/// Native video capture for macOS, iOS, and Windows using AVFoundation/Media Foundation via Platform Channels
+/// Native video capture for Android, macOS, iOS, and Windows via Platform Channels
 class NativeVideoCapture implements VideoCapture {
   final CaptureConfig config;
   final Logger _logger;
 
   final _videoFrameController = StreamController<VideoFrame>.broadcast();
+  final ValueNotifier<Uint8List?> _previewJpegNotifier = ValueNotifier(null);
   bool _isCapturing = false;
   NativeCaptureChannel? _nativeChannel;
   StreamSubscription<NativeVideoFrame>? _videoSubscription;
@@ -285,14 +291,14 @@ class NativeVideoCapture implements VideoCapture {
   final _audioController = StreamController<AudioSamples>.broadcast();
   StreamSubscription<NativeAudioSamples>? _audioSubscription;
 
-  NativeVideoCapture({
-    CaptureConfig? config,
-    Logger? logger,
-  })  : config = config ?? const CaptureConfig(),
-        _logger = logger ?? Logger();
+  NativeVideoCapture({CaptureConfig? config, Logger? logger})
+    : config = config ?? const CaptureConfig(),
+      _logger = logger ?? Logger();
 
   @override
   Stream<VideoFrame> get videoFrames => _videoFrameController.stream;
+
+  ValueListenable<Uint8List?> get previewJpegListenable => _previewJpegNotifier;
 
   @override
   Stream<AudioSamples>? get audioSamples =>
@@ -325,7 +331,8 @@ class NativeVideoCapture implements VideoCapture {
 
       // Request microphone permission if audio is enabled
       if (config.enableAudio) {
-        final hasMicPermission = await _nativeChannel!.hasMicrophonePermission();
+        final hasMicPermission = await _nativeChannel!
+            .hasMicrophonePermission();
         if (!hasMicPermission) {
           final granted = await _nativeChannel!.requestMicrophonePermission();
           if (!granted) {
@@ -430,6 +437,11 @@ class NativeVideoCapture implements VideoCapture {
   void _onVideoFrame(NativeVideoFrame nativeFrame) {
     if (!_isCapturing) return;
 
+    if (nativeFrame.format == 'jpeg') {
+      _previewJpegNotifier.value = nativeFrame.data;
+      return;
+    }
+
     final frame = VideoFrame(
       data: nativeFrame.data,
       width: nativeFrame.width,
@@ -485,6 +497,7 @@ class NativeVideoCapture implements VideoCapture {
   void dispose() {
     stopCapture();
     _nativeChannel?.dispose();
+    _previewJpegNotifier.dispose();
     _videoFrameController.close();
     _audioController.close();
   }

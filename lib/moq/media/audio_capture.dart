@@ -80,15 +80,12 @@ abstract class AudioCapture {
   void dispose();
 
   /// Factory to create platform-appropriate audio capture
-  factory AudioCapture({
-    AudioCaptureConfig? config,
-    Logger? logger,
-  }) {
+  factory AudioCapture({AudioCaptureConfig? config, Logger? logger}) {
     final cfg = config ?? AudioCaptureConfig.opus;
     final log = logger ?? Logger();
 
     if (Platform.isAndroid) {
-      return MobileAudioCapture(config: cfg, logger: log);
+      return NativeAndroidAudioCapture(config: cfg, logger: log);
     } else if (Platform.isIOS) {
       return NativeIOSAudioCapture(config: cfg, logger: log);
     } else if (Platform.isLinux) {
@@ -104,7 +101,7 @@ abstract class AudioCapture {
   }
 }
 
-/// Mobile audio capture using audio_streamer package (Android/iOS)
+/// Mobile audio capture using audio_streamer package
 class MobileAudioCapture implements AudioCapture {
   @override
   final AudioCaptureConfig config;
@@ -118,10 +115,8 @@ class MobileAudioCapture implements AudioCapture {
   StreamSubscription<List<double>>? _audioSubscription;
   Timer? _silenceTimer;
 
-  MobileAudioCapture({
-    required this.config,
-    required Logger logger,
-  }) : _logger = logger;
+  MobileAudioCapture({required this.config, required Logger logger})
+    : _logger = logger;
 
   @override
   Stream<AudioSamples> get audioStream => _audioController.stream;
@@ -133,7 +128,9 @@ class MobileAudioCapture implements AudioCapture {
   Future<void> initialize() async {
     // Set sample rate before starting (Android only, iOS uses preferred rate)
     audio_pkg.AudioStreamer().sampleRate = config.sampleRate;
-    _logger.i('Mobile audio capture initialized (sample rate: ${config.sampleRate}Hz)');
+    _logger.i(
+      'Mobile audio capture initialized (sample rate: ${config.sampleRate}Hz)',
+    );
   }
 
   @override
@@ -161,8 +158,10 @@ class MobileAudioCapture implements AudioCapture {
       Future.delayed(const Duration(milliseconds: 100), () async {
         try {
           _actualSampleRate = await audio_pkg.AudioStreamer().actualSampleRate;
-          _logger.i('Actual device sample rate: $_actualSampleRate Hz'
-              '${_actualSampleRate != config.sampleRate ? ' (requested ${config.sampleRate})' : ''}');
+          _logger.i(
+            'Actual device sample rate: $_actualSampleRate Hz'
+            '${_actualSampleRate != config.sampleRate ? ' (requested ${config.sampleRate})' : ''}',
+          );
         } catch (e) {
           _logger.w('Could not query actual sample rate: $e');
           _actualSampleRate = config.sampleRate;
@@ -181,7 +180,9 @@ class MobileAudioCapture implements AudioCapture {
     if (!_isCapturing) return;
 
     final timestampMs = DateTime.now().millisecondsSinceEpoch - _startTimeMs;
-    final sampleRate = _actualSampleRate > 0 ? _actualSampleRate : config.sampleRate;
+    final sampleRate = _actualSampleRate > 0
+        ? _actualSampleRate
+        : config.sampleRate;
 
     // audio_streamer returns mono samples as List<double>.
     // Convert to Int16 PCM and duplicate to stereo if configured for 2 channels.
@@ -200,13 +201,15 @@ class MobileAudioCapture implements AudioCapture {
       }
     }
 
-    _audioController.add(AudioSamples(
-      data: pcmData,
-      sampleRate: sampleRate,
-      channels: outputChannels,
-      timestampMs: timestampMs,
-      bitsPerSample: 16,
-    ));
+    _audioController.add(
+      AudioSamples(
+        data: pcmData,
+        sampleRate: sampleRate,
+        channels: outputChannels,
+        timestampMs: timestampMs,
+        bitsPerSample: 16,
+      ),
+    );
   }
 
   void _startSilenceGenerator() {
@@ -221,13 +224,15 @@ class MobileAudioCapture implements AudioCapture {
       final samplesPerFrame = (config.sampleRate * 20) ~/ 1000;
       final frameSize = samplesPerFrame * config.channels * 2; // 16-bit
 
-      _audioController.add(AudioSamples(
-        data: Uint8List(frameSize),
-        sampleRate: config.sampleRate,
-        channels: config.channels,
-        timestampMs: timestampMs,
-        bitsPerSample: 16,
-      ));
+      _audioController.add(
+        AudioSamples(
+          data: Uint8List(frameSize),
+          sampleRate: config.sampleRate,
+          channels: config.channels,
+          timestampMs: timestampMs,
+          bitsPerSample: 16,
+        ),
+      );
     });
     _logger.w('Falling back to silence generator');
   }
@@ -252,6 +257,147 @@ class MobileAudioCapture implements AudioCapture {
   }
 }
 
+/// Native Android audio capture using AudioRecord via platform channels
+class NativeAndroidAudioCapture implements AudioCapture {
+  @override
+  final AudioCaptureConfig config;
+  final Logger _logger;
+
+  final _audioController = StreamController<AudioSamples>.broadcast();
+  bool _isCapturing = false;
+  NativeCaptureChannel? _nativeChannel;
+  StreamSubscription<NativeAudioSamples>? _nativeSubscription;
+  Timer? _silenceTimer;
+  int _startTimeMs = 0;
+  bool _nativeAvailable = true;
+
+  NativeAndroidAudioCapture({required this.config, required Logger logger})
+    : _logger = logger;
+
+  @override
+  Stream<AudioSamples> get audioStream => _audioController.stream;
+
+  @override
+  bool get isCapturing => _isCapturing;
+
+  @override
+  Future<void> initialize() async {
+    try {
+      _nativeChannel = NativeCaptureChannel(logger: _logger);
+      final hasPermission = await _nativeChannel!.hasMicrophonePermission();
+      if (!hasPermission) {
+        final granted = await _nativeChannel!.requestMicrophonePermission();
+        if (!granted) {
+          _logger.w('Microphone permission denied, falling back to silence');
+          _nativeAvailable = false;
+          return;
+        }
+      }
+
+      await _nativeChannel!.initializeAudio(
+        sampleRate: config.sampleRate,
+        channels: config.channels,
+        bitsPerSample: config.bitsPerSample,
+      );
+      _logger.i('Android native audio capture initialized');
+    } catch (e) {
+      _logger.w('Failed to initialize Android native audio capture: $e');
+      _nativeAvailable = false;
+    }
+  }
+
+  @override
+  Future<void> startCapture() async {
+    if (_isCapturing) return;
+
+    _isCapturing = true;
+    _startTimeMs = DateTime.now().millisecondsSinceEpoch;
+
+    if (_nativeAvailable && _nativeChannel != null) {
+      try {
+        _nativeSubscription = _nativeChannel!.audioStream.listen(
+          _onNativeAudioData,
+          onError: (error) {
+            _logger.e('Native Android audio stream error: $error');
+            _startSilenceGenerator();
+          },
+        );
+        await _nativeChannel!.startAudioCapture();
+        _logger.i('Android native audio capture started');
+        return;
+      } catch (e) {
+        _logger.e('Failed to start Android native audio capture: $e');
+      }
+    }
+
+    _startSilenceGenerator();
+  }
+
+  void _onNativeAudioData(NativeAudioSamples nativeSamples) {
+    if (!_isCapturing) return;
+
+    _audioController.add(
+      AudioSamples(
+        data: nativeSamples.data,
+        sampleRate: nativeSamples.sampleRate,
+        channels: nativeSamples.channels,
+        timestampMs: nativeSamples.timestampMs,
+        bitsPerSample: nativeSamples.bitsPerSample,
+      ),
+    );
+  }
+
+  void _startSilenceGenerator() {
+    _silenceTimer?.cancel();
+    _silenceTimer = Timer.periodic(const Duration(milliseconds: 20), (timer) {
+      if (!_isCapturing) {
+        timer.cancel();
+        return;
+      }
+
+      final timestampMs = DateTime.now().millisecondsSinceEpoch - _startTimeMs;
+      final samplesPerFrame = (config.sampleRate * 20) ~/ 1000;
+      final frameSize = samplesPerFrame * config.channels * 2;
+      _audioController.add(
+        AudioSamples(
+          data: Uint8List(frameSize),
+          sampleRate: config.sampleRate,
+          channels: config.channels,
+          timestampMs: timestampMs,
+          bitsPerSample: 16,
+        ),
+      );
+    });
+    _logger.w('Android audio capture falling back to silence generator');
+  }
+
+  @override
+  Future<void> stopCapture() async {
+    if (!_isCapturing) return;
+
+    _isCapturing = false;
+    _silenceTimer?.cancel();
+    _silenceTimer = null;
+    await _nativeSubscription?.cancel();
+    _nativeSubscription = null;
+
+    if (_nativeAvailable && _nativeChannel != null) {
+      try {
+        await _nativeChannel!.stopAudioCapture();
+      } catch (e) {
+        _logger.w('Error stopping Android native audio capture: $e');
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    stopCapture();
+    _nativeChannel?.dispose();
+    _audioController.close();
+  }
+}
+
 /// Linux audio capture using PulseAudio via parec command
 class LinuxAudioCapture implements AudioCapture {
   @override
@@ -266,10 +412,8 @@ class LinuxAudioCapture implements AudioCapture {
   dynamic _parecProcess;
   Timer? _silenceTimer;
 
-  LinuxAudioCapture({
-    required this.config,
-    required Logger logger,
-  }) : _logger = logger;
+  LinuxAudioCapture({required this.config, required Logger logger})
+    : _logger = logger;
 
   @override
   Stream<AudioSamples> get audioStream => _audioController.stream;
@@ -314,15 +458,18 @@ class LinuxAudioCapture implements AudioCapture {
         (Uint8List data) {
           if (!_isCapturing) return;
 
-          final timestampMs = DateTime.now().millisecondsSinceEpoch - _startTimeMs;
+          final timestampMs =
+              DateTime.now().millisecondsSinceEpoch - _startTimeMs;
 
-          _audioController.add(AudioSamples(
-            data: data,
-            sampleRate: config.sampleRate,
-            channels: config.channels,
-            timestampMs: timestampMs,
-            bitsPerSample: 16,
-          ));
+          _audioController.add(
+            AudioSamples(
+              data: data,
+              sampleRate: config.sampleRate,
+              channels: config.channels,
+              timestampMs: timestampMs,
+              bitsPerSample: 16,
+            ),
+          );
         },
         onError: (error) {
           _logger.e('parec error: $error');
@@ -330,7 +477,9 @@ class LinuxAudioCapture implements AudioCapture {
         },
         onDone: () {
           if (_isCapturing) {
-            _logger.w('parec process exited unexpectedly, falling back to silence');
+            _logger.w(
+              'parec process exited unexpectedly, falling back to silence',
+            );
             _startSilenceGenerator();
           }
         },
@@ -360,13 +509,15 @@ class LinuxAudioCapture implements AudioCapture {
       final samplesPerFrame = (config.sampleRate * 20) ~/ 1000;
       final frameSize = samplesPerFrame * config.channels * 2;
 
-      _audioController.add(AudioSamples(
-        data: Uint8List(frameSize),
-        sampleRate: config.sampleRate,
-        channels: config.channels,
-        timestampMs: timestampMs,
-        bitsPerSample: 16,
-      ));
+      _audioController.add(
+        AudioSamples(
+          data: Uint8List(frameSize),
+          sampleRate: config.sampleRate,
+          channels: config.channels,
+          timestampMs: timestampMs,
+          bitsPerSample: 16,
+        ),
+      );
     });
     _logger.w('Falling back to silence generator');
   }
@@ -410,10 +561,8 @@ class NativeMacOSAudioCapture implements AudioCapture {
   int _startTimeMs = 0;
   bool _nativeAvailable = true;
 
-  NativeMacOSAudioCapture({
-    required this.config,
-    required Logger logger,
-  }) : _logger = logger;
+  NativeMacOSAudioCapture({required this.config, required Logger logger})
+    : _logger = logger;
 
   @override
   Stream<AudioSamples> get audioStream => _audioController.stream;
@@ -483,13 +632,15 @@ class NativeMacOSAudioCapture implements AudioCapture {
   void _onNativeAudioData(NativeAudioSamples nativeSamples) {
     if (!_isCapturing) return;
 
-    _audioController.add(AudioSamples(
-      data: nativeSamples.data,
-      sampleRate: nativeSamples.sampleRate,
-      channels: nativeSamples.channels,
-      timestampMs: nativeSamples.timestampMs,
-      bitsPerSample: nativeSamples.bitsPerSample,
-    ));
+    _audioController.add(
+      AudioSamples(
+        data: nativeSamples.data,
+        sampleRate: nativeSamples.sampleRate,
+        channels: nativeSamples.channels,
+        timestampMs: nativeSamples.timestampMs,
+        bitsPerSample: nativeSamples.bitsPerSample,
+      ),
+    );
   }
 
   void _startSilenceGenerator() {
@@ -504,13 +655,15 @@ class NativeMacOSAudioCapture implements AudioCapture {
       final samplesPerFrame = (config.sampleRate * 20) ~/ 1000;
       final frameSize = samplesPerFrame * config.channels * 2;
 
-      _audioController.add(AudioSamples(
-        data: Uint8List(frameSize),
-        sampleRate: config.sampleRate,
-        channels: config.channels,
-        timestampMs: timestampMs,
-        bitsPerSample: 16,
-      ));
+      _audioController.add(
+        AudioSamples(
+          data: Uint8List(frameSize),
+          sampleRate: config.sampleRate,
+          channels: config.channels,
+          timestampMs: timestampMs,
+          bitsPerSample: 16,
+        ),
+      );
     });
     _logger.w('macOS audio capture falling back to silence generator');
   }
@@ -561,10 +714,8 @@ class NativeIOSAudioCapture implements AudioCapture {
   int _startTimeMs = 0;
   bool _nativeAvailable = true;
 
-  NativeIOSAudioCapture({
-    required this.config,
-    required Logger logger,
-  }) : _logger = logger;
+  NativeIOSAudioCapture({required this.config, required Logger logger})
+    : _logger = logger;
 
   @override
   Stream<AudioSamples> get audioStream => _audioController.stream;
@@ -634,13 +785,15 @@ class NativeIOSAudioCapture implements AudioCapture {
   void _onNativeAudioData(NativeAudioSamples nativeSamples) {
     if (!_isCapturing) return;
 
-    _audioController.add(AudioSamples(
-      data: nativeSamples.data,
-      sampleRate: nativeSamples.sampleRate,
-      channels: nativeSamples.channels,
-      timestampMs: nativeSamples.timestampMs,
-      bitsPerSample: nativeSamples.bitsPerSample,
-    ));
+    _audioController.add(
+      AudioSamples(
+        data: nativeSamples.data,
+        sampleRate: nativeSamples.sampleRate,
+        channels: nativeSamples.channels,
+        timestampMs: nativeSamples.timestampMs,
+        bitsPerSample: nativeSamples.bitsPerSample,
+      ),
+    );
   }
 
   void _startSilenceGenerator() {
@@ -655,13 +808,15 @@ class NativeIOSAudioCapture implements AudioCapture {
       final samplesPerFrame = (config.sampleRate * 20) ~/ 1000;
       final frameSize = samplesPerFrame * config.channels * 2;
 
-      _audioController.add(AudioSamples(
-        data: Uint8List(frameSize),
-        sampleRate: config.sampleRate,
-        channels: config.channels,
-        timestampMs: timestampMs,
-        bitsPerSample: 16,
-      ));
+      _audioController.add(
+        AudioSamples(
+          data: Uint8List(frameSize),
+          sampleRate: config.sampleRate,
+          channels: config.channels,
+          timestampMs: timestampMs,
+          bitsPerSample: 16,
+        ),
+      );
     });
     _logger.w('iOS audio capture falling back to silence generator');
   }
@@ -707,10 +862,8 @@ class MacOSAudioCapture implements AudioCapture {
   int _startTimeMs = 0;
   Timer? _silenceTimer;
 
-  MacOSAudioCapture({
-    required this.config,
-    required Logger logger,
-  }) : _logger = logger;
+  MacOSAudioCapture({required this.config, required Logger logger})
+    : _logger = logger;
 
   @override
   Stream<AudioSamples> get audioStream => _audioController.stream;
@@ -740,13 +893,15 @@ class MacOSAudioCapture implements AudioCapture {
       final samplesPerFrame = (config.sampleRate * 20) ~/ 1000;
       final frameSize = samplesPerFrame * config.channels * 2;
 
-      _audioController.add(AudioSamples(
-        data: Uint8List(frameSize),
-        sampleRate: config.sampleRate,
-        channels: config.channels,
-        timestampMs: timestampMs,
-        bitsPerSample: 16,
-      ));
+      _audioController.add(
+        AudioSamples(
+          data: Uint8List(frameSize),
+          sampleRate: config.sampleRate,
+          channels: config.channels,
+          timestampMs: timestampMs,
+          bitsPerSample: 16,
+        ),
+      );
     });
 
     _logger.i('macOS audio capture started (stub)');
@@ -785,10 +940,8 @@ class WindowsAudioCapture implements AudioCapture {
   StreamSubscription<NativeAudioSamples>? _nativeSubscription;
   bool _useNativeCapture = true;
 
-  WindowsAudioCapture({
-    required this.config,
-    required Logger logger,
-  }) : _logger = logger;
+  WindowsAudioCapture({required this.config, required Logger logger})
+    : _logger = logger;
 
   @override
   Stream<AudioSamples> get audioStream => _audioController.stream;
@@ -806,7 +959,9 @@ class WindowsAudioCapture implements AudioCapture {
       if (!hasPermission) {
         final granted = await _nativeChannel!.requestMicrophonePermission();
         if (!granted) {
-          _logger.w('Microphone permission not available, falling back to silence');
+          _logger.w(
+            'Microphone permission not available, falling back to silence',
+          );
           _useNativeCapture = false;
         }
       }
@@ -820,7 +975,9 @@ class WindowsAudioCapture implements AudioCapture {
         _logger.i('Windows native audio capture initialized');
       }
     } catch (e) {
-      _logger.w('Failed to initialize native audio capture: $e, using silence fallback');
+      _logger.w(
+        'Failed to initialize native audio capture: $e, using silence fallback',
+      );
       _useNativeCapture = false;
     }
   }
@@ -842,7 +999,9 @@ class WindowsAudioCapture implements AudioCapture {
         _logger.i('Windows native audio capture started');
         return;
       } catch (e) {
-        _logger.w('Failed to start native audio capture: $e, falling back to silence');
+        _logger.w(
+          'Failed to start native audio capture: $e, falling back to silence',
+        );
         _useNativeCapture = false;
       }
     }
@@ -854,13 +1013,15 @@ class WindowsAudioCapture implements AudioCapture {
   void _onNativeAudioData(NativeAudioSamples nativeSamples) {
     if (!_isCapturing) return;
 
-    _audioController.add(AudioSamples(
-      data: nativeSamples.data,
-      sampleRate: nativeSamples.sampleRate,
-      channels: nativeSamples.channels,
-      timestampMs: nativeSamples.timestampMs,
-      bitsPerSample: nativeSamples.bitsPerSample,
-    ));
+    _audioController.add(
+      AudioSamples(
+        data: nativeSamples.data,
+        sampleRate: nativeSamples.sampleRate,
+        channels: nativeSamples.channels,
+        timestampMs: nativeSamples.timestampMs,
+        bitsPerSample: nativeSamples.bitsPerSample,
+      ),
+    );
   }
 
   void _startSilenceGenerator() {
@@ -874,13 +1035,15 @@ class WindowsAudioCapture implements AudioCapture {
       final samplesPerFrame = (config.sampleRate * 20) ~/ 1000;
       final frameSize = samplesPerFrame * config.channels * 2;
 
-      _audioController.add(AudioSamples(
-        data: Uint8List(frameSize),
-        sampleRate: config.sampleRate,
-        channels: config.channels,
-        timestampMs: timestampMs,
-        bitsPerSample: 16,
-      ));
+      _audioController.add(
+        AudioSamples(
+          data: Uint8List(frameSize),
+          sampleRate: config.sampleRate,
+          channels: config.channels,
+          timestampMs: timestampMs,
+          bitsPerSample: 16,
+        ),
+      );
     });
 
     _logger.w('Windows audio capture falling back to silence generator');
@@ -928,10 +1091,8 @@ class StubAudioCapture implements AudioCapture {
   int _startTimeMs = 0;
   Timer? _silenceTimer;
 
-  StubAudioCapture({
-    required this.config,
-    required Logger logger,
-  }) : _logger = logger;
+  StubAudioCapture({required this.config, required Logger logger})
+    : _logger = logger;
 
   @override
   Stream<AudioSamples> get audioStream => _audioController.stream;
@@ -961,13 +1122,15 @@ class StubAudioCapture implements AudioCapture {
       final samplesPerFrame = (config.sampleRate * 20) ~/ 1000;
       final frameSize = samplesPerFrame * config.channels * 2;
 
-      _audioController.add(AudioSamples(
-        data: Uint8List(frameSize),
-        sampleRate: config.sampleRate,
-        channels: config.channels,
-        timestampMs: timestampMs,
-        bitsPerSample: 16,
-      ));
+      _audioController.add(
+        AudioSamples(
+          data: Uint8List(frameSize),
+          sampleRate: config.sampleRate,
+          channels: config.channels,
+          timestampMs: timestampMs,
+          bitsPerSample: 16,
+        ),
+      );
     });
 
     _logger.i('Stub audio capture started (generating silence)');

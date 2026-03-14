@@ -2,14 +2,17 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:logger/logger.dart';
 
-/// Platform channel interface for native audio/video capture on macOS, iOS, and Windows
+/// Platform channel interface for native audio/video capture on Android, macOS, iOS, and Windows
 class NativeCaptureChannel {
-  static const MethodChannel _methodChannel =
-      MethodChannel('com.moq_flutter/native_capture');
-  static const EventChannel _audioEventChannel =
-      EventChannel('com.moq_flutter/audio_samples');
-  static const EventChannel _videoEventChannel =
-      EventChannel('com.moq_flutter/video_frames');
+  static const MethodChannel _methodChannel = MethodChannel(
+    'com.moq_flutter/native_capture',
+  );
+  static const EventChannel _audioEventChannel = EventChannel(
+    'com.moq_flutter/audio_samples',
+  );
+  static const EventChannel _videoEventChannel = EventChannel(
+    'com.moq_flutter/video_frames',
+  );
 
   final Logger _logger;
 
@@ -56,7 +59,9 @@ class NativeCaptureChannel {
         'bitsPerSample': bitsPerSample,
       });
       _audioInitialized = true;
-      _logger.i('Native audio capture initialized: ${sampleRate}Hz, ${channels}ch');
+      _logger.i(
+        'Native audio capture initialized: ${sampleRate}Hz, ${channels}ch',
+      );
     } on PlatformException catch (e) {
       _logger.e('Failed to initialize audio: ${e.message}');
       rethrow;
@@ -76,9 +81,10 @@ class NativeCaptureChannel {
 
     try {
       // Start listening to audio event channel
-      _audioSubscription = _audioEventChannel
-          .receiveBroadcastStream()
-          .listen(_onAudioData, onError: _onAudioError);
+      _audioSubscription = _audioEventChannel.receiveBroadcastStream().listen(
+        _onAudioData,
+        onError: _onAudioError,
+      );
 
       await _methodChannel.invokeMethod('startAudioCapture');
       _audioCapturing = true;
@@ -112,7 +118,9 @@ class NativeCaptureChannel {
     }
 
     try {
-      final samples = NativeAudioSamples.fromMap(Map<String, dynamic>.from(data));
+      final samples = NativeAudioSamples.fromMap(
+        Map<String, dynamic>.from(data),
+      );
       _audioController.add(samples);
     } catch (e) {
       _logger.e('Error parsing audio data: $e');
@@ -155,7 +163,9 @@ class NativeCaptureChannel {
         'cameraId': cameraId,
       });
       _videoInitialized = true;
-      _logger.i('Native video capture initialized: ${width}x$height@${frameRate}fps');
+      _logger.i(
+        'Native video capture initialized: ${width}x$height@${frameRate}fps',
+      );
     } on PlatformException catch (e) {
       _logger.e('Failed to initialize video: ${e.message}');
       rethrow;
@@ -165,9 +175,7 @@ class NativeCaptureChannel {
   /// Select a specific camera
   Future<void> selectCamera(String cameraId) async {
     try {
-      await _methodChannel.invokeMethod('selectCamera', {
-        'cameraId': cameraId,
-      });
+      await _methodChannel.invokeMethod('selectCamera', {'cameraId': cameraId});
       _logger.i('Selected camera: $cameraId');
     } on PlatformException catch (e) {
       _logger.e('Failed to select camera: ${e.message}');
@@ -188,9 +196,10 @@ class NativeCaptureChannel {
 
     try {
       // Start listening to video event channel
-      _videoSubscription = _videoEventChannel
-          .receiveBroadcastStream()
-          .listen(_onVideoData, onError: _onVideoError);
+      _videoSubscription = _videoEventChannel.receiveBroadcastStream().listen(
+        _onVideoData,
+        onError: _onVideoError,
+      );
 
       await _methodChannel.invokeMethod('startVideoCapture');
       _videoCapturing = true;
@@ -250,7 +259,9 @@ class NativeCaptureChannel {
   /// Check if microphone permission is granted
   Future<bool> hasMicrophonePermission() async {
     try {
-      final result = await _methodChannel.invokeMethod('hasMicrophonePermission');
+      final result = await _methodChannel.invokeMethod(
+        'hasMicrophonePermission',
+      );
       return result == true;
     } on PlatformException {
       return false;
@@ -260,7 +271,9 @@ class NativeCaptureChannel {
   /// Request camera permission
   Future<bool> requestCameraPermission() async {
     try {
-      final result = await _methodChannel.invokeMethod('requestCameraPermission');
+      final result = await _methodChannel.invokeMethod(
+        'requestCameraPermission',
+      );
       return result == true;
     } on PlatformException catch (e) {
       _logger.e('Failed to request camera permission: ${e.message}');
@@ -271,7 +284,9 @@ class NativeCaptureChannel {
   /// Request microphone permission
   Future<bool> requestMicrophonePermission() async {
     try {
-      final result = await _methodChannel.invokeMethod('requestMicrophonePermission');
+      final result = await _methodChannel.invokeMethod(
+        'requestMicrophonePermission',
+      );
       return result == true;
     } on PlatformException catch (e) {
       _logger.e('Failed to request microphone permission: ${e.message}');
@@ -402,5 +417,6 @@ class NativeCameraInfo {
   }
 
   @override
-  String toString() => 'NativeCameraInfo(id: $id, name: $name, position: $position)';
+  String toString() =>
+      'NativeCameraInfo(id: $id, name: $name, position: $position)';
 }

@@ -61,6 +61,8 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   NativeH264Encoder? _nativeH264Encoder;
   StreamSubscription<VideoFrame>? _videoFrameSubscription;
   StreamSubscription<H264Frame>? _h264FrameSubscription;
+  Uint8List? _videoSpsData;
+  Uint8List? _videoPpsData;
 
   // Audio capture and encoding
   AudioCapture? _audioCapture;
@@ -85,7 +87,7 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
     _linuxPreviewImageNotifier.value = null;
     previewImage?.dispose();
     _linuxPreviewImageNotifier.dispose();
-    _stopPublishing();
+    unawaited(_stopPublishing(updateUi: false));
     super.dispose();
   }
 
@@ -245,9 +247,11 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
         inputFormat: 'yuv420p',
       );
 
-      // Create platform-appropriate video capture and H.264 encoder
+      _videoSpsData = null;
+      _videoPpsData = null;
+
+      // Create platform-appropriate video capture and H.264 encoder.
       if (Platform.isMacOS || Platform.isIOS) {
-        // Use native AVFoundation capture + VideoToolbox H.264 encoding
         final nativeCapture = NativeVideoCapture(
           config: CaptureConfig(
             resolution: ResolutionPreset.high,
@@ -276,6 +280,16 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
         _h264Encoder = H264Encoder(config: encoderConfig, logger: _logger);
         await _h264Encoder!.start();
+      } else if (Platform.isAndroid) {
+        final nativeCapture = NativeVideoCapture(
+          config: CaptureConfig(
+            resolution: ResolutionPreset.high,
+            enableAudio: false,
+          ),
+          logger: _logger,
+        );
+        await nativeCapture.initialize();
+        _videoCapture = nativeCapture;
       } else {
         final cameraCapture = CameraCapture(
           config: CaptureConfig(
@@ -290,65 +304,57 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
         await _h264Encoder!.start();
       }
 
-      // Subscribe to video frames -> FFmpeg encoder (non-macOS/iOS only)
-      if (_h264Encoder != null) {
+      if (Platform.isAndroid) {
+        _videoFrameSubscription = _videoCapture!.videoFrames.listen((
+          videoFrame,
+        ) {
+          unawaited(_publishNativeH264VideoFrame(videoFrame, videoTrackName));
+        });
+      } else {
+        // Desktop/mobile camera path still publishes raw frames into FFmpeg.
+        _h264Encoder = H264Encoder(
+          config: H264EncoderConfig(
+            width: _resolution.width,
+            height: _resolution.height,
+            frameRate: 30,
+            bitrate: _resolution.bitrateBps,
+            gopSize: 30,
+            profile: 'baseline',
+            preset: 'ultrafast',
+            tune: 'zerolatency',
+            inputFormat: 'yuv420p',
+          ),
+        );
+        await _h264Encoder!.start();
+
         _videoFrameSubscription = _videoCapture!.videoFrames.listen((
           videoFrame,
         ) {
           _h264Encoder?.addFrame(videoFrame.data, videoFrame.timestampMs);
         });
+
+        _h264FrameSubscription = _h264Encoder!.frames.listen((h264Frame) async {
+          await _publishEncodedVideoFrame(
+            h264Frame.data,
+            h264Frame.timestampMs,
+            h264Frame.isKeyframe,
+            videoTrackName,
+          );
+        });
       }
 
-      // Subscribe to encoded frames (from either native or FFmpeg encoder)
-      final h264Stream = _nativeH264Encoder?.frames ?? _h264Encoder!.frames;
-      _h264FrameSubscription = h264Stream.listen((h264Frame) async {
-        if (!_isPublishing || _isVideoMuted) return;
-
-        try {
-          switch (_packagingFormat) {
-            case PackagingFormat.cmaf:
-              if (_cmafPublisher == null) return;
-              await _cmafPublisher!.publishVideoFrame(
-                videoTrackName,
-                h264Frame.data,
-                isKeyframe: h264Frame.isKeyframe,
-              );
-
-            case PackagingFormat.loc:
-              if (_locPublisher == null) return;
-              await _locPublisher!.publishFrame(
-                videoTrackName,
-                h264Frame.data,
-                newGroup: h264Frame.isKeyframe,
-              );
-
-            case PackagingFormat.moqMi:
-              if (_moqMiPublisher == null) return;
-              // Convert ms to microseconds for moq-mi
-              final ptsUs = Int64(h264Frame.timestampMs) * Int64(1000);
-              // Build AVC decoder config for keyframes
-              final avcConfig = h264Frame.isKeyframe
-                  ? _buildAvcDecoderConfig()
-                  : null;
-              await _moqMiPublisher!.publishVideoFrame(
-                payload: h264Frame.data,
-                pts: ptsUs,
-                isKeyframe: h264Frame.isKeyframe,
-                avcDecoderConfig: avcConfig,
-              );
-          }
-
-          _publishedFrames++;
-          if (_publishedFrames % 10 == 0 && mounted) {
-            setState(() {
-              _statusMessage =
-                  'Publishing... $_publishedFrames video, $_publishedAudioFrames audio';
-            });
-          }
-        } catch (e) {
-          debugPrint('Error publishing video frame: $e');
-        }
-      });
+      if (_nativeH264Encoder != null) {
+        _h264FrameSubscription = _nativeH264Encoder!.frames.listen((
+          h264Frame,
+        ) async {
+          await _publishEncodedVideoFrame(
+            h264Frame.data,
+            h264Frame.timestampMs,
+            h264Frame.isKeyframe,
+            videoTrackName,
+          );
+        });
+      }
 
       // Start capture
       await _videoCapture!.startCapture();
@@ -377,7 +383,7 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   }
 
   Future<void> _initializeAudioPublishing(String audioTrackName) async {
-    _audioCapture = AudioCapture(
+    _audioCapture ??= AudioCapture(
       config: const AudioCaptureConfig(
         sampleRate: 48000,
         channels: 2,
@@ -457,7 +463,75 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
     }
   }
 
-  Future<void> _stopPublishing() async {
+  Future<void> _publishNativeH264VideoFrame(
+    VideoFrame videoFrame,
+    String videoTrackName,
+  ) async {
+    if (videoFrame.format != 'h264_annexb') {
+      return;
+    }
+
+    _updateVideoParameterSets(videoFrame.data);
+    final isKeyframe = _isH264Keyframe(videoFrame.data);
+    await _publishEncodedVideoFrame(
+      videoFrame.data,
+      videoFrame.timestampMs,
+      isKeyframe,
+      videoTrackName,
+    );
+  }
+
+  Future<void> _publishEncodedVideoFrame(
+    Uint8List frameData,
+    int timestampMs,
+    bool isKeyframe,
+    String videoTrackName,
+  ) async {
+    if (!_isPublishing || _isVideoMuted) return;
+
+    try {
+      switch (_packagingFormat) {
+        case PackagingFormat.cmaf:
+          if (_cmafPublisher == null) return;
+          await _cmafPublisher!.publishVideoFrame(
+            videoTrackName,
+            frameData,
+            isKeyframe: isKeyframe,
+          );
+
+        case PackagingFormat.loc:
+          if (_locPublisher == null) return;
+          await _locPublisher!.publishFrame(
+            videoTrackName,
+            frameData,
+            newGroup: isKeyframe,
+          );
+
+        case PackagingFormat.moqMi:
+          if (_moqMiPublisher == null) return;
+          final ptsUs = Int64(timestampMs) * Int64(1000);
+          final avcConfig = isKeyframe ? _buildAvcDecoderConfig() : null;
+          await _moqMiPublisher!.publishVideoFrame(
+            payload: frameData,
+            pts: ptsUs,
+            isKeyframe: isKeyframe,
+            avcDecoderConfig: avcConfig,
+          );
+      }
+
+      _publishedFrames++;
+      if (_publishedFrames % 10 == 0 && mounted) {
+        setState(() {
+          _statusMessage =
+              'Publishing... $_publishedFrames video, $_publishedAudioFrames audio';
+        });
+      }
+    } catch (e) {
+      debugPrint('Error publishing video frame: $e');
+    }
+  }
+
+  Future<void> _stopPublishing({bool updateUi = true}) async {
     if (_isStopping) {
       return;
     }
@@ -466,9 +540,10 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
     _isPublishing = false;
     _isAudioMuted = false;
     _isVideoMuted = false;
-    _videoCapture = null;
-    _setStatus('Stopping publisher...');
-    if (mounted) {
+    if (updateUi) {
+      _setStatus('Stopping publisher...');
+    }
+    if (updateUi && mounted) {
       setState(() {});
     }
 
@@ -657,8 +732,12 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   /// Build AVCDecoderConfigurationRecord from SPS and PPS NAL units
   /// Format per ISO 14496-15
   Uint8List? _buildAvcDecoderConfig() {
-    final sps = _nativeH264Encoder?.spsData ?? _h264Encoder?.spsData;
-    final pps = _nativeH264Encoder?.ppsData ?? _h264Encoder?.ppsData;
+    final sps = _stripH264StartCode(
+      _videoSpsData ?? _nativeH264Encoder?.spsData ?? _h264Encoder?.spsData,
+    );
+    final pps = _stripH264StartCode(
+      _videoPpsData ?? _nativeH264Encoder?.ppsData ?? _h264Encoder?.ppsData,
+    );
     if (sps == null || pps == null || sps.length < 4) return null;
 
     final builder = BytesBuilder();
@@ -688,6 +767,90 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
     builder.add(pps);
 
     return builder.toBytes();
+  }
+
+  void _updateVideoParameterSets(Uint8List data) {
+    for (final nalUnit in _extractH264NalUnits(data)) {
+      if (nalUnit.isEmpty) {
+        continue;
+      }
+
+      switch (nalUnit[0] & 0x1F) {
+        case 7:
+          _videoSpsData = _prependH264StartCode(nalUnit);
+          break;
+        case 8:
+          _videoPpsData = _prependH264StartCode(nalUnit);
+          break;
+      }
+    }
+  }
+
+  bool _isH264Keyframe(Uint8List data) {
+    for (final nalUnit in _extractH264NalUnits(data)) {
+      if (nalUnit.isNotEmpty && (nalUnit[0] & 0x1F) == 5) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  List<Uint8List> _extractH264NalUnits(Uint8List data) {
+    final nalUnits = <Uint8List>[];
+    int start = -1;
+
+    for (var i = 0; i < data.length - 3; i++) {
+      var startCodeLength = 0;
+      if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
+        startCodeLength = 3;
+      } else if (i + 3 < data.length &&
+          data[i] == 0 &&
+          data[i + 1] == 0 &&
+          data[i + 2] == 0 &&
+          data[i + 3] == 1) {
+        startCodeLength = 4;
+      }
+
+      if (startCodeLength == 0) {
+        continue;
+      }
+
+      if (start >= 0) {
+        nalUnits.add(Uint8List.sublistView(data, start, i));
+      }
+      start = i + startCodeLength;
+      i = start - 1;
+    }
+
+    if (start >= 0 && start < data.length) {
+      nalUnits.add(Uint8List.sublistView(data, start));
+    }
+
+    return nalUnits;
+  }
+
+  Uint8List? _stripH264StartCode(Uint8List? data) {
+    if (data == null || data.length < 4) {
+      return data;
+    }
+
+    if (data[0] == 0 && data[1] == 0 && data[2] == 1) {
+      return Uint8List.sublistView(data, 3);
+    }
+    if (data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1) {
+      return Uint8List.sublistView(data, 4);
+    }
+    return data;
+  }
+
+  Uint8List _prependH264StartCode(Uint8List data) {
+    final result = Uint8List(data.length + 4);
+    result[0] = 0;
+    result[1] = 0;
+    result[2] = 0;
+    result[3] = 1;
+    result.setAll(4, data);
+    return result;
   }
 
   String _getVideoTrackName() {

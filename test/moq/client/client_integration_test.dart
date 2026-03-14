@@ -711,9 +711,10 @@ void main() {
       expect(writes.length, equals(3));
 
       // First object: delta=0, payload len=1, payload byte.
-      expect(writes[1], equals(Uint8List.fromList([0x00, 0x00, 0x01, 0xAA])));
+      // No extension headers length since subgroup type 0x10 has no extensions.
+      expect(writes[1], equals(Uint8List.fromList([0x00, 0x01, 0xAA])));
       // Second sequential object must also use delta=0 rather than absolute object ID.
-      expect(writes[2], equals(Uint8List.fromList([0x00, 0x00, 0x01, 0xBB])));
+      expect(writes[2], equals(Uint8List.fromList([0x00, 0x01, 0xBB])));
     });
   });
 }

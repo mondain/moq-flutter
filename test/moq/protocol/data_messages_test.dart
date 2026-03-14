@@ -346,7 +346,24 @@ void main() {
   });
 
   group('SubgroupHeader', () {
-    test('serialize with required fields', () {
+    test('serialize type 0x10: subgroupId=0, no extensions', () {
+      final header = SubgroupHeader(
+        trackAlias: Int64(1),
+        groupId: Int64(10),
+        subgroupId: Int64(0),
+        publisherPriority: 128,
+      );
+      final serialized = header.serialize();
+
+      // Type 0x10: no SubgroupId field, no extensions in header
+      expect(serialized.length, equals(4));
+      expect(serialized[0], equals(0x10)); // Type
+      expect(serialized[1], equals(1)); // Track Alias
+      expect(serialized[2], equals(10)); // Group ID
+      expect(serialized[3], equals(128)); // Priority
+    });
+
+    test('serialize type 0x14: explicit subgroupId, no extensions', () {
       final header = SubgroupHeader(
         trackAlias: Int64(1),
         groupId: Int64(10),
@@ -355,16 +372,15 @@ void main() {
       );
       final serialized = header.serialize();
 
-      // Type (0x10) + Track Alias + Group ID + Subgroup ID + Priority + Num Headers
-      expect(serialized[0], equals(0x10)); // Type
+      // Type 0x14: explicit SubgroupId field present, no extensions
+      expect(serialized[0], equals(0x14)); // Type (bits 1-2 = 10: explicit)
       expect(serialized[1], equals(1)); // Track Alias
       expect(serialized[2], equals(10)); // Group ID
       expect(serialized[3], equals(5)); // Subgroup ID
       expect(serialized[4], equals(128)); // Priority
-      expect(serialized[5], equals(0)); // No extension headers
     });
 
-    test('serialize with firstObjectId', () {
+    test('serialize type 0x12: firstObjectId mode, no extensions', () {
       final header = SubgroupHeader(
         trackAlias: Int64(1),
         groupId: Int64(10),
@@ -374,15 +390,14 @@ void main() {
       );
       final serialized = header.serialize();
 
-      expect(serialized[0], equals(0x10)); // Type
+      // Type 0x12: SubgroupId = first object ID (no field in header)
+      expect(serialized[0], equals(0x12)); // Type (bits 1-2 = 01: first obj ID)
       expect(serialized[1], equals(1)); // Track Alias
       expect(serialized[2], equals(10)); // Group ID
-      expect(serialized[3], equals(5)); // Subgroup ID
-      expect(serialized[4], equals(20)); // First Object ID
-      expect(serialized[5], equals(128)); // Priority
+      expect(serialized[3], equals(128)); // Priority (no SubgroupId field)
     });
 
-    test('serialize with extension headers', () {
+    test('serialize type 0x15: explicit subgroupId with extensions', () {
       final header = SubgroupHeader(
         trackAlias: Int64(1),
         groupId: Int64(10),
@@ -394,19 +409,39 @@ void main() {
       );
       final serialized = header.serialize();
 
+      // Type 0x15: explicit SubgroupId + extensions bit set
+      // Extensions are per-object, NOT in the subgroup header
+      expect(serialized[0], equals(0x15)); // Type (0x14 | 0x01)
+      expect(serialized[1], equals(1)); // Track Alias
+      expect(serialized[2], equals(10)); // Group ID
+      expect(serialized[3], equals(5)); // Subgroup ID
       expect(serialized[4], equals(128)); // Priority
-      expect(serialized[5], equals(1)); // 1 extension header
-      expect(serialized[6], equals(0x01)); // Header type
+      expect(serialized.length, equals(5)); // No extension data in header
     });
 
-    test('deserialize with required fields', () {
+    test('deserialize type 0x10: no SubgroupId, no extensions', () {
       final data = Uint8List.fromList([
-        0x10, // Type
+        0x10, // Type: subgroupId=0, no ext
+        1, // Track Alias
+        10, // Group ID
+        128, // Priority
+      ]);
+      final header = SubgroupHeader.deserialize(data);
+
+      expect(header.trackAlias, equals(Int64(1)));
+      expect(header.groupId, equals(Int64(10)));
+      expect(header.subgroupId, equals(Int64(0))); // implicit 0
+      expect(header.publisherPriority, equals(128));
+      expect(header.extensionsPresent, isFalse);
+    });
+
+    test('deserialize type 0x14: explicit SubgroupId', () {
+      final data = Uint8List.fromList([
+        0x14, // Type: explicit subgroupId, no ext
         1, // Track Alias
         10, // Group ID
         5, // Subgroup ID
         128, // Priority
-        0, // No extension headers
       ]);
       final header = SubgroupHeader.deserialize(data);
 
@@ -414,62 +449,31 @@ void main() {
       expect(header.groupId, equals(Int64(10)));
       expect(header.subgroupId, equals(Int64(5)));
       expect(header.publisherPriority, equals(128));
-      expect(header.firstObjectId, isNull);
+      expect(header.extensionsPresent, isFalse);
     });
 
-    test('deserialize with firstObjectId', () {
+    test('deserialize type 0x15: extensions bit set', () {
       final data = Uint8List.fromList([
-        0x10, // Type
+        0x15, // Type: explicit subgroupId + extensions
         1, // Track Alias
         10, // Group ID
         5, // Subgroup ID
-        20, // First Object ID
         128, // Priority
-        0, // No extension headers
       ]);
       final header = SubgroupHeader.deserialize(data);
 
       expect(header.trackAlias, equals(Int64(1)));
-      expect(header.groupId, equals(Int64(10)));
       expect(header.subgroupId, equals(Int64(5)));
-      expect(header.firstObjectId, equals(Int64(20)));
       expect(header.publisherPriority, equals(128));
+      expect(header.extensionsPresent, isTrue);
     });
 
-    test('deserialize with extension headers (via round-trip)', () {
-      // Include firstObjectId to avoid ambiguity: the deserializer greedily
-      // reads firstObjectId before priority, and priority=128 (0x80) looks
-      // like a 4-byte varint prefix which consumes subsequent bytes
-      final original = SubgroupHeader(
-        trackAlias: Int64(1),
-        groupId: Int64(10),
-        subgroupId: Int64(5),
-        firstObjectId: Int64(0),
-        publisherPriority: 128,
-        extensionHeaders: [
-          KeyValuePair(type: 0x0001, value: Uint8List.fromList([10])),
-        ],
-      );
-
-      final serialized = original.serialize();
-      final header = SubgroupHeader.deserialize(serialized);
-
-      expect(header.publisherPriority, equals(128));
-      expect(header.extensionHeaders.length, equals(1));
-      expect(header.extensionHeaders[0].type, equals(0x0001));
-      expect(header.extensionHeaders[0].value, equals([10]));
-    });
-
-    test('round-trip serialization', () {
+    test('round-trip type 0x14: explicit subgroupId', () {
       final original = SubgroupHeader(
         trackAlias: Int64(10),
         groupId: Int64(32),
         subgroupId: Int64(50),
-        firstObjectId: Int64(25),
         publisherPriority: 200,
-        extensionHeaders: [
-          KeyValuePair(type: 0x0001, value: Uint8List.fromList([1, 2])),
-        ],
       );
 
       final serialized = original.serialize();
@@ -478,9 +482,24 @@ void main() {
       expect(deserialized.trackAlias, equals(original.trackAlias));
       expect(deserialized.groupId, equals(original.groupId));
       expect(deserialized.subgroupId, equals(original.subgroupId));
-      expect(deserialized.firstObjectId, equals(original.firstObjectId));
       expect(deserialized.publisherPriority, equals(original.publisherPriority));
-      expect(deserialized.extensionHeaders.length, equals(original.extensionHeaders.length));
+    });
+
+    test('round-trip type 0x10: zero subgroupId', () {
+      final original = SubgroupHeader(
+        trackAlias: Int64(3),
+        groupId: Int64(100),
+        subgroupId: Int64(0),
+        publisherPriority: 64,
+      );
+
+      final serialized = original.serialize();
+      final deserialized = SubgroupHeader.deserialize(serialized);
+
+      expect(deserialized.trackAlias, equals(original.trackAlias));
+      expect(deserialized.groupId, equals(original.groupId));
+      expect(deserialized.subgroupId, equals(Int64(0)));
+      expect(deserialized.publisherPriority, equals(original.publisherPriority));
     });
   });
 

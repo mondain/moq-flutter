@@ -63,6 +63,7 @@ class MoQClient {
   // Data stream parsers (stream_id -> parser)
   final _dataStreamParsers = <int, MoQDataStreamParser>{};
   final _outgoingStreamObjects = <int, Int64>{};
+  final _outgoingStreamHasExtensions = <int, bool>{};
 
   // Data stream subscription
   StreamSubscription<DataStreamChunk>? _dataStreamSubscription;
@@ -763,6 +764,7 @@ class MoQClient {
       header.serialize(version: _selectedVersion),
     );
     _outgoingStreamObjects.remove(streamId);
+    _outgoingStreamHasExtensions[streamId] = false;
     _logger.d('Wrote subgroup header to stream $streamId');
   }
 
@@ -819,6 +821,7 @@ class MoQClient {
       header.serialize(version: _selectedVersion),
     );
     _outgoingStreamObjects.remove(streamId);
+    _outgoingStreamHasExtensions[streamId] = extensionHeaders.isNotEmpty;
     _logger.d(
       'Wrote subgroup header with ${extensionHeaders.length} extension headers to stream $streamId',
     );
@@ -860,6 +863,7 @@ class MoQClient {
 
     await _transport.streamFinish(streamId);
     _outgoingStreamObjects.remove(streamId);
+    _outgoingStreamHasExtensions.remove(streamId);
     _logger.d('Finished data stream $streamId');
   }
 
@@ -880,9 +884,10 @@ class MoQClient {
       );
     }
 
+    final streamHasExt = _outgoingStreamHasExtensions[streamId] ?? false;
     final bytes = <int>[
       ...MoQWireFormat.encodeVarint64(delta),
-      ..._encodeObjectExtensions(extensionHeaders),
+      if (streamHasExt) ..._encodeObjectExtensions(extensionHeaders),
     ];
 
     if (payload.isEmpty) {

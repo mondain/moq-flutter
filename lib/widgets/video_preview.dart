@@ -50,6 +50,48 @@ class VideoPreview extends StatelessWidget {
       );
     }
 
+    if (videoCapture is NativeVideoCapture) {
+      final nativeCapture = videoCapture as NativeVideoCapture;
+      return AspectRatio(
+        aspectRatio: 16 / 9,
+        child: ValueListenableBuilder<Uint8List?>(
+          valueListenable: nativeCapture.previewJpegListenable,
+          builder: (context, previewBytes, _) {
+            if (previewBytes != null) {
+              return ColoredBox(
+                color: Colors.black87,
+                child: Image.memory(
+                  previewBytes,
+                  fit: BoxFit.contain,
+                  gaplessPlayback: true,
+                  filterQuality: FilterQuality.low,
+                ),
+              );
+            }
+
+            return const ColoredBox(
+              color: Colors.black87,
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.green),
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      'Starting Android camera preview...',
+                      style: TextStyle(color: Colors.white70, fontSize: 15),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      );
+    }
+
     // Fallback - camera not available
     return AspectRatio(
       aspectRatio: 16 / 9,

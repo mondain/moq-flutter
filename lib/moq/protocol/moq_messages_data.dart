@@ -635,6 +635,7 @@ class SubgroupHeader {
   final List<KeyValuePair> extensionHeaders;
   final bool useDefaultPriority; // draft-16: when true, omit Publisher Priority byte
   final bool endOfGroup; // draft-16: explicit END_OF_GROUP flag
+  final bool _extensionsBitSet; // true when type bit 0 is set (per-object extensions present)
 
   SubgroupHeader({
     required this.trackAlias,
@@ -645,73 +646,65 @@ class SubgroupHeader {
     this.extensionHeaders = const [],
     this.useDefaultPriority = false,
     this.endOfGroup = false,
-  });
+    bool extensionsBitSet = false,
+  }) : _extensionsBitSet = extensionsBitSet || extensionHeaders.isNotEmpty;
 
   /// Get the message type based on forwarding preference (draft-14 default)
   int get messageType => _messageType(MoQVersion.draft14);
 
   /// Compute the message type for a given protocol version.
   ///
-  /// Draft-14: always returns 0x10 (SUBGROUP_HEADER_BASE). The type bitfield
-  ///   encoding for draft-14 is handled by the parser/transport layer.
-  /// Draft-16: 0x10 base, extensions in bit 0, subgroup mode in bits 1-2,
-  ///   bit 3 = END_OF_GROUP, bit 5 = DEFAULT_PRIORITY.
+  /// Draft-14 type bitfield (0x10-0x1D):
+  ///   Bit 0 (0x01): EXTENSIONS present
+  ///   Bits 1-2: subgroupId mode (00=absent/0, 01=first obj ID, 10=explicit field)
+  ///   Bit 3 (0x08): END_OF_GROUP
+  ///
+  /// Draft-16 adds:
+  ///   Bit 5 (0x20): DEFAULT_PRIORITY - Publisher Priority omitted
   int _messageType(int version) {
-    if (MoQVersion.isDraft16OrLater(version)) {
-      int type = 0x10; // bit 4 always set (subgroup base)
-      // Bit 0: extensions present
-      if (extensionHeaders.isNotEmpty) {
-        type |= 0x01;
-      }
-      // Bits 1-2: subgroup ID mode
-      if (firstObjectId != null) {
-        // Mode 01: subgroupId is first object ID
-        type |= 0x02;
-      } else if (subgroupId != Int64(0)) {
-        // Mode 10: explicit subgroup ID field
-        type |= 0x04;
-      }
-      // Bit 3: END_OF_GROUP
-      if (endOfGroup) {
-        type |= 0x08;
-      }
-      // Bit 5: DEFAULT_PRIORITY
-      if (useDefaultPriority) {
-        type |= 0x20;
-      }
-      return type;
+    int type = 0x10; // base subgroup type
+    // Bit 0: extensions present
+    if (_extensionsBitSet) {
+      type |= 0x01;
     }
-    // Draft-14 behavior: base type 0x10
-    return 0x10;
+    // Bits 1-2: subgroup ID mode
+    if (firstObjectId != null) {
+      // Mode 01: subgroupId is first object ID
+      type |= 0x02;
+    } else if (subgroupId != Int64(0)) {
+      // Mode 10: explicit subgroup ID field
+      type |= 0x04;
+    }
+    // Bit 3: END_OF_GROUP
+    if (endOfGroup) {
+      type |= 0x08;
+    }
+    // Bit 5: DEFAULT_PRIORITY (draft-16+ only)
+    if (MoQVersion.isDraft16OrLater(version) && useDefaultPriority) {
+      type |= 0x20;
+    }
+    return type;
   }
 
-  /// Serialize the subgroup header
+  /// Serialize the subgroup header per draft-14 Section 10.4.2:
+  ///   Type (i) + Track Alias (i) + Group ID (i) + [Subgroup ID (i)] + Publisher Priority (8)
+  ///
+  /// Subgroup ID field is only present when type bits 1-2 == 10 (explicit mode).
+  /// Extension headers are per-object, NOT in the subgroup header.
   Uint8List serialize({int version = MoQVersion.draft14}) {
     final type = _messageType(version);
     final skipPriority = MoQVersion.isDraft16OrLater(version) && useDefaultPriority;
+    final hasSubgroupIdField = (type & 0x06) == 0x04; // bits 1-2 == 10: explicit field
 
     int len = 0;
     len += MoQWireFormat._varintSize(type);
     len += MoQWireFormat._varintSize64(trackAlias);
     len += MoQWireFormat._varintSize64(groupId);
-    len += MoQWireFormat._varintSize64(subgroupId);
-    if (firstObjectId != null) {
-      len += MoQWireFormat._varintSize64(firstObjectId!);
+    if (hasSubgroupIdField) {
+      len += MoQWireFormat._varintSize64(subgroupId);
     }
     if (!skipPriority) {
       len += 1; // Publisher Priority
-    }
-    len += MoQWireFormat._varintSize(extensionHeaders.length);
-    for (final param in extensionHeaders) {
-      len += MoQWireFormat._varintSize(param.type);
-      if (param.value != null) {
-        // Even types have varint value, odd types have length-prefixed buffer
-        if (param.type % 2 == 0) {
-          len += MoQWireFormat._varintSize(param.value![0]);
-        } else {
-          len += MoQWireFormat._varintSize(param.value!.length) + param.value!.length;
-        }
-      }
     }
 
     final buffer = Uint8List(len);
@@ -720,29 +713,12 @@ class SubgroupHeader {
     offset += _writeVarint(buffer, offset, type);
     offset += _writeVarint64(buffer, offset, trackAlias);
     offset += _writeVarint64(buffer, offset, groupId);
-    offset += _writeVarint64(buffer, offset, subgroupId);
-
-    if (firstObjectId != null) {
-      offset += _writeVarint64(buffer, offset, firstObjectId!);
+    if (hasSubgroupIdField) {
+      offset += _writeVarint64(buffer, offset, subgroupId);
     }
 
     if (!skipPriority) {
       buffer[offset++] = publisherPriority;
-    }
-
-    offset += _writeVarint(buffer, offset, extensionHeaders.length);
-    for (final param in extensionHeaders) {
-      offset += _writeVarint(buffer, offset, param.type);
-      if (param.value != null) {
-        // Even types have varint value, odd types have length-prefixed buffer
-        if (param.type % 2 == 0) {
-          offset += _writeVarint(buffer, offset, param.value![0]);
-        } else {
-          offset += _writeVarint(buffer, offset, param.value!.length);
-          buffer.setAll(offset, param.value!);
-          offset += param.value!.length;
-        }
-      }
     }
 
     return buffer;
@@ -760,7 +736,11 @@ class SubgroupHeader {
     return bytes.length;
   }
 
-  /// Deserialize a subgroup header from bytes
+  /// Whether this subgroup's objects have extension headers (type bit 0).
+  bool get extensionsPresent => _extensionsBitSet;
+
+  /// Deserialize a subgroup header per draft-14 Section 10.4.2:
+  ///   Type (i) + Track Alias (i) + Group ID (i) + [Subgroup ID (i)] + Publisher Priority (8)
   static SubgroupHeader deserialize(Uint8List data, {int version = MoQVersion.draft14}) {
     int offset = 0;
 
@@ -768,8 +748,10 @@ class SubgroupHeader {
     final (type, typeLen) = MoQWireFormat.decodeVarint(data, offset);
     offset += typeLen;
 
-    // Decode type flags based on version
-    bool eog = false;
+    // Decode type flags from bitfield
+    final hasExtBit = (type & 0x01) != 0;
+    final subgroupIdMode = (type & 0x06) >> 1; // 00=zero, 01=firstObjId, 10=explicit
+    final eog = (type & 0x08) != 0;
     bool defaultPriority = false;
 
     if (MoQVersion.isDraft16OrLater(version)) {
@@ -778,7 +760,6 @@ class SubgroupHeader {
       if (masked < 0x10 || masked > 0x1D) {
         throw FormatException('Invalid draft-16 subgroup header type: 0x${type.toRadixString(16)}');
       }
-      eog = (type & 0x08) != 0;
       defaultPriority = (type & 0x20) != 0;
     }
 
@@ -790,21 +771,16 @@ class SubgroupHeader {
     final (groupId, groupLen) = MoQWireFormat.decodeVarint64(data, offset);
     offset += groupLen;
 
-    // Subgroup ID
-    final (subgroupId, subgroupLen) = MoQWireFormat.decodeVarint64(data, offset);
-    offset += subgroupLen;
-
-    // First Object ID (conditional)
+    // Subgroup ID - only present when bits 1-2 == 10 (explicit field)
+    Int64 subgroupId = Int64(0);
     Int64? firstObjectId;
-    if (offset < data.length) {
-      try {
-        final (fid, fidLen) = MoQWireFormat.decodeVarint64(data, offset);
-        offset += fidLen;
-        firstObjectId = fid;
-      } catch (_) {
-        // Not an object ID, continue
-      }
+    if (subgroupIdMode == 2) {
+      // Explicit subgroup ID field
+      final (sid, sidLen) = MoQWireFormat.decodeVarint64(data, offset);
+      offset += sidLen;
+      subgroupId = sid;
     }
+    // Mode 1 (firstObjectId): subgroupId determined from first object, leave as 0 for now
 
     // Publisher Priority (skipped when draft-16 DEFAULT_PRIORITY bit is set)
     int publisherPriority = 0;
@@ -812,36 +788,8 @@ class SubgroupHeader {
       publisherPriority = data[offset++];
     }
 
-    // Extension Headers
-    final (numHeaders, headersLen) = MoQWireFormat.decodeVarint(data, offset);
-    offset += headersLen;
-
-    final headers = <KeyValuePair>[];
-    for (int i = 0; i < numHeaders; i++) {
-      final (headerType, typeLen) = MoQWireFormat.decodeVarint(data, offset);
-      offset += typeLen;
-
-      Uint8List? value;
-      if (offset < data.length) {
-        // Even types have varint value, odd types have length-prefixed buffer
-        if (headerType % 2 == 0) {
-          // Even type: value is a single varint
-          final (varintValue, varintLen) = MoQWireFormat.decodeVarint(data, offset);
-          offset += varintLen;
-          // Store varint as single-byte array for consistency
-          value = Uint8List.fromList([varintValue & 0xFF]);
-        } else {
-          // Odd type: value is length-prefixed buffer
-          final (length, lengthLen) = MoQWireFormat.decodeVarint(data, offset);
-          offset += lengthLen;
-          if (length > 0 && offset + length <= data.length) {
-            value = data.sublist(offset, offset + length);
-            offset += length;
-          }
-        }
-      }
-      headers.add(KeyValuePair(type: headerType, value: value));
-    }
+    // Note: extension headers are per-object, not in the subgroup header.
+    // The type's extension bit tells the receiver whether objects have extensions.
 
     return SubgroupHeader(
       trackAlias: trackAlias,
@@ -849,9 +797,9 @@ class SubgroupHeader {
       subgroupId: subgroupId,
       firstObjectId: firstObjectId,
       publisherPriority: publisherPriority,
-      extensionHeaders: headers,
       useDefaultPriority: defaultPriority,
       endOfGroup: eog,
+      extensionsBitSet: hasExtBit,
     );
   }
 }
