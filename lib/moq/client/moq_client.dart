@@ -229,9 +229,7 @@ class MoQClient {
       };
       await _transport.connect(host, port, options: transportOptions);
     } catch (e) {
-      _setupCompleter!.completeError(
-        MoQException(errorCode: -1, reason: 'Failed to connect: $e'),
-      );
+      _setupCompleter = null;
       rethrow;
     }
 

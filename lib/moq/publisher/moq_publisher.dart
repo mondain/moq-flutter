@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:fixnum/fixnum.dart';
 import 'package:logger/logger.dart';
 import '../catalog/moq_catalog.dart';
+import '../catalog/moq_timeline.dart';
 import '../client/moq_client.dart';
 import '../protocol/moq_messages.dart';
 
@@ -31,19 +33,18 @@ class MoQPublisher {
   // Track management
   final _tracks = <String, PublisherTrack>{};
   final _catalogTracks = <CatalogTrack>[];
+  final _timelineTracks = <String, PublisherTrack>{};
+  int _nextTrackAlias = 0;
 
   // Group/object counters
-  Int64 _currentGroupId = Int64(0);
-  Int64 _currentObjectId = Int64(0);
+  Int64 _currentGroupId = _randomGroupSeed();
 
   // Active streams (streamId -> track)
   final _activeStreams = <int, PublisherTrack>{};
 
-  MoQPublisher({
-    required MoQClient client,
-    Logger? logger,
-  })  : _client = client,
-        _logger = logger ?? Logger();
+  MoQPublisher({required MoQClient client, Logger? logger})
+    : _client = client,
+      _logger = logger ?? Logger();
 
   /// Get whether namespace is announced
   bool get isAnnounced => _isAnnounced;
@@ -65,7 +66,9 @@ class MoQPublisher {
     }
 
     _namespaceStr = namespaceParts.join('/');
-    _namespace = namespaceParts.map((p) => Uint8List.fromList(p.codeUnits)).toList();
+    _namespace = namespaceParts
+        .map((p) => Uint8List.fromList(p.codeUnits))
+        .toList();
 
     try {
       await _client.announceNamespace(_namespace!);
@@ -75,7 +78,10 @@ class MoQPublisher {
       // Create the catalog
       _catalog = MoQCatalog.loc(
         namespace: _namespaceStr!,
-        tracks: _catalogTracks,
+        tracks: [
+          ..._catalogTracks,
+          ..._timelineTracks.values.map(_timelineCatalogTrack),
+        ],
       );
 
       // Publish initial catalog
@@ -93,14 +99,16 @@ class MoQPublisher {
     try {
       // Add the catalog track if not already added
       if (!_tracks.containsKey(MoQCatalog.catalogTrackName)) {
-        final alias = Int64(_tracks.length);
+        final alias = _allocateTrackAlias();
         final catalogTrack = PublisherTrack(
           name: MoQCatalog.catalogTrackName,
           alias: alias,
           priority: 255, // Highest priority for catalog
         );
         _tracks[MoQCatalog.catalogTrackName] = catalogTrack;
-        _logger.d('Added catalog track: ${MoQCatalog.catalogTrackName} (alias: $alias)');
+        _logger.d(
+          'Added catalog track: ${MoQCatalog.catalogTrackName} (alias: $alias)',
+        );
       }
 
       final catalogTrack = _tracks[MoQCatalog.catalogTrackName]!;
@@ -129,7 +137,9 @@ class MoQPublisher {
       // Finish the catalog stream
       await _client.finishDataStream(streamId);
 
-      _logger.i('Published catalog (${catalogBytes.length} bytes, group: $_catalogGroupId)');
+      _logger.i(
+        'Published catalog (${catalogBytes.length} bytes, group: $_catalogGroupId)',
+      );
     } catch (e) {
       _logger.e('Failed to publish catalog: $e');
       rethrow;
@@ -147,7 +157,10 @@ class MoQPublisher {
     // Rebuild catalog with current tracks
     _catalog = MoQCatalog.loc(
       namespace: _namespaceStr!,
-      tracks: _catalogTracks,
+      tracks: [
+        ..._catalogTracks,
+        ..._timelineTracks.values.map(_timelineCatalogTrack),
+      ],
     );
 
     await _publishCatalog();
@@ -165,7 +178,7 @@ class MoQPublisher {
       return _tracks[trackName]!.alias;
     }
 
-    final alias = Int64(_tracks.length);
+    final alias = _allocateTrackAlias();
     final track = PublisherTrack(
       name: trackName,
       alias: alias,
@@ -194,16 +207,25 @@ class MoQPublisher {
     final alias = addTrack(trackName, priority: priority);
 
     // Add to catalog tracks
-    _catalogTracks.add(CatalogTrack(
-      name: trackName,
-      selectionParams: SelectionParams(
-        codec: codec,
-        width: width,
-        height: height,
-        framerate: framerate,
-        bitrate: bitrate,
+    _catalogTracks.add(
+      CatalogTrack(
+        name: trackName,
+        namespace: _namespaceStr,
+        packaging: 'loc',
+        isLive: true,
+        targetLatency: 2000,
+        timescale: 1000000,
+        role: 'video',
+        selectionParams: SelectionParams(
+          codec: codec,
+          width: width,
+          height: height,
+          framerate: framerate,
+          bitrate: bitrate,
+        ),
       ),
-    ));
+    );
+    _ensureTimelineTrack(trackName);
 
     // Optionally update catalog immediately
     if (updateCatalogNow) {
@@ -228,15 +250,24 @@ class MoQPublisher {
     final alias = addTrack(trackName, priority: priority);
 
     // Add to catalog tracks
-    _catalogTracks.add(CatalogTrack(
-      name: trackName,
-      selectionParams: SelectionParams(
-        codec: codec,
-        samplerate: samplerate,
-        channelConfig: channelConfig,
-        bitrate: bitrate,
+    _catalogTracks.add(
+      CatalogTrack(
+        name: trackName,
+        namespace: _namespaceStr,
+        packaging: 'loc',
+        isLive: true,
+        targetLatency: 2000,
+        timescale: 1000000,
+        role: 'audio',
+        selectionParams: SelectionParams(
+          codec: codec,
+          samplerate: samplerate,
+          channelConfig: channelConfig,
+          bitrate: bitrate,
+        ),
       ),
-    ));
+    );
+    _ensureTimelineTrack(trackName);
 
     // Optionally update catalog immediately
     if (updateCatalogNow) {
@@ -257,9 +288,8 @@ class MoQPublisher {
 
     final groupId = _currentGroupId;
     _currentGroupId += Int64(1);
-    _currentObjectId = Int64(0); // Reset object ID for new group
-
     track.currentGroupId = groupId;
+    track.currentObjectId = Int64(0);
     _logger.d('Started group $groupId for track $trackName');
 
     return groupId;
@@ -268,10 +298,7 @@ class MoQPublisher {
   /// Open a subgroup stream for publishing
   ///
   /// Returns the stream ID.
-  Future<int> openSubgroup(
-    String trackName, {
-    Int64? subgroupId,
-  }) async {
+  Future<int> openSubgroup(String trackName, {Int64? subgroupId}) async {
     final track = _tracks[trackName];
     if (track == null) {
       throw ArgumentError('Track not found: $trackName');
@@ -290,7 +317,9 @@ class MoQPublisher {
     );
 
     _activeStreams[streamId] = track;
-    _logger.d('Opened subgroup stream $streamId for track $trackName (group: ${track.currentGroupId}, subgroup: $subgroup)');
+    _logger.d(
+      'Opened subgroup stream $streamId for track $trackName (group: ${track.currentGroupId}, subgroup: $subgroup)',
+    );
 
     return streamId;
   }
@@ -308,8 +337,8 @@ class MoQPublisher {
       throw ArgumentError('Stream not found: $streamId');
     }
 
-    final objectId = _currentObjectId;
-    _currentObjectId += Int64(1);
+    final objectId = track.currentObjectId;
+    track.currentObjectId += Int64(1);
 
     await _client.writeObject(
       streamId,
@@ -318,7 +347,9 @@ class MoQPublisher {
       status: status,
     );
 
-    _logger.d('Published object $objectId (${payload.length} bytes) to stream $streamId');
+    _logger.d(
+      'Published object $objectId (${payload.length} bytes) to stream $streamId',
+    );
 
     return objectId;
   }
@@ -338,26 +369,25 @@ class MoQPublisher {
       throw ArgumentError('Track not found: $trackName');
     }
 
-    // Start new group if requested or no current stream
-    if (newGroup || track.currentStreamId == null) {
-      // Close previous stream if exists
-      if (track.currentStreamId != null) {
-        await closeSubgroup(track.currentStreamId!, isEndOfGroup: true);
-      }
-
-      // Start new group and subgroup
+    // MSF-style publishing uses one stream per object while the publisher
+    // maintains group/object numbering independently.
+    if (newGroup || track.currentGroupId == Int64.ZERO) {
       startGroup(trackName);
-      final streamId = await openSubgroup(trackName);
-      track.currentStreamId = streamId;
     }
 
+    final streamId = await openSubgroup(trackName);
     final status = isEndOfGroup ? ObjectStatus.endOfGroup : ObjectStatus.normal;
-    final objectId = await publishObject(track.currentStreamId!, frameData, status: status);
-
-    if (isEndOfGroup) {
-      await closeSubgroup(track.currentStreamId!);
-      track.currentStreamId = null;
-    }
+    final objectId = await publishObject(streamId, frameData, status: status);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _publishMediaTimelineEntry(
+      trackName,
+      MediaTimelineEntry(
+        mediaTime: now,
+        location: Location(group: track.currentGroupId, object: objectId),
+        wallclock: now,
+      ),
+    );
+    await closeSubgroup(streamId);
 
     return objectId;
   }
@@ -368,17 +398,6 @@ class MoQPublisher {
     if (track == null) {
       _logger.w('Stream $streamId not found in active streams');
       return;
-    }
-
-    // Optionally send end-of-group marker
-    if (isEndOfGroup) {
-      await _client.writeObject(
-        streamId,
-        objectId: _currentObjectId,
-        payload: Uint8List(0),
-        status: ObjectStatus.endOfGroup,
-      );
-      _currentObjectId += Int64(1);
     }
 
     await _client.finishDataStream(streamId);
@@ -407,13 +426,78 @@ class MoQPublisher {
 
     _isAnnounced = false;
     _tracks.clear();
+    _timelineTracks.clear();
     _activeStreams.clear();
+    _nextTrackAlias = 0;
     _logger.i('Publisher stopped');
   }
 
   void dispose() {
     stop();
   }
+
+  void _ensureTimelineTrack(String trackName) {
+    final timelineName = _timelineTrackName(trackName);
+    if (_timelineTracks.containsKey(timelineName)) {
+      return;
+    }
+    _timelineTracks[timelineName] = PublisherTrack(
+      name: timelineName,
+      alias: _allocateTrackAlias(),
+      priority: 254,
+    );
+  }
+
+  CatalogTrack _timelineCatalogTrack(PublisherTrack track) {
+    final parentName = track.name.substring(
+      0,
+      track.name.length - '.timeline'.length,
+    );
+    return CatalogTrack(
+      name: track.name,
+      namespace: _namespaceStr,
+      packaging: 'mediatimeline',
+      role: 'timeline',
+      parentName: parentName,
+      depends: [parentName],
+      isLive: true,
+      targetLatency: 2000,
+      selectionParams: SelectionParams(mimeType: 'application/json'),
+    );
+  }
+
+  Future<void> _publishMediaTimelineEntry(
+    String trackName,
+    MediaTimelineEntry entry,
+  ) async {
+    final timelineTrack = _timelineTracks[_timelineTrackName(trackName)];
+    if (timelineTrack == null) {
+      return;
+    }
+    timelineTrack.currentGroupId += Int64(1);
+    timelineTrack.currentObjectId = Int64.ZERO;
+
+    final streamId = await _client.openDataStream();
+    await _client.writeSubgroupHeader(
+      streamId,
+      trackAlias: timelineTrack.alias,
+      groupId: timelineTrack.currentGroupId,
+      subgroupId: Int64.ZERO,
+      publisherPriority: timelineTrack.priority,
+    );
+    await _client.writeObject(
+      streamId,
+      objectId: timelineTrack.currentObjectId,
+      payload: encodeMediaTimeline([entry]),
+      status: ObjectStatus.normal,
+    );
+    timelineTrack.currentObjectId += Int64(1);
+    await _client.finishDataStream(streamId);
+  }
+
+  String _timelineTrackName(String trackName) => '$trackName.timeline';
+
+  Int64 _allocateTrackAlias() => Int64(_nextTrackAlias++);
 }
 
 /// Publisher track information
@@ -423,6 +507,7 @@ class PublisherTrack {
   final int priority;
 
   Int64 currentGroupId = Int64(0);
+  Int64 currentObjectId = Int64(0);
   int? currentStreamId;
 
   PublisherTrack({
@@ -430,4 +515,9 @@ class PublisherTrack {
     required this.alias,
     required this.priority,
   });
+}
+
+Int64 _randomGroupSeed() {
+  final random = Random.secure();
+  return Int64(random.nextInt(1 << 30));
 }

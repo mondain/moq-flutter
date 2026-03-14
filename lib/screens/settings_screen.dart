@@ -12,6 +12,7 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  late TextEditingController _publisherTrackController;
   late TextEditingController _videoTrackController;
   late TextEditingController _audioTrackController;
 
@@ -19,23 +20,39 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   void initState() {
     super.initState();
     final settings = ref.read(settingsServiceProvider);
-    _videoTrackController = TextEditingController(text: settings.videoTrackName);
-    _audioTrackController = TextEditingController(text: settings.audioTrackName);
+    _publisherTrackController = TextEditingController(text: settings.trackName);
+    _videoTrackController = TextEditingController(
+      text: settings.videoTrackName,
+    );
+    _audioTrackController = TextEditingController(
+      text: settings.audioTrackName,
+    );
   }
 
   @override
   void dispose() {
+    _publisherTrackController.dispose();
     _videoTrackController.dispose();
     _audioTrackController.dispose();
     super.dispose();
   }
 
+  void _savePublisherTrackName() {
+    ref
+        .read(settingsServiceProvider)
+        .setTrackName(_publisherTrackController.text);
+  }
+
   void _saveVideoTrackName() {
-    ref.read(videoTrackNameProvider.notifier).setVideoTrackName(_videoTrackController.text);
+    ref
+        .read(videoTrackNameProvider.notifier)
+        .setVideoTrackName(_videoTrackController.text);
   }
 
   void _saveAudioTrackName() {
-    ref.read(audioTrackNameProvider.notifier).setAudioTrackName(_audioTrackController.text);
+    ref
+        .read(audioTrackNameProvider.notifier)
+        .setAudioTrackName(_audioTrackController.text);
   }
 
   void _applyPreset(String host, String port) {
@@ -44,9 +61,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     settings.setPort(port);
     // Also update the WebTransport URL so the connection page stays in sync
     settings.setUrl('https://$host:$port/moq');
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Server set to $host:$port')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('Server set to $host:$port')));
   }
 
   @override
@@ -93,14 +110,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               groupValue: currentResolution,
               onChanged: (value) {
                 if (value != null) {
-                  ref.read(videoResolutionProvider.notifier).setResolution(value);
+                  ref
+                      .read(videoResolutionProvider.notifier)
+                      .setResolution(value);
                 }
               },
               title: Text(resolution.label),
-              subtitle: Text('${resolution.description} @ ${resolution.bitrateLabel}'),
+              subtitle: Text(
+                '${resolution.description} @ ${resolution.bitrateLabel}',
+              ),
               secondary: Icon(
                 isSelected ? Icons.check_circle : Icons.circle_outlined,
-                color: isSelected ? Theme.of(context).colorScheme.primary : null,
+                color: isSelected
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
               ),
             );
           }),
@@ -116,21 +139,39 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               groupValue: currentFormat,
               onChanged: (value) {
                 if (value != null) {
-                  ref.read(packagingFormatProvider.notifier).setPackagingFormat(value);
+                  ref
+                      .read(packagingFormatProvider.notifier)
+                      .setPackagingFormat(value);
                 }
               },
               title: Text(format.label),
               subtitle: Text(format.description),
               secondary: Icon(
                 isSelected ? Icons.check_circle : Icons.circle_outlined,
-                color: isSelected ? Theme.of(context).colorScheme.primary : null,
+                color: isSelected
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
               ),
             );
           }),
           const Divider(),
 
-          // Track Names section (for subscriber)
-          _buildSectionHeader(context, 'Track Names (Subscriber)'),
+          // Track names section
+          _buildSectionHeader(context, 'Track Names'),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: TextField(
+              controller: _publisherTrackController,
+              decoration: const InputDecoration(
+                labelText: 'Publisher Track Name',
+                hintText: 'e.g., video',
+                prefixIcon: Icon(Icons.publish),
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onChanged: (_) => _savePublisherTrackName(),
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: TextField(
@@ -178,7 +219,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               subtitle: Text(_themeModeDescription(mode)),
               secondary: Icon(
                 _themeModeIcon(mode),
-                color: isSelected ? Theme.of(context).colorScheme.primary : null,
+                color: isSelected
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
               ),
             );
           }),
@@ -194,7 +237,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ListTile(
             leading: const Icon(Icons.description),
             title: const Text('Protocol'),
-            subtitle: const Text('draft-ietf-moq-transport-14, draft-ietf-moq-transport-16'),
+            subtitle: const Text(
+              'draft-ietf-moq-transport-14, draft-ietf-moq-transport-16',
+            ),
           ),
           ListTile(
             leading: const Icon(Icons.code),
@@ -215,8 +260,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       child: Text(
         title,
         style: Theme.of(context).textTheme.titleSmall?.copyWith(
-              color: Theme.of(context).colorScheme.primary,
-            ),
+          color: Theme.of(context).colorScheme.primary,
+        ),
       ),
     );
   }

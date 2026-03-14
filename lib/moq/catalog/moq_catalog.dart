@@ -1,208 +1,120 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-/// MoQ Catalog per draft-ietf-moq-catalogformat-01
+/// MoQ media catalog used by MSF/CMSF successors to WARP/CARP.
 ///
-/// A catalog is a specialized MoQ track that describes all available tracks
-/// in a namespace. It provides information necessary for subscribers to
-/// select, subscribe and initialize tracks.
+/// The current implementation serializes the newer flattened track shape while
+/// remaining tolerant of older catalogformat/WARP-style input.
 class MoQCatalog {
-  /// Catalog version (always 1 per current spec)
   final int version;
-
-  /// Streaming format type (registered in IANA registry)
-  final int streamingFormat;
-
-  /// Streaming format version string
-  final String streamingFormatVersion;
-
-  /// Whether delta updates are supported
-  final bool supportsDeltaUpdates;
-
-  /// Common fields inherited by all tracks
-  final CatalogCommonFields? commonTrackFields;
-
-  /// List of tracks in the catalog
+  final int generatedAt;
+  final bool isComplete;
   final List<CatalogTrack> tracks;
 
-  /// Well-known catalog track name
-  static const String catalogTrackName = '.catalog';
+  /// Well-known catalog track name in the newer drafts.
+  static const String catalogTrackName = 'catalog';
+
+  /// Legacy track name accepted on input for compatibility only.
+  static const String legacyCatalogTrackName = '.catalog';
 
   MoQCatalog({
     this.version = 1,
-    required this.streamingFormat,
-    required this.streamingFormatVersion,
-    this.supportsDeltaUpdates = false,
-    this.commonTrackFields,
+    int? generatedAt,
+    this.isComplete = false,
     required this.tracks,
-  });
+  }) : generatedAt = generatedAt ?? DateTime.now().millisecondsSinceEpoch;
 
-  /// Create a simple LOC catalog with audio/video tracks
   factory MoQCatalog.loc({
     required String namespace,
     List<CatalogTrack>? tracks,
-    String formatVersion = '0.2',
+    bool isComplete = false,
   }) {
+    final catalogTracks = tracks ?? <CatalogTrack>[];
     return MoQCatalog(
-      version: 1,
-      streamingFormat: 1, // LOC format
-      streamingFormatVersion: formatVersion,
-      supportsDeltaUpdates: false,
-      commonTrackFields: CatalogCommonFields(
-        namespace: namespace,
-        packaging: 'loc',
-        renderGroup: 1,
-      ),
-      tracks: tracks ?? [],
-    );
-  }
-
-  /// Create a simple CMAF catalog with audio/video tracks
-  factory MoQCatalog.cmaf({
-    required String namespace,
-    List<CatalogTrack>? tracks,
-    String formatVersion = '0.2',
-  }) {
-    return MoQCatalog(
-      version: 1,
-      streamingFormat: 1, // CMAF format
-      streamingFormatVersion: formatVersion,
-      supportsDeltaUpdates: false,
-      commonTrackFields: CatalogCommonFields(
-        namespace: namespace,
-        packaging: 'cmaf',
-        renderGroup: 1,
-      ),
-      tracks: tracks ?? [],
-    );
-  }
-
-  /// Add a video track to the catalog
-  void addVideoTrack({
-    required String name,
-    String? namespace,
-    String? codec,
-    int? width,
-    int? height,
-    int? framerate,
-    int? bitrate,
-    String? initData,
-    String? initTrack,
-    int? altGroup,
-  }) {
-    tracks.add(CatalogTrack(
-      name: name,
-      namespace: namespace,
-      selectionParams: SelectionParams(
-        codec: codec,
-        width: width,
-        height: height,
-        framerate: framerate,
-        bitrate: bitrate,
-      ),
-      initData: initData,
-      initTrack: initTrack,
-      altGroup: altGroup,
-    ));
-  }
-
-  /// Add an audio track to the catalog
-  void addAudioTrack({
-    required String name,
-    String? namespace,
-    String? codec,
-    int? samplerate,
-    String? channelConfig,
-    int? bitrate,
-    String? initData,
-    String? initTrack,
-    int? altGroup,
-  }) {
-    tracks.add(CatalogTrack(
-      name: name,
-      namespace: namespace,
-      selectionParams: SelectionParams(
-        codec: codec,
-        samplerate: samplerate,
-        channelConfig: channelConfig,
-        bitrate: bitrate,
-      ),
-      initData: initData,
-      initTrack: initTrack,
-      altGroup: altGroup,
-    ));
-  }
-
-  /// Serialize catalog to JSON string
-  String toJson() {
-    final json = <String, dynamic>{
-      'version': version,
-      'streamingFormat': streamingFormat,
-      'streamingFormatVersion': streamingFormatVersion,
-    };
-
-    if (supportsDeltaUpdates) {
-      json['supportsDeltaUpdates'] = true;
-    }
-
-    if (commonTrackFields != null) {
-      json['commonTrackFields'] = commonTrackFields!.toJson();
-    }
-
-    json['tracks'] = tracks.map((t) => t.toJson()).toList();
-
-    return const JsonEncoder.withIndent('  ').convert(json);
-  }
-
-  /// Serialize catalog to bytes for MoQ transmission
-  Uint8List toBytes() {
-    return Uint8List.fromList(utf8.encode(toJson()));
-  }
-
-  /// Parse catalog from JSON string
-  static MoQCatalog fromJson(String jsonString) {
-    final json = jsonDecode(jsonString) as Map<String, dynamic>;
-
-    return MoQCatalog(
-      version: json['version'] as int? ?? 1,
-      streamingFormat: json['streamingFormat'] as int,
-      streamingFormatVersion: json['streamingFormatVersion'] as String,
-      supportsDeltaUpdates: json['supportsDeltaUpdates'] as bool? ?? false,
-      commonTrackFields: json['commonTrackFields'] != null
-          ? CatalogCommonFields.fromJson(
-              json['commonTrackFields'] as Map<String, dynamic>)
-          : null,
-      tracks: (json['tracks'] as List<dynamic>)
-          .map((t) => CatalogTrack.fromJson(t as Map<String, dynamic>))
+      isComplete: isComplete,
+      tracks: catalogTracks
+          .map(
+            (track) => track.copyWith(
+              namespace: track.namespace ?? namespace,
+              packaging: track.packaging ?? 'loc',
+            ),
+          )
           .toList(),
     );
   }
 
-  /// Parse catalog from bytes
+  factory MoQCatalog.cmaf({
+    required String namespace,
+    List<CatalogTrack>? tracks,
+    bool isComplete = false,
+  }) {
+    final catalogTracks = tracks ?? <CatalogTrack>[];
+    return MoQCatalog(
+      isComplete: isComplete,
+      tracks: catalogTracks
+          .map(
+            (track) => track.copyWith(
+              namespace: track.namespace ?? namespace,
+              packaging: track.packaging ?? 'cmaf',
+            ),
+          )
+          .toList(),
+    );
+  }
+
+  String toJson() {
+    final json = <String, dynamic>{
+      'version': version,
+      'generatedAt': generatedAt,
+      'isComplete': isComplete,
+      'tracks': tracks.map((t) => t.toJson()).toList(),
+    };
+
+    return const JsonEncoder.withIndent('  ').convert(json);
+  }
+
+  Uint8List toBytes() => Uint8List.fromList(utf8.encode(toJson()));
+
+  static MoQCatalog fromJson(String jsonString) {
+    final json = jsonDecode(jsonString) as Map<String, dynamic>;
+
+    final legacyCommonFields = json['commonTrackFields'] != null
+        ? CatalogCommonFields.fromJson(
+            json['commonTrackFields'] as Map<String, dynamic>,
+          )
+        : null;
+
+    final tracks = (json['tracks'] as List<dynamic>? ?? const [])
+        .map((t) => CatalogTrack.fromJson(t as Map<String, dynamic>))
+        .map(
+          (track) => track.copyWith(
+            namespace: track.namespace ?? legacyCommonFields?.namespace,
+            packaging: track.packaging ?? legacyCommonFields?.packaging,
+            renderGroup: track.renderGroup ?? legacyCommonFields?.renderGroup,
+          ),
+        )
+        .toList();
+
+    return MoQCatalog(
+      version: json['version'] as int? ?? 1,
+      generatedAt: json['generatedAt'] as int?,
+      isComplete: json['isComplete'] as bool? ?? false,
+      tracks: tracks,
+    );
+  }
+
   static MoQCatalog fromBytes(Uint8List bytes) {
     return fromJson(utf8.decode(bytes));
   }
 }
 
-/// Common track fields inherited by all tracks
+/// Legacy common-track fields retained for backward-compatible parsing.
 class CatalogCommonFields {
   final String? namespace;
   final String? packaging;
   final int? renderGroup;
 
-  CatalogCommonFields({
-    this.namespace,
-    this.packaging,
-    this.renderGroup,
-  });
-
-  Map<String, dynamic> toJson() {
-    final json = <String, dynamic>{};
-    if (namespace != null) json['namespace'] = namespace;
-    if (packaging != null) json['packaging'] = packaging;
-    if (renderGroup != null) json['renderGroup'] = renderGroup;
-    return json;
-  }
+  CatalogCommonFields({this.namespace, this.packaging, this.renderGroup});
 
   static CatalogCommonFields fromJson(Map<String, dynamic> json) {
     return CatalogCommonFields(
@@ -213,76 +125,175 @@ class CatalogCommonFields {
   }
 }
 
-/// Individual track in the catalog
 class CatalogTrack {
   final String name;
   final String? namespace;
   final String? packaging;
   final String? label;
-  final int? renderGroup;
-  final int? altGroup;
+  final String? role;
+  final String? parentName;
   final String? initData;
   final String? initTrack;
-  final SelectionParams? selectionParams;
-  final List<String>? depends;
+  final String? eventType;
+  final int? renderGroup;
+  final int? altGroup;
   final int? temporalId;
   final int? spatialId;
+  final int? targetLatency;
+  final int? timescale;
+  final int? maxGroupSapStartingType;
+  final int? maxObjectSapStartingType;
+  final bool? isLive;
+  final List<String>? depends;
+  final SelectionParams? selectionParams;
 
   CatalogTrack({
     required this.name,
     this.namespace,
     this.packaging,
     this.label,
-    this.renderGroup,
-    this.altGroup,
+    this.role,
+    this.parentName,
     this.initData,
     this.initTrack,
-    this.selectionParams,
-    this.depends,
+    this.eventType,
+    this.renderGroup,
+    this.altGroup,
     this.temporalId,
     this.spatialId,
+    this.targetLatency,
+    this.timescale,
+    this.maxGroupSapStartingType,
+    this.maxObjectSapStartingType,
+    this.isLive,
+    this.depends,
+    this.selectionParams,
   });
+
+  CatalogTrack copyWith({
+    String? name,
+    Object? namespace = _unset,
+    Object? packaging = _unset,
+    Object? label = _unset,
+    Object? role = _unset,
+    Object? parentName = _unset,
+    Object? initData = _unset,
+    Object? initTrack = _unset,
+    Object? eventType = _unset,
+    Object? renderGroup = _unset,
+    Object? altGroup = _unset,
+    Object? temporalId = _unset,
+    Object? spatialId = _unset,
+    Object? targetLatency = _unset,
+    Object? timescale = _unset,
+    Object? maxGroupSapStartingType = _unset,
+    Object? maxObjectSapStartingType = _unset,
+    Object? isLive = _unset,
+    Object? depends = _unset,
+    Object? selectionParams = _unset,
+  }) {
+    return CatalogTrack(
+      name: name ?? this.name,
+      namespace: namespace == _unset ? this.namespace : namespace as String?,
+      packaging: packaging == _unset ? this.packaging : packaging as String?,
+      label: label == _unset ? this.label : label as String?,
+      role: role == _unset ? this.role : role as String?,
+      parentName: parentName == _unset
+          ? this.parentName
+          : parentName as String?,
+      initData: initData == _unset ? this.initData : initData as String?,
+      initTrack: initTrack == _unset ? this.initTrack : initTrack as String?,
+      eventType: eventType == _unset ? this.eventType : eventType as String?,
+      renderGroup: renderGroup == _unset
+          ? this.renderGroup
+          : renderGroup as int?,
+      altGroup: altGroup == _unset ? this.altGroup : altGroup as int?,
+      temporalId: temporalId == _unset ? this.temporalId : temporalId as int?,
+      spatialId: spatialId == _unset ? this.spatialId : spatialId as int?,
+      targetLatency: targetLatency == _unset
+          ? this.targetLatency
+          : targetLatency as int?,
+      timescale: timescale == _unset ? this.timescale : timescale as int?,
+      maxGroupSapStartingType: maxGroupSapStartingType == _unset
+          ? this.maxGroupSapStartingType
+          : maxGroupSapStartingType as int?,
+      maxObjectSapStartingType: maxObjectSapStartingType == _unset
+          ? this.maxObjectSapStartingType
+          : maxObjectSapStartingType as int?,
+      isLive: isLive == _unset ? this.isLive : isLive as bool?,
+      depends: depends == _unset ? this.depends : depends as List<String>?,
+      selectionParams: selectionParams == _unset
+          ? this.selectionParams
+          : selectionParams as SelectionParams?,
+    );
+  }
 
   Map<String, dynamic> toJson() {
     final json = <String, dynamic>{'name': name};
     if (namespace != null) json['namespace'] = namespace;
     if (packaging != null) json['packaging'] = packaging;
     if (label != null) json['label'] = label;
+    if (role != null) json['role'] = role;
+    if (parentName != null) json['parentName'] = parentName;
     if (renderGroup != null) json['renderGroup'] = renderGroup;
     if (altGroup != null) json['altGroup'] = altGroup;
     if (initData != null) json['initData'] = initData;
     if (initTrack != null) json['initTrack'] = initTrack;
-    if (selectionParams != null) json['selectionParams'] = selectionParams!.toJson();
-    if (depends != null && depends!.isNotEmpty) json['depends'] = depends;
+    if (eventType != null) json['eventType'] = eventType;
     if (temporalId != null) json['temporalId'] = temporalId;
     if (spatialId != null) json['spatialId'] = spatialId;
+    if (targetLatency != null) json['targetLatency'] = targetLatency;
+    if (timescale != null) json['timescale'] = timescale;
+    if (maxGroupSapStartingType != null) {
+      json['maxGroupSapStartingType'] = maxGroupSapStartingType;
+    }
+    if (maxObjectSapStartingType != null) {
+      json['maxObjectSapStartingType'] = maxObjectSapStartingType;
+    }
+    if (isLive != null) json['isLive'] = isLive;
+    if (depends != null && depends!.isNotEmpty) json['depends'] = depends;
+    if (selectionParams != null) {
+      json.addAll(selectionParams!.toJson());
+    }
     return json;
   }
 
   static CatalogTrack fromJson(Map<String, dynamic> json) {
+    final legacySelection = json['selectionParams'] != null
+        ? SelectionParams.fromJson(
+            json['selectionParams'] as Map<String, dynamic>,
+          )
+        : null;
+    final flatSelection = SelectionParams.fromJson(json);
+    final selection = flatSelection.isEmpty ? legacySelection : flatSelection;
+
     return CatalogTrack(
       name: json['name'] as String,
       namespace: json['namespace'] as String?,
       packaging: json['packaging'] as String?,
       label: json['label'] as String?,
-      renderGroup: json['renderGroup'] as int?,
-      altGroup: json['altGroup'] as int?,
+      role: json['role'] as String?,
+      parentName: json['parentName'] as String?,
       initData: json['initData'] as String?,
       initTrack: json['initTrack'] as String?,
-      selectionParams: json['selectionParams'] != null
-          ? SelectionParams.fromJson(
-              json['selectionParams'] as Map<String, dynamic>)
-          : null,
+      eventType: json['eventType'] as String?,
+      renderGroup: json['renderGroup'] as int?,
+      altGroup: json['altGroup'] as int?,
+      temporalId: json['temporalId'] as int?,
+      spatialId: json['spatialId'] as int?,
+      targetLatency: json['targetLatency'] as int?,
+      timescale: json['timescale'] as int?,
+      maxGroupSapStartingType: json['maxGroupSapStartingType'] as int?,
+      maxObjectSapStartingType: json['maxObjectSapStartingType'] as int?,
+      isLive: json['isLive'] as bool?,
       depends: (json['depends'] as List<dynamic>?)
           ?.map((e) => e as String)
           .toList(),
-      temporalId: json['temporalId'] as int?,
-      spatialId: json['spatialId'] as int?,
+      selectionParams: selection,
     );
   }
 }
 
-/// Track selection parameters
 class SelectionParams {
   final String? codec;
   final String? mimeType;
@@ -309,6 +320,19 @@ class SelectionParams {
     this.displayHeight,
     this.lang,
   });
+
+  bool get isEmpty =>
+      codec == null &&
+      mimeType == null &&
+      framerate == null &&
+      bitrate == null &&
+      width == null &&
+      height == null &&
+      samplerate == null &&
+      channelConfig == null &&
+      displayWidth == null &&
+      displayHeight == null &&
+      lang == null;
 
   Map<String, dynamic> toJson() {
     final json = <String, dynamic>{};
@@ -342,3 +366,5 @@ class SelectionParams {
     );
   }
 }
+
+const Object _unset = Object();

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'dart:ui' as ui;
 import 'package:camera/camera.dart' show CameraPreview;
 import 'package:flutter/material.dart';
@@ -7,21 +8,24 @@ import '../moq/media/linux_capture.dart';
 /// Video preview widget supporting both mobile camera and Linux FFmpeg capture
 class VideoPreview extends StatelessWidget {
   final VideoCapture? videoCapture;
-  final ui.Image? linuxPreviewImage;
+  final ValueListenable<ui.Image?>? linuxPreviewImageListenable;
   final int publishedFrames;
+  final bool isStopping;
 
   const VideoPreview({
     super.key,
     required this.videoCapture,
-    this.linuxPreviewImage,
+    this.linuxPreviewImageListenable,
     this.publishedFrames = 0,
+    this.isStopping = false,
   });
 
   @override
   Widget build(BuildContext context) {
     // Camera preview for mobile platforms
     if (videoCapture is CameraCapture &&
-        (videoCapture as CameraCapture).cameraController?.value.isInitialized == true) {
+        (videoCapture as CameraCapture).cameraController?.value.isInitialized ==
+            true) {
       return AspectRatio(
         aspectRatio: 16 / 9,
         child: CameraPreview((videoCapture as CameraCapture).cameraController!),
@@ -30,30 +34,17 @@ class VideoPreview extends StatelessWidget {
 
     // Linux capture with FFmpeg
     if (videoCapture is LinuxVideoCapture) {
+      final previewListenable = linuxPreviewImageListenable;
       return AspectRatio(
         aspectRatio: 16 / 9,
-        child: Container(
-          color: Colors.black87,
-          child: linuxPreviewImage != null
-              ? RawImage(
-                  image: linuxPreviewImage,
-                  fit: BoxFit.contain,
-                )
-              : Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: const [
-                      CircularProgressIndicator(
-                        valueColor: AlwaysStoppedAnimation<Color>(Colors.green),
-                      ),
-                      SizedBox(height: 8),
-                      Text(
-                        'Starting webcam...',
-                        style: TextStyle(color: Colors.white70, fontSize: 15),
-                      ),
-                      SizedBox(height: 4),
-                    ],
-                  ),
+        child: RepaintBoundary(
+          child: previewListenable == null
+              ? _buildLinuxPreview(null)
+              : ValueListenableBuilder<ui.Image?>(
+                  valueListenable: previewListenable,
+                  builder: (context, linuxPreviewImage, _) {
+                    return _buildLinuxPreview(linuxPreviewImage);
+                  },
                 ),
         ),
       );
@@ -71,10 +62,14 @@ class VideoPreview extends StatelessWidget {
               const Icon(Icons.videocam_off, size: 48, color: Colors.white54),
               const SizedBox(height: 8),
               Text(
-                videoCapture == null ? 'Camera not available' : 'Camera initializing...',
+                isStopping
+                    ? 'Stopping publisher...'
+                    : videoCapture == null
+                    ? 'Camera not available'
+                    : 'Camera initializing...',
                 style: const TextStyle(color: Colors.white54, fontSize: 15),
               ),
-              if (videoCapture == null) ...[
+              if (videoCapture == null && !isStopping) ...[
                 const SizedBox(height: 4),
                 const Text(
                   '(Publishing test frames)',
@@ -85,6 +80,34 @@ class VideoPreview extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildLinuxPreview(ui.Image? linuxPreviewImage) {
+    return Container(
+      color: Colors.black87,
+      child: linuxPreviewImage != null
+          ? RawImage(
+              image: linuxPreviewImage,
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.low,
+            )
+          : Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: const [
+                  CircularProgressIndicator(
+                    valueColor: AlwaysStoppedAnimation<Color>(Colors.green),
+                  ),
+                  SizedBox(height: 8),
+                  Text(
+                    'Starting webcam...',
+                    style: TextStyle(color: Colors.white70, fontSize: 15),
+                  ),
+                  SizedBox(height: 4),
+                ],
+              ),
+            ),
     );
   }
 }

@@ -80,11 +80,9 @@ class OpusEncoder {
   // Output buffer for reading Opus packets
   final _outputBuffer = BytesBuilder();
 
-  OpusEncoder({
-    OpusEncoderConfig? config,
-    Logger? logger,
-  })  : config = config ?? const OpusEncoderConfig(),
-        _logger = logger ?? Logger();
+  OpusEncoder({OpusEncoderConfig? config, Logger? logger})
+    : config = config ?? const OpusEncoderConfig(),
+      _logger = logger ?? Logger();
 
   /// Stream of encoded Opus frames
   Stream<OpusFrame> get frames => _frameController.stream;
@@ -106,7 +104,9 @@ class OpusEncoder {
     _outputBuffer.clear();
 
     await _startFFmpegProcess();
-    _logger.i('Opus encoder started (${config.sampleRate}Hz, ${config.channels}ch, ${config.bitrate}bps)');
+    _logger.i(
+      'Opus encoder started (${config.sampleRate}Hz, ${config.channels}ch, ${config.bitrate}bps)',
+    );
   }
 
   Future<void> _startFFmpegProcess() async {
@@ -131,6 +131,7 @@ class OpusEncoder {
       '-frame_duration', config.frameDurationMs.toString(),
       '-vbr', 'on',
       '-compression_level', '10',
+      '-flush_packets', '1',
       // Output format - OGG container for easier parsing
       '-f', 'ogg',
       'pipe:1', // Write to stdout
@@ -172,28 +173,47 @@ class OpusEncoder {
 
     // Add to PCM buffer
     _pcmBuffer.add(samples.data);
-
-    // Write to FFmpeg when we have enough data for a frame
-    if (_pcmBuffer.length >= config.bytesPerFrame) {
-      final data = _pcmBuffer.takeBytes();
-      try {
-        _ffmpegProcess!.stdin.add(data);
-      } catch (e) {
-        _logger.e('Error writing to FFmpeg: $e');
-      }
-    }
+    await _writeBufferedFrames(baseTimestampMs: samples.timestampMs);
   }
 
   /// Add raw PCM bytes directly
   Future<void> addPcmBytes(Uint8List pcmData, int timestampMs) async {
     if (!_isRunning || _ffmpegProcess == null) return;
 
-    _currentTimestampMs = timestampMs;
+    _pcmBuffer.add(pcmData);
+    await _writeBufferedFrames(baseTimestampMs: timestampMs);
+  }
+
+  Future<void> _writeBufferedFrames({required int baseTimestampMs}) async {
+    if (_ffmpegProcess == null || _pcmBuffer.length < config.bytesPerFrame) {
+      return;
+    }
+
+    final buffered = _pcmBuffer.takeBytes();
+    var offset = 0;
+    var frameIndex = 0;
 
     try {
-      _ffmpegProcess!.stdin.add(pcmData);
+      while (offset + config.bytesPerFrame <= buffered.length) {
+        _currentTimestampMs =
+            baseTimestampMs + frameIndex * config.frameDurationMs;
+        _ffmpegProcess!.stdin.add(
+          Uint8List.sublistView(
+            buffered,
+            offset,
+            offset + config.bytesPerFrame,
+          ),
+        );
+        offset += config.bytesPerFrame;
+        frameIndex += 1;
+      }
+      await _ffmpegProcess!.stdin.flush();
     } catch (e) {
       _logger.e('Error writing to FFmpeg: $e');
+    }
+
+    if (offset < buffered.length) {
+      _pcmBuffer.add(Uint8List.sublistView(buffered, offset));
     }
   }
 
@@ -372,11 +392,9 @@ class StubOpusEncoder {
   bool _isRunning = false;
   int _sequenceNumber = 0;
 
-  StubOpusEncoder({
-    OpusEncoderConfig? config,
-    Logger? logger,
-  })  : config = config ?? const OpusEncoderConfig(),
-        _logger = logger ?? Logger();
+  StubOpusEncoder({OpusEncoderConfig? config, Logger? logger})
+    : config = config ?? const OpusEncoderConfig(),
+      _logger = logger ?? Logger();
 
   Stream<OpusFrame> get frames => _frameController.stream;
   bool get isRunning => _isRunning;

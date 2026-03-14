@@ -10,10 +10,7 @@ final appRouter = GoRouter(
   initialLocation: '/',
   routes: [
     // Connection/home screen
-    GoRoute(
-      path: '/',
-      builder: (context, state) => const ConnectionScreen(),
-    ),
+    GoRoute(path: '/', builder: (context, state) => const ConnectionScreen()),
 
     // Viewer screen (for subscribers)
     GoRoute(
@@ -25,6 +22,7 @@ final appRouter = GoRouter(
           trackName: extra['trackName'] as String? ?? '',
           videoTrackAlias: extra['videoTrackAlias'] as String? ?? '',
           audioTrackAlias: extra['audioTrackAlias'] as String? ?? '',
+          useCatalogPlayback: extra['useCatalogPlayback'] as bool? ?? true,
         );
       },
     ),

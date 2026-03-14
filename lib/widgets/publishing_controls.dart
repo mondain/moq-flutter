@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// Publishing controls bar with mute and stop buttons
+/// Publishing controls bar with mute controls and publishing stats
 class PublishingControls extends StatelessWidget {
   final bool isAudioMuted;
   final bool isVideoMuted;
@@ -8,7 +8,6 @@ class PublishingControls extends StatelessWidget {
   final int audioFrames;
   final VoidCallback onAudioMuteToggle;
   final VoidCallback onVideoMuteToggle;
-  final VoidCallback onStop;
 
   const PublishingControls({
     super.key,
@@ -18,7 +17,6 @@ class PublishingControls extends StatelessWidget {
     required this.audioFrames,
     required this.onAudioMuteToggle,
     required this.onVideoMuteToggle,
-    required this.onStop,
   });
 
   @override
@@ -53,12 +51,6 @@ class PublishingControls extends StatelessWidget {
               '$videoFrames video / $audioFrames audio frames',
               style: const TextStyle(color: Colors.white70, fontSize: 12),
             ),
-          ),
-          // Stop button
-          TextButton.icon(
-            onPressed: onStop,
-            icon: const Icon(Icons.stop, color: Colors.red),
-            label: const Text('Stop', style: TextStyle(color: Colors.red)),
           ),
         ],
       ),

@@ -19,7 +19,9 @@ class Yuv420ToRgbaConverter {
     // Validate input size
     final expectedSize = ySize + uvSize * 2;
     if (yuv420p.length < expectedSize) {
-      throw ArgumentError('YUV420P data too small: ${yuv420p.length} < $expectedSize');
+      throw ArgumentError(
+        'YUV420P data too small: ${yuv420p.length} < $expectedSize',
+      );
     }
 
     final rgba = Uint8List(width * height * 4);
@@ -39,7 +41,10 @@ class Yuv420ToRgbaConverter {
 
         // YUV to RGB conversion (BT.601)
         int r = (yValue + 1.402 * vValue).round().clamp(0, 255);
-        int g = (yValue - 0.344 * uValue - 0.714 * vValue).round().clamp(0, 255);
+        int g = (yValue - 0.344 * uValue - 0.714 * vValue).round().clamp(
+          0,
+          255,
+        );
         int b = (yValue + 1.772 * uValue).round().clamp(0, 255);
 
         final rgbaIndex = yIndex * 4;
@@ -54,12 +59,95 @@ class Yuv420ToRgbaConverter {
   }
 
   /// Convert in an isolate for better performance
-  static Future<Uint8List> convertAsync(Uint8List yuv420p, int width, int height) {
+  static Future<Uint8List> convertAsync(
+    Uint8List yuv420p,
+    int width,
+    int height,
+  ) {
     return compute(_convertInIsolate, _ConvertParams(yuv420p, width, height));
+  }
+
+  /// Convert to a lower-resolution preview image directly from the source YUV.
+  static Uint8List convertPreview(
+    Uint8List yuv420p,
+    int sourceWidth,
+    int sourceHeight,
+    int targetWidth,
+    int targetHeight,
+  ) {
+    final ySize = sourceWidth * sourceHeight;
+    final uvSize = ySize ~/ 4;
+    final expectedSize = ySize + uvSize * 2;
+    if (yuv420p.length < expectedSize) {
+      throw ArgumentError(
+        'YUV420P data too small: ${yuv420p.length} < $expectedSize',
+      );
+    }
+
+    final rgba = Uint8List(targetWidth * targetHeight * 4);
+    final uOffset = ySize;
+    final vOffset = ySize + uvSize;
+
+    for (int y = 0; y < targetHeight; y++) {
+      final sourceY = y * sourceHeight ~/ targetHeight;
+      for (int x = 0; x < targetWidth; x++) {
+        final sourceX = x * sourceWidth ~/ targetWidth;
+        final yIndex = sourceY * sourceWidth + sourceX;
+        final uvIndex = (sourceY ~/ 2) * (sourceWidth ~/ 2) + (sourceX ~/ 2);
+
+        final yValue = yuv420p[yIndex];
+        final uValue = yuv420p[uOffset + uvIndex] - 128;
+        final vValue = yuv420p[vOffset + uvIndex] - 128;
+
+        final r = (yValue + 1.402 * vValue).round().clamp(0, 255);
+        final g = (yValue - 0.344 * uValue - 0.714 * vValue).round().clamp(
+          0,
+          255,
+        );
+        final b = (yValue + 1.772 * uValue).round().clamp(0, 255);
+
+        final rgbaIndex = (y * targetWidth + x) * 4;
+        rgba[rgbaIndex] = r;
+        rgba[rgbaIndex + 1] = g;
+        rgba[rgbaIndex + 2] = b;
+        rgba[rgbaIndex + 3] = 255;
+      }
+    }
+
+    return rgba;
+  }
+
+  static Future<Uint8List> convertPreviewAsync(
+    Uint8List yuv420p,
+    int sourceWidth,
+    int sourceHeight,
+    int targetWidth,
+    int targetHeight,
+  ) {
+    return compute(
+      _convertPreviewInIsolate,
+      _PreviewConvertParams(
+        yuv420p,
+        sourceWidth,
+        sourceHeight,
+        targetWidth,
+        targetHeight,
+      ),
+    );
   }
 
   static Uint8List _convertInIsolate(_ConvertParams params) {
     return convert(params.yuv420p, params.width, params.height);
+  }
+
+  static Uint8List _convertPreviewInIsolate(_PreviewConvertParams params) {
+    return convertPreview(
+      params.yuv420p,
+      params.sourceWidth,
+      params.sourceHeight,
+      params.targetWidth,
+      params.targetHeight,
+    );
   }
 }
 
@@ -69,6 +157,22 @@ class _ConvertParams {
   final int height;
 
   _ConvertParams(this.yuv420p, this.width, this.height);
+}
+
+class _PreviewConvertParams {
+  final Uint8List yuv420p;
+  final int sourceWidth;
+  final int sourceHeight;
+  final int targetWidth;
+  final int targetHeight;
+
+  _PreviewConvertParams(
+    this.yuv420p,
+    this.sourceWidth,
+    this.sourceHeight,
+    this.targetWidth,
+    this.targetHeight,
+  );
 }
 
 /// Represents an RGBA frame for preview display
@@ -142,17 +246,18 @@ class LinuxVideoCapture implements VideoCapture {
 
   // Preview frame generation
   int _frameCount = 0;
-  static const int _previewFrameInterval = 3; // Convert every Nth frame for preview
+  static const int _previewFrameInterval =
+      2; // Convert every Nth frame for preview
+  static const int _previewMaxWidth = 640;
+  static const int _previewMaxHeight = 360;
   bool _isConvertingPreview = false;
 
   // Audio capture
   AudioCapture? _audioCapture;
 
-  LinuxVideoCapture({
-    CaptureConfig? config,
-    Logger? logger,
-  })  : config = config ?? const CaptureConfig(),
-        _logger = logger ?? Logger();
+  LinuxVideoCapture({CaptureConfig? config, Logger? logger})
+    : config = config ?? const CaptureConfig(),
+      _logger = logger ?? Logger();
 
   @override
   Stream<VideoFrame> get videoFrames => _videoFrameController.stream;
@@ -167,7 +272,9 @@ class LinuxVideoCapture implements VideoCapture {
   bool get isCapturing => _isCapturing;
 
   /// Get list of available V4L2 video devices
-  static Future<List<LinuxCameraInfo>> getAvailableCameras({Logger? logger}) async {
+  static Future<List<LinuxCameraInfo>> getAvailableCameras({
+    Logger? logger,
+  }) async {
     final cameras = <LinuxCameraInfo>[];
     final log = logger ?? Logger();
 
@@ -202,21 +309,25 @@ class LinuxVideoCapture implements VideoCapture {
                 }
               }
 
-              cameras.add(LinuxCameraInfo(
-                devicePath: devicePath,
-                name: name,
-                driver: driver,
-                busInfo: busInfo,
-              ));
+              cameras.add(
+                LinuxCameraInfo(
+                  devicePath: devicePath,
+                  name: name,
+                  driver: driver,
+                  busInfo: busInfo,
+                ),
+              );
             }
           } catch (e) {
             // Device exists but can't query details
-            cameras.add(LinuxCameraInfo(
-              devicePath: devicePath,
-              name: 'Video Device ${devicePath.split('/').last}',
-              driver: 'unknown',
-              busInfo: '',
-            ));
+            cameras.add(
+              LinuxCameraInfo(
+                devicePath: devicePath,
+                name: 'Video Device ${devicePath.split('/').last}',
+                driver: 'unknown',
+                busInfo: '',
+              ),
+            );
           }
         }
       }
@@ -245,7 +356,9 @@ class LinuxVideoCapture implements VideoCapture {
     try {
       final result = await Process.run('which', ['ffmpeg']);
       if (result.exitCode != 0) {
-        throw StateError('FFmpeg not found. Install with: sudo apt install ffmpeg');
+        throw StateError(
+          'FFmpeg not found. Install with: sudo apt install ffmpeg',
+        );
       }
     } catch (e) {
       throw StateError('Failed to check FFmpeg availability: $e');
@@ -396,7 +509,8 @@ class LinuxVideoCapture implements VideoCapture {
 
       // If we have a complete frame, emit it
       if (_frameBufferOffset >= _expectedFrameSize) {
-        final timestampMs = DateTime.now().millisecondsSinceEpoch - _startTimeMs;
+        final timestampMs =
+            DateTime.now().millisecondsSinceEpoch - _startTimeMs;
         final (width, height) = _resolutionFromPreset(config.resolution);
 
         final frameData = Uint8List.fromList(_frameBuffer!);
@@ -415,27 +529,67 @@ class LinuxVideoCapture implements VideoCapture {
         _frameCount++;
         if (_frameCount % _previewFrameInterval == 0 && !_isConvertingPreview) {
           _isConvertingPreview = true;
-          // Convert YUV420P to RGBA in an isolate
-          Yuv420ToRgbaConverter.convertAsync(frameData, width, height).then((rgbaData) {
-            if (_isCapturing && !_previewFrameController.isClosed) {
-              _previewFrameController.add(PreviewFrame(
-                rgbaData: rgbaData,
-                width: width,
-                height: height,
-                timestampMs: timestampMs,
-              ));
-            }
-            _isConvertingPreview = false;
-          }).catchError((e) {
-            _logger.w('Preview frame conversion failed: $e');
-            _isConvertingPreview = false;
-          });
+          final (previewWidth, previewHeight) = _previewDimensions(
+            width,
+            height,
+          );
+          // Convert directly to a lower-resolution preview in an isolate.
+          Yuv420ToRgbaConverter.convertPreviewAsync(
+                frameData,
+                width,
+                height,
+                previewWidth,
+                previewHeight,
+              )
+              .then((rgbaData) {
+                if (_isCapturing && !_previewFrameController.isClosed) {
+                  _previewFrameController.add(
+                    PreviewFrame(
+                      rgbaData: rgbaData,
+                      width: previewWidth,
+                      height: previewHeight,
+                      timestampMs: timestampMs,
+                    ),
+                  );
+                }
+                _isConvertingPreview = false;
+              })
+              .catchError((e) {
+                _logger.w('Preview frame conversion failed: $e');
+                _isConvertingPreview = false;
+              });
         }
 
         // Reset buffer for next frame
         _frameBufferOffset = 0;
       }
     }
+  }
+
+  (int, int) _previewDimensions(int sourceWidth, int sourceHeight) {
+    var previewWidth = sourceWidth;
+    var previewHeight = sourceHeight;
+
+    if (previewWidth > _previewMaxWidth) {
+      previewHeight = (previewHeight * _previewMaxWidth ~/ previewWidth);
+      previewWidth = _previewMaxWidth;
+    }
+
+    if (previewHeight > _previewMaxHeight) {
+      previewWidth = (previewWidth * _previewMaxHeight ~/ previewHeight);
+      previewHeight = _previewMaxHeight;
+    }
+
+    if (previewWidth.isOdd) {
+      previewWidth -= 1;
+    }
+    if (previewHeight.isOdd) {
+      previewHeight -= 1;
+    }
+
+    previewWidth = previewWidth.clamp(2, sourceWidth);
+    previewHeight = previewHeight.clamp(2, sourceHeight);
+    return (previewWidth, previewHeight);
   }
 
   @override

@@ -8,10 +8,9 @@ import '../widgets/server_config_card.dart';
 import '../widgets/track_config_card.dart';
 
 /// Client role - what action to take after connecting
-enum ClientRole {
-  subscriber,
-  publisher,
-}
+enum ClientRole { subscriber, publisher }
+
+enum SubscriberPlaybackMode { catalog, directTracks }
 
 /// Connection screen for configuring and establishing MoQ connections
 class ConnectionScreen extends ConsumerStatefulWidget {
@@ -26,12 +25,13 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
   late final TextEditingController _portController;
   late final TextEditingController _urlController;
   late final TextEditingController _namespaceController;
-  late final TextEditingController _trackNameController;
 
   bool _isLoading = false;
   bool _insecureMode = false;
   TransportType _transportType = TransportType.moqt;
   ClientRole _clientRole = ClientRole.subscriber;
+  SubscriberPlaybackMode _subscriberPlaybackMode =
+      SubscriberPlaybackMode.catalog;
   String _statusMessage = '';
 
   @override
@@ -44,7 +44,6 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
     _portController = TextEditingController(text: settings.port);
     _urlController = TextEditingController(text: settings.url);
     _namespaceController = TextEditingController(text: settings.namespace);
-    _trackNameController = TextEditingController(text: settings.trackName);
     _insecureMode = settings.insecureMode;
     _transportType = ref.read(transportTypeProvider);
 
@@ -53,14 +52,16 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
     _portController.addListener(_savePort);
     _urlController.addListener(_saveUrl);
     _namespaceController.addListener(_saveNamespace);
-    _trackNameController.addListener(_saveTrackName);
   }
 
-  void _saveHost() => ref.read(settingsServiceProvider).setHost(_hostController.text);
-  void _savePort() => ref.read(settingsServiceProvider).setPort(_portController.text);
-  void _saveUrl() => ref.read(settingsServiceProvider).setUrl(_urlController.text);
-  void _saveNamespace() => ref.read(settingsServiceProvider).setNamespace(_namespaceController.text);
-  void _saveTrackName() => ref.read(settingsServiceProvider).setTrackName(_trackNameController.text);
+  void _saveHost() =>
+      ref.read(settingsServiceProvider).setHost(_hostController.text);
+  void _savePort() =>
+      ref.read(settingsServiceProvider).setPort(_portController.text);
+  void _saveUrl() =>
+      ref.read(settingsServiceProvider).setUrl(_urlController.text);
+  void _saveNamespace() =>
+      ref.read(settingsServiceProvider).setNamespace(_namespaceController.text);
 
   /// Refresh controllers from settings (e.g. after returning from settings screen)
   void _refreshFromSettings() {
@@ -85,18 +86,31 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
     _portController.removeListener(_savePort);
     _urlController.removeListener(_saveUrl);
     _namespaceController.removeListener(_saveNamespace);
-    _trackNameController.removeListener(_saveTrackName);
     _hostController.dispose();
     _portController.dispose();
     _urlController.dispose();
     _namespaceController.dispose();
-    _trackNameController.dispose();
     super.dispose();
   }
 
   void _setStatus(String message) {
     if (mounted) {
       setState(() => _statusMessage = message);
+    }
+  }
+
+  (String, String) _resolvedDirectTrackNames() {
+    final packagingFormat = ref.read(packagingFormatProvider);
+    switch (packagingFormat) {
+      case PackagingFormat.cmaf:
+        return ('1.m4s', '2.m4s');
+      case PackagingFormat.loc:
+        return ('video', 'audio');
+      case PackagingFormat.moqMi:
+        return (
+          ref.read(videoTrackNameProvider),
+          ref.read(audioTrackNameProvider),
+        );
     }
   }
 
@@ -118,16 +132,21 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
         final path = uri.path;
 
         _setStatus('Connecting to $host:$port via WebTransport...');
-        await client.connect(host, port, options: {
-          'insecure': _insecureMode.toString(),
-          'path': path,
-        });
+        await client.connect(
+          host,
+          port,
+          options: {'insecure': _insecureMode.toString(), 'path': path},
+        );
       } else {
         final host = _hostController.text;
         final port = int.tryParse(_portController.text) ?? 8443;
 
         _setStatus('Connecting to $host:$port via QUIC...');
-        await client.connect(host, port, options: {'insecure': _insecureMode.toString()});
+        await client.connect(
+          host,
+          port,
+          options: {'insecure': _insecureMode.toString()},
+        );
       }
 
       _setStatus('Connected!');
@@ -136,54 +155,61 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
 
       // Navigate to appropriate screen based on role
       final namespace = _namespaceController.text;
-      final trackName = _trackNameController.text;
+      final trackName = ref.read(settingsServiceProvider).trackName;
 
       if (_clientRole == ClientRole.subscriber) {
-        // Subscribe to both video and audio tracks
-        // Track names are configurable in settings
-        final namespaceBytes = [Uint8List.fromList(namespace.codeUnits)];
+        final (videoTrackName, audioTrackName) = _resolvedDirectTrackNames();
+        String videoTrackAlias = '';
+        String audioTrackAlias = '';
 
-        // Get track names from settings
-        final videoTrackName = ref.read(videoTrackNameProvider);
-        final audioTrackName = ref.read(audioTrackNameProvider);
+        if (_subscriberPlaybackMode == SubscriberPlaybackMode.directTracks) {
+          final namespaceBytes = [Uint8List.fromList(namespace.codeUnits)];
 
-        // Subscribe to video track
-        // Use nextGroupStart to start at the next group boundary (keyframe)
-        _setStatus('Subscribing to $namespace/$videoTrackName...');
-        final videoTrackNameBytes = Uint8List.fromList(videoTrackName.codeUnits);
-        final videoResult = await client.subscribe(
-          namespaceBytes,
-          videoTrackNameBytes,
-          filterType: FilterType.nextGroupStart,
-        );
-        _setStatus('Video subscribed! Track alias: ${videoResult.trackAlias}');
+          _setStatus('Subscribing to $namespace/$videoTrackName...');
+          final videoTrackNameBytes = Uint8List.fromList(
+            videoTrackName.codeUnits,
+          );
+          final videoResult = await client.subscribe(
+            namespaceBytes,
+            videoTrackNameBytes,
+            filterType: FilterType.nextGroupStart,
+          );
+          videoTrackAlias = videoResult.trackAlias.toString();
 
-        // Subscribe to audio track
-        // Use nextGroupStart for mid-stream joining
-        _setStatus('Subscribing to $namespace/$audioTrackName...');
-        final audioTrackNameBytes = Uint8List.fromList(audioTrackName.codeUnits);
-        final audioResult = await client.subscribe(
-          namespaceBytes,
-          audioTrackNameBytes,
-          filterType: FilterType.nextGroupStart,
-        );
-        _setStatus('Audio subscribed! Track alias: ${audioResult.trackAlias}');
+          _setStatus('Subscribing to $namespace/$audioTrackName...');
+          final audioTrackNameBytes = Uint8List.fromList(
+            audioTrackName.codeUnits,
+          );
+          final audioResult = await client.subscribe(
+            namespaceBytes,
+            audioTrackNameBytes,
+            filterType: FilterType.nextGroupStart,
+          );
+          audioTrackAlias = audioResult.trackAlias.toString();
+        } else {
+          _setStatus('Connected. Opening catalog playback...');
+        }
 
         if (mounted) {
-          context.go('/viewer', extra: {
-            'namespace': namespace,
-            'trackName': videoTrackName,
-            'videoTrackAlias': videoResult.trackAlias.toString(),
-            'audioTrackAlias': audioResult.trackAlias.toString(),
-          });
+          context.go(
+            '/viewer',
+            extra: {
+              'namespace': namespace,
+              'trackName': videoTrackName,
+              'videoTrackAlias': videoTrackAlias,
+              'audioTrackAlias': audioTrackAlias,
+              'useCatalogPlayback':
+                  _subscriberPlaybackMode == SubscriberPlaybackMode.catalog,
+            },
+          );
         }
       } else {
         // Navigate to publisher screen
         if (mounted) {
-          context.go('/publisher', extra: {
-            'namespace': namespace,
-            'trackName': trackName,
-          });
+          context.go(
+            '/publisher',
+            extra: {'namespace': namespace, 'trackName': trackName},
+          );
         }
       }
     } catch (e) {
@@ -195,10 +221,7 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
       } catch (_) {}
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed: $e'),
-            backgroundColor: Colors.red,
-          ),
+          SnackBar(content: Text('Failed: $e'), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -214,7 +237,11 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('MoQ Flutter Client', style: TextStyle(fontSize: 18)),
+        title: const Text(
+          'MoQ Client',
+          style: TextStyle(fontSize: 18),
+          overflow: TextOverflow.ellipsis,
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
@@ -236,7 +263,9 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                 // Role selector
                 Text(
                   'Client Role',
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(fontSize: 15),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontSize: 15),
                 ),
                 const SizedBox(height: 8),
                 SegmentedButton<ClientRole>(
@@ -264,7 +293,9 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                 // Transport type selector
                 Text(
                   'Transport Type',
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(fontSize: 15),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontSize: 15),
                 ),
                 const SizedBox(height: 8),
                 SegmentedButton<TransportType>(
@@ -276,7 +307,10 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                     ),
                     ButtonSegment(
                       value: TransportType.webtransport,
-                      label: Text('WebTransport', style: TextStyle(fontSize: 14)),
+                      label: Text(
+                        'WebTransport',
+                        style: TextStyle(fontSize: 14),
+                      ),
                       icon: Icon(Icons.http),
                     ),
                   ],
@@ -286,7 +320,9 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                       : (Set<TransportType> newSelection) {
                           final newType = newSelection.first;
                           setState(() => _transportType = newType);
-                          ref.read(transportTypeProvider.notifier).setTransportType(newType);
+                          ref
+                              .read(transportTypeProvider.notifier)
+                              .setTransportType(newType);
                         },
                 ),
                 const SizedBox(height: 16),
@@ -309,10 +345,63 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                 // Track configuration
                 TrackConfigCard(
                   namespaceController: _namespaceController,
-                  trackNameController: _trackNameController,
                   isPublisher: _clientRole == ClientRole.publisher,
+                  title: _clientRole == ClientRole.publisher
+                      ? 'Publishing Namespace'
+                      : _subscriberPlaybackMode ==
+                            SubscriberPlaybackMode.catalog
+                      ? 'Catalog Subscription'
+                      : 'Tracks to Subscribe',
+                  showPublisherTrackName: false,
+                  showSubscriberTracks:
+                      _clientRole == ClientRole.publisher ||
+                      _subscriberPlaybackMode ==
+                          SubscriberPlaybackMode.directTracks,
                   enabled: !isConnected && !_isLoading,
                 ),
+                if (_clientRole == ClientRole.subscriber) ...[
+                  const SizedBox(height: 16),
+                  Text(
+                    'Subscribe Mode',
+                    style: Theme.of(
+                      context,
+                    ).textTheme.titleSmall?.copyWith(fontSize: 15),
+                  ),
+                  const SizedBox(height: 8),
+                  SegmentedButton<SubscriberPlaybackMode>(
+                    segments: const [
+                      ButtonSegment(
+                        value: SubscriberPlaybackMode.catalog,
+                        label: Text('Catalog', style: TextStyle(fontSize: 14)),
+                        icon: Icon(Icons.library_books),
+                      ),
+                      ButtonSegment(
+                        value: SubscriberPlaybackMode.directTracks,
+                        label: Text(
+                          'Direct Tracks',
+                          style: TextStyle(fontSize: 14),
+                        ),
+                        icon: Icon(Icons.alt_route),
+                      ),
+                    ],
+                    selected: {_subscriberPlaybackMode},
+                    onSelectionChanged: (isConnected || _isLoading)
+                        ? null
+                        : (Set<SubscriberPlaybackMode> newSelection) {
+                            setState(
+                              () =>
+                                  _subscriberPlaybackMode = newSelection.first,
+                            );
+                          },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _subscriberPlaybackMode == SubscriberPlaybackMode.catalog
+                        ? 'Catalog playback is the default. The player will subscribe to the catalog and pick media tracks automatically.'
+                        : 'Direct track playback subscribes immediately to the configured video and audio track names.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
                 const SizedBox(height: 24),
 
                 // Connect button
@@ -327,15 +416,20 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                             color: Colors.white,
                           ),
                         )
-                      : Icon(_clientRole == ClientRole.subscriber
-                          ? Icons.play_arrow
-                          : Icons.publish),
+                      : Icon(
+                          _clientRole == ClientRole.subscriber
+                              ? Icons.play_arrow
+                              : Icons.publish,
+                        ),
                   label: Text(
                     _isLoading
                         ? 'Connecting...'
                         : _clientRole == ClientRole.subscriber
-                            ? 'Connect & Subscribe'
-                            : 'Connect & Publish',
+                        ? _subscriberPlaybackMode ==
+                                  SubscriberPlaybackMode.catalog
+                              ? 'Connect & Play Catalog'
+                              : 'Connect & Subscribe'
+                        : 'Connect & Publish',
                     style: const TextStyle(fontSize: 15),
                   ),
                 ),

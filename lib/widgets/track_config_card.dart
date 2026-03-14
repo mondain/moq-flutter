@@ -5,22 +5,37 @@ import '../providers/moq_providers.dart';
 /// Card for track configuration (namespace and track name)
 class TrackConfigCard extends ConsumerWidget {
   final TextEditingController namespaceController;
-  final TextEditingController trackNameController;
   final bool isPublisher;
   final bool enabled;
+  final String? title;
+  final bool showSubscriberTracks;
+  final TextEditingController? publisherTrackNameController;
+  final bool showPublisherTrackName;
 
   const TrackConfigCard({
     super.key,
     required this.namespaceController,
-    required this.trackNameController,
     this.isPublisher = false,
     this.enabled = true,
+    this.title,
+    this.showSubscriberTracks = true,
+    this.publisherTrackNameController,
+    this.showPublisherTrackName = true,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final videoTrackName = ref.watch(videoTrackNameProvider);
-    final audioTrackName = ref.watch(audioTrackNameProvider);
+    final packagingFormat = ref.watch(packagingFormatProvider);
+    final videoTrackName = switch (packagingFormat) {
+      PackagingFormat.cmaf => '1.m4s',
+      PackagingFormat.loc => 'video',
+      PackagingFormat.moqMi => ref.watch(videoTrackNameProvider),
+    };
+    final audioTrackName = switch (packagingFormat) {
+      PackagingFormat.cmaf => '2.m4s',
+      PackagingFormat.loc => 'audio',
+      PackagingFormat.moqMi => ref.watch(audioTrackNameProvider),
+    };
 
     return Card(
       child: Padding(
@@ -29,7 +44,8 @@ class TrackConfigCard extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              isPublisher ? 'Track to Publish' : 'Tracks to Subscribe',
+              title ??
+                  (isPublisher ? 'Track to Publish' : 'Tracks to Subscribe'),
               style: Theme.of(context).textTheme.titleSmall,
             ),
             const SizedBox(height: 8),
@@ -43,10 +59,10 @@ class TrackConfigCard extends ConsumerWidget {
               enabled: enabled,
             ),
             const SizedBox(height: 8),
-            if (isPublisher)
+            if (isPublisher && showPublisherTrackName)
               // Publisher can configure track name
               TextField(
-                controller: trackNameController,
+                controller: publisherTrackNameController,
                 decoration: const InputDecoration(
                   labelText: 'Track Name',
                   border: OutlineInputBorder(),
@@ -54,7 +70,7 @@ class TrackConfigCard extends ConsumerWidget {
                 ),
                 enabled: enabled,
               )
-            else
+            else if (showSubscriberTracks)
               // Subscriber uses fixed track names (FB convention)
               Container(
                 padding: const EdgeInsets.all(12),
@@ -62,7 +78,9 @@ class TrackConfigCard extends ConsumerWidget {
                   color: Theme.of(context).colorScheme.surfaceContainerHighest,
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
-                    color: Theme.of(context).colorScheme.outline.withOpacity(0.5),
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.outline.withOpacity(0.5),
                   ),
                 ),
                 child: Column(
@@ -85,9 +103,8 @@ class TrackConfigCard extends ConsumerWidget {
                         const SizedBox(width: 4),
                         Text(
                           videoTrackName,
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            fontWeight: FontWeight.w500,
-                          ),
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(fontWeight: FontWeight.w500),
                         ),
                         const SizedBox(width: 16),
                         Icon(
@@ -98,9 +115,8 @@ class TrackConfigCard extends ConsumerWidget {
                         const SizedBox(width: 4),
                         Text(
                           audioTrackName,
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            fontWeight: FontWeight.w500,
-                          ),
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(fontWeight: FontWeight.w500),
                         ),
                       ],
                     ),

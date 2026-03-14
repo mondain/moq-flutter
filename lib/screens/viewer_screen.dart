@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -15,6 +16,7 @@ class ViewerScreen extends ConsumerStatefulWidget {
   final String trackName;
   final String videoTrackAlias;
   final String audioTrackAlias;
+  final bool useCatalogPlayback;
 
   const ViewerScreen({
     super.key,
@@ -22,6 +24,7 @@ class ViewerScreen extends ConsumerStatefulWidget {
     required this.trackName,
     required this.videoTrackAlias,
     required this.audioTrackAlias,
+    this.useCatalogPlayback = true,
   });
 
   @override
@@ -32,6 +35,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   String _statusMessage = '';
   MoQVideoPlayer? _videoPlayer;
   NativeMoQPlayer? _nativePlayer;
+  MoQStreamPlayer? _streamPlayer;
   bool _useNativePlayer = false;
   bool _isInitializing = true;
   String? _errorMessage;
@@ -57,6 +61,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   @override
   void dispose() {
     _statsTimer?.cancel();
+    _streamPlayer?.dispose();
     _videoPlayer?.dispose();
     _nativePlayer?.dispose();
     super.dispose();
@@ -65,6 +70,33 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   Future<void> _initializePlayer() async {
     try {
       final client = ref.read(moqClientProvider);
+      final namespaceBytes = [Uint8List.fromList(widget.namespace.codeUnits)];
+
+      debugPrint(
+        'ViewerScreen: Initializing player '
+        '(catalog=${widget.useCatalogPlayback}, '
+        'subscriptions=${client.subscriptions.length})',
+      );
+
+      if (widget.useCatalogPlayback) {
+        _useNativePlayer = false;
+        _streamPlayer = MoQStreamPlayer(client: client);
+        _videoPlayer = await _streamPlayer!.subscribeCatalogAndPlay(
+          namespaceBytes,
+        );
+
+        _statsTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+          _updateStats();
+        });
+
+        setState(() {
+          _statusMessage = 'Loading catalog playback...';
+          _isInitializing = false;
+        });
+
+        await _videoPlayer!.play();
+        return;
+      }
 
       if (client.subscriptions.isEmpty) {
         setState(() {
@@ -73,8 +105,6 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         });
         return;
       }
-
-      debugPrint('ViewerScreen: Initializing player with ${client.subscriptions.length} subscriptions');
 
       // Check if native player is available (with defensive try/catch)
       bool nativeAvailable = false;
@@ -111,7 +141,9 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         await _nativePlayer!.play();
       } else {
         // Fall back to file-based player
-        debugPrint('ViewerScreen: Native player not available, using file-based player');
+        debugPrint(
+          'ViewerScreen: Native player not available, using file-based player',
+        );
         _useNativePlayer = false;
         _videoPlayer = MoQVideoPlayer();
         await _videoPlayer!.initialize(client.subscriptions.values.toList());
@@ -129,7 +161,6 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         // Auto-start playback
         await _videoPlayer!.play();
       }
-
     } catch (e) {
       debugPrint('ViewerScreen: Error initializing player: $e');
       setState(() {
@@ -152,11 +183,13 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
 
         final stats = _nativePlayer!.getStats();
         if (_nativePlayer!.isPlaying) {
-          _statusMessage = 'Playing (native, buffered: ${stats?.buffered ?? 0} bytes)';
+          _statusMessage =
+              'Playing (native, buffered: ${stats?.buffered ?? 0} bytes)';
         } else if (_videoFramesDecoded > 0) {
           _statusMessage = 'Buffering...';
         } else if (_videoObjectsReceived > 0) {
-          _statusMessage = 'Waiting for keyframe... (received $_videoObjectsReceived objects)';
+          _statusMessage =
+              'Waiting for keyframe... (received $_videoObjectsReceived objects)';
         }
       });
     } else if (_videoPlayer != null) {
@@ -181,6 +214,8 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   Future<void> _disconnect() async {
     try {
       _statsTimer?.cancel();
+      await _streamPlayer?.dispose();
+      _streamPlayer = null;
       await _videoPlayer?.dispose();
       _videoPlayer = null;
       await _nativePlayer?.dispose();
@@ -194,9 +229,9 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Disconnect failed: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Disconnect failed: $e')));
       }
     }
   }
@@ -209,23 +244,18 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isConnected = ref.watch(isConnectedProvider);
-
     // Listen for connection loss
-    ref.listen<AsyncValue<bool>>(
-      connectionStateProvider,
-      (_, state) {
-        if (state.hasValue && !state.value! && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Connection lost'),
-              backgroundColor: Colors.red,
-            ),
-          );
-          context.go('/');
-        }
-      },
-    );
+    ref.listen<AsyncValue<bool>>(connectionStateProvider, (_, state) {
+      if (state.hasValue && !state.value! && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Connection lost'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        context.go('/');
+      }
+    });
 
     return Scaffold(
       appBar: AppBar(
@@ -239,10 +269,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         children: [
           // Video player area
           Expanded(
-            child: Container(
-              color: Colors.black,
-              child: _buildVideoArea(),
-            ),
+            child: Container(color: Colors.black, child: _buildVideoArea()),
           ),
 
           // Info and controls (scrollable so collapse works on small screens)
@@ -264,19 +291,44 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                         child: ExpansionTile(
                           title: Text(
                             'Stream Statistics',
-                            style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
+                            style: Theme.of(
+                              context,
+                            ).textTheme.titleMedium?.copyWith(fontSize: 16),
                           ),
                           initiallyExpanded: true,
-                          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                          childrenPadding: const EdgeInsets.fromLTRB(
+                            16,
+                            0,
+                            16,
+                            16,
+                          ),
                           children: [
-                            _buildStatsRow('Objects Received', '$_videoObjectsReceived'),
-                            _buildStatsRow('Video Frames', '$_videoFramesDecoded'),
-                            _buildStatsRow('Audio Frames', '$_audioFramesDecoded'),
+                            _buildStatsRow(
+                              'Objects Received',
+                              '$_videoObjectsReceived',
+                            ),
+                            _buildStatsRow(
+                              'Video Frames',
+                              '$_videoFramesDecoded',
+                            ),
+                            _buildStatsRow(
+                              'Audio Frames',
+                              '$_audioFramesDecoded',
+                            ),
                             if (_useNativePlayer)
-                              _buildStatsRow('Buffer Written', _formatBytes(_bytesWrittenToBuffer))
+                              _buildStatsRow(
+                                'Buffer Written',
+                                _formatBytes(_bytesWrittenToBuffer),
+                              )
                             else
-                              _buildStatsRow('Segments Written', '$_videoSegmentsWritten'),
-                            _buildStatsRow('Data Received', _formatBytes(_totalBytesReceived)),
+                              _buildStatsRow(
+                                'Segments Written',
+                                '$_videoSegmentsWritten',
+                              ),
+                            _buildStatsRow(
+                              'Data Received',
+                              _formatBytes(_totalBytesReceived),
+                            ),
                           ],
                         ),
                       ),
@@ -288,23 +340,38 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                         child: ExpansionTile(
                           title: Text(
                             'Track Info',
-                            style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
+                            style: Theme.of(
+                              context,
+                            ).textTheme.titleMedium?.copyWith(fontSize: 16),
                           ),
-                          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                          childrenPadding: const EdgeInsets.fromLTRB(
+                            16,
+                            0,
+                            16,
+                            16,
+                          ),
                           children: [
                             _buildInfoRow('Namespace', widget.namespace),
-                            _buildInfoRow('Video Track', widget.videoTrackAlias),
-                            _buildInfoRow('Audio Track', widget.audioTrackAlias),
+                            _buildInfoRow(
+                              'Mode',
+                              widget.useCatalogPlayback
+                                  ? 'Catalog'
+                                  : 'Direct tracks',
+                            ),
+                            _buildInfoRow(
+                              'Video Track',
+                              widget.useCatalogPlayback
+                                  ? 'Auto-selected from catalog'
+                                  : widget.videoTrackAlias,
+                            ),
+                            _buildInfoRow(
+                              'Audio Track',
+                              widget.useCatalogPlayback
+                                  ? 'Auto-selected from catalog'
+                                  : widget.audioTrackAlias,
+                            ),
                           ],
                         ),
-                      ),
-                      const SizedBox(height: 8),
-
-                      // Disconnect button
-                      OutlinedButton.icon(
-                        onPressed: isConnected ? _disconnect : null,
-                        icon: const Icon(Icons.stop),
-                        label: const Text('Disconnect', style: TextStyle(fontSize: 15)),
                       ),
                     ],
                   ),
@@ -413,9 +480,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       children: [
         // Video player widget
         if (_videoPlayer!.isMediaReady)
-          Video(
-            controller: _videoPlayer!.controller,
-          )
+          Video(controller: _videoPlayer!.controller)
         else
           Center(
             child: Column(
@@ -481,9 +546,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
             '$label: ',
             style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
           ),
-          Expanded(
-            child: Text(value, style: const TextStyle(fontSize: 14)),
-          ),
+          Expanded(child: Text(value, style: const TextStyle(fontSize: 14))),
         ],
       ),
     );
@@ -496,7 +559,10 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text(label, style: const TextStyle(fontSize: 13, color: Colors.grey)),
-          Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+          ),
         ],
       ),
     );

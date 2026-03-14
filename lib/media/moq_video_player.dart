@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:logger/logger.dart';
+import '../moq/catalog/moq_catalog.dart';
+import '../moq/catalog/moq_catalog_subscriber.dart';
 import '../moq/protocol/moq_messages.dart';
 import '../moq/client/moq_client.dart';
 import '../moq/media/streaming_playback.dart';
@@ -43,8 +46,8 @@ class MoQVideoPlayer {
   int _skippedVideoFrames = 0;
 
   MoQVideoPlayer({Logger? logger})
-      : _logger = logger ?? Logger(),
-        _player = Player() {
+    : _logger = logger ?? Logger(),
+      _player = Player() {
     _controller = VideoController(_player);
     _logger.i('MoQVideoPlayer created');
     _setupPlayerListeners();
@@ -151,8 +154,9 @@ class MoQVideoPlayer {
     await _playbackPipeline!.initialize();
 
     // Listen for combined stream ready notification
-    _videoReadySubscription =
-        _playbackPipeline!.onVideoReady.listen(_handleVideoReady);
+    _videoReadySubscription = _playbackPipeline!.onVideoReady.listen(
+      _handleVideoReady,
+    );
 
     // Subscribe to incoming objects from all subscriptions
     for (final subscription in subscriptions) {
@@ -168,6 +172,26 @@ class MoQVideoPlayer {
     _logger.i('Player initialized with streaming pipeline');
   }
 
+  Future<void> initializeCatalogSession(CatalogPlaybackSession session) async {
+    final hasCmaf = session.mediaTracks.any(
+      (track) => track.packaging == 'cmaf',
+    );
+    final hasLoc = session.mediaTracks.any((track) => track.packaging == 'loc');
+
+    if (hasCmaf && hasLoc) {
+      throw UnsupportedError(
+        'Mixed LOC and CMSF playback sessions are not supported',
+      );
+    }
+
+    if (hasCmaf) {
+      await _initializeCmaf(session);
+      return;
+    }
+
+    await initialize(session.mediaSubscriptions);
+  }
+
   /// Initialize the player with a single MoQ subscription (legacy API)
   Future<void> initializeSingle(MoQSubscription subscription) async {
     await initialize([subscription]);
@@ -175,11 +199,17 @@ class MoQVideoPlayer {
 
   void _handleMediaObject(MoQObject object) {
     final trackName = String.fromCharCodes(object.trackName);
+    if (trackName.endsWith('.timeline') || trackName.endsWith('.sap')) {
+      _logger.d('Ignoring timeline object on $trackName');
+      return;
+    }
     final isVideo = trackName.contains('video');
 
-    _logger.d('Received object on track $trackName: groupId=${object.groupId}, '
-        'objectId=${object.objectId}, status=${object.status}, '
-        'payloadSize=${object.payload?.length ?? 0}, headers=${object.extensionHeaders.length}');
+    _logger.d(
+      'Received object on track $trackName: groupId=${object.groupId}, '
+      'objectId=${object.objectId}, status=${object.status}, '
+      'payloadSize=${object.payload?.length ?? 0}, headers=${object.extensionHeaders.length}',
+    );
 
     if (object.status != ObjectStatus.normal || object.payload == null) {
       if (object.status == ObjectStatus.endOfTrack) {
@@ -203,7 +233,105 @@ class MoQVideoPlayer {
     _playbackPipeline?.processObject(object);
 
     _logger.d(
-        'Processed object: ${object.objectId}, ${object.payload!.length} bytes');
+      'Processed object: ${object.objectId}, ${object.payload!.length} bytes',
+    );
+  }
+
+  void _handleCmafObject(MoQObject object, CatalogTrack track) {
+    final trackName = String.fromCharCodes(object.trackName);
+    if (trackName.endsWith('.timeline') || trackName.endsWith('.sap')) {
+      _logger.d('Ignoring timeline object on $trackName');
+      return;
+    }
+
+    final isVideo = track.role == 'video' || trackName.contains('video');
+    final isAudio = track.role == 'audio' || trackName.contains('audio');
+
+    _logger.d(
+      'Received CMAF object on track $trackName: groupId=${object.groupId}, '
+      'objectId=${object.objectId}, status=${object.status}, '
+      'payloadSize=${object.payload?.length ?? 0}',
+    );
+
+    if (object.status != ObjectStatus.normal || object.payload == null) {
+      if (object.status == ObjectStatus.endOfTrack) {
+        _logger.i('Received end of track');
+      }
+      return;
+    }
+
+    _objectsReceived++;
+    _bytesReceived += object.payload!.length;
+
+    if (isVideo && !_handleVideoGroupTracking(object)) {
+      return;
+    }
+
+    _playbackPipeline?.processCmafObject(
+      object.payload!,
+      isVideo: isVideo,
+      isAudio: isAudio,
+    );
+  }
+
+  Future<void> _initializeCmaf(CatalogPlaybackSession session) async {
+    if (_isInitialized) {
+      _logger.w('Player already initialized');
+      return;
+    }
+
+    _logger.i(
+      'Initializing player with ${session.mediaSubscriptions.length} CMSF subscriptions',
+    );
+
+    _playbackPipeline = StreamingPlaybackPipeline();
+    await _playbackPipeline!.initialize();
+    _videoReadySubscription = _playbackPipeline!.onVideoReady.listen(
+      _handleVideoReady,
+    );
+
+    final cmafTracks = <CmafTrackInit>[];
+    final trackByName = <String, CatalogTrack>{};
+    for (final track in session.mediaTracks) {
+      if (track.packaging != 'cmaf') {
+        continue;
+      }
+      if (track.initData == null || track.initData!.isEmpty) {
+        throw StateError('CMSF track ${track.name} is missing initData');
+      }
+      trackByName[track.name] = track;
+      cmafTracks.add(
+        CmafTrackInit(
+          trackName: track.name,
+          initSegment: Uint8List.fromList(base64.decode(track.initData!)),
+          isVideo: track.role == 'video',
+          isAudio: track.role == 'audio',
+        ),
+      );
+    }
+
+    if (cmafTracks.isEmpty) {
+      throw StateError('Catalog session does not contain playable CMSF tracks');
+    }
+
+    _playbackPipeline!.configureDirectCmafPlayback(cmafTracks);
+
+    for (final subscription in session.mediaSubscriptions) {
+      final trackName = String.fromCharCodes(subscription.trackName);
+      final track = trackByName[trackName];
+      if (track == null) {
+        continue;
+      }
+      final sub = subscription.objectStream.listen(
+        (object) => _handleCmafObject(object, track),
+        onError: (error) => _logger.e('Object stream error: $error'),
+        onDone: () => _logger.i('Object stream closed'),
+      );
+      _objectSubscriptions.add(sub);
+    }
+
+    _isInitialized = true;
+    _logger.i('Player initialized with direct CMSF pipeline');
   }
 
   /// Handle video group tracking for mid-stream join detection
@@ -220,8 +348,10 @@ class MoQVideoPlayer {
       if (objectId != Int64.ZERO) {
         _joinedVideoMidGroup = true;
         _skippedVideoFrames++;
-        _logger.w('Detected mid-group join: groupId=$groupId, objectId=$objectId. '
-            'Skipping P-frames until next group with keyframe at objectId=0...');
+        _logger.w(
+          'Detected mid-group join: groupId=$groupId, objectId=$objectId. '
+          'Skipping P-frames until next group with keyframe at objectId=0...',
+        );
         return false; // Skip this frame - keyframe is at objectId=0 which we missed
       } else {
         // We joined at the start of a group - great!
@@ -233,22 +363,28 @@ class MoQVideoPlayer {
 
     // Check if this is a new group
     if (groupId != _currentVideoGroupId) {
-      _logger.i('New video group detected: $groupId (was $_currentVideoGroupId)');
+      _logger.i(
+        'New video group detected: $groupId (was $_currentVideoGroupId)',
+      );
       _currentVideoGroupId = groupId;
 
       // New group - check if we're at objectId=0
       if (objectId == Int64.ZERO) {
         if (_joinedVideoMidGroup && !_foundValidVideoStart) {
-          _logger.i('Found valid starting point! groupId=$groupId, objectId=0. '
-              'Skipped $_skippedVideoFrames frames from partial group.');
+          _logger.i(
+            'Found valid starting point! groupId=$groupId, objectId=0. '
+            'Skipped $_skippedVideoFrames frames from partial group.',
+          );
         }
         _foundValidVideoStart = true;
         _joinedVideoMidGroup = false;
         return true;
       } else {
         // New group but not at objectId=0 - shouldn't happen normally
-        _logger.w('New group $groupId but objectId=$objectId (not 0). '
-            'Continuing to wait for group with objectId=0...');
+        _logger.w(
+          'New group $groupId but objectId=$objectId (not 0). '
+          'Continuing to wait for group with objectId=0...',
+        );
         _skippedVideoFrames++;
         return false;
       }
@@ -261,8 +397,10 @@ class MoQVideoPlayer {
       // Still waiting for valid start - skip this P-frame
       _skippedVideoFrames++;
       if (_skippedVideoFrames % 10 == 0) {
-        _logger.d('Waiting for keyframe... skipped $_skippedVideoFrames video frames '
-            '(groupId=$groupId, objectId=$objectId)');
+        _logger.d(
+          'Waiting for keyframe... skipped $_skippedVideoFrames video frames '
+          '(groupId=$groupId, objectId=$objectId)',
+        );
       }
       return false;
     }
@@ -278,10 +416,7 @@ class MoQVideoPlayer {
   Future<void> _openMedia(String path) async {
     try {
       _logger.i('Opening combined A/V media: $path');
-      await _player.open(
-        Media(path),
-        play: true,
-      );
+      await _player.open(Media(path), play: true);
       _mediaOpened = true;
       _logger.i('Media opened, playback started');
     } catch (e) {
@@ -423,10 +558,7 @@ class _MoQVideoPlayerWidgetState extends State<MoQVideoPlayerWidget> {
         ),
 
         // Buffering indicator
-        if (_isBuffering)
-          const Center(
-            child: CircularProgressIndicator(),
-          ),
+        if (_isBuffering) const Center(child: CircularProgressIndicator()),
       ],
     );
   }
@@ -438,10 +570,7 @@ class _MoQVideoPlayerWidgetState extends State<MoQVideoPlayerWidget> {
         children: [
           const Icon(Icons.error_outline, size: 48, color: Colors.red),
           const SizedBox(height: 16),
-          Text(
-            'Playback Error',
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
+          Text('Playback Error', style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 8),
           Text(
             _errorMessage ?? 'Unknown error',
@@ -473,10 +602,7 @@ class _MoQVideoPlayerWidgetState extends State<MoQVideoPlayerWidget> {
 class MoQVideoControls extends StatelessWidget {
   final MoQVideoPlayer player;
 
-  const MoQVideoControls({
-    super.key,
-    required this.player,
-  });
+  const MoQVideoControls({super.key, required this.player});
 
   @override
   Widget build(BuildContext context) {
@@ -502,7 +628,10 @@ class MoQVideoControls extends StatelessWidget {
                       Expanded(
                         child: Slider(
                           value: position.inMilliseconds.toDouble(),
-                          max: duration.inMilliseconds.toDouble().clamp(1, double.infinity),
+                          max: duration.inMilliseconds.toDouble().clamp(
+                            1,
+                            double.infinity,
+                          ),
                           onChanged: (value) {
                             player.seek(Duration(milliseconds: value.toInt()));
                           },
@@ -596,11 +725,13 @@ class MoQStreamPlayer {
   final MoQClient _client;
   final Logger _logger;
   MoQVideoPlayer? _videoPlayer;
+  MoQCatalogSubscriber? _catalogSubscriber;
+  CatalogPlaybackSession? _catalogSession;
   final List<Int64> _subscriptionIds = [];
 
   MoQStreamPlayer({required MoQClient client, Logger? logger})
-      : _client = client,
-        _logger = logger ?? Logger();
+    : _client = client,
+      _logger = logger ?? Logger();
 
   /// Initialize player with existing subscriptions from MoQClient
   ///
@@ -666,6 +797,28 @@ class MoQStreamPlayer {
     return _videoPlayer!;
   }
 
+  Future<MoQVideoPlayer> subscribeCatalogAndPlay(
+    List<Uint8List> trackNamespace, {
+    String? videoTrackName,
+    String? audioTrackName,
+    bool includeTimelines = true,
+  }) async {
+    _catalogSubscriber ??= MoQCatalogSubscriber(
+      client: _client,
+      logger: _logger,
+    );
+    _catalogSession = await _catalogSubscriber!.subscribePlaybackTracks(
+      trackNamespace,
+      videoTrackName: videoTrackName,
+      audioTrackName: audioTrackName,
+      includeTimelines: includeTimelines,
+    );
+
+    _videoPlayer = MoQVideoPlayer(logger: _logger);
+    await _videoPlayer!.initializeCatalogSession(_catalogSession!);
+    return _videoPlayer!;
+  }
+
   /// Get the current video player
   MoQVideoPlayer? get player => _videoPlayer;
 
@@ -680,10 +833,17 @@ class MoQStreamPlayer {
       await _videoPlayer!.dispose();
       _videoPlayer = null;
     }
+
+    if (_catalogSession != null) {
+      await _catalogSession!.close();
+      _catalogSession = null;
+    }
   }
 
   /// Dispose resources
   Future<void> dispose() async {
     await stop();
+    await _catalogSubscriber?.dispose(unsubscribeCatalog: true);
+    _catalogSubscriber = null;
   }
 }

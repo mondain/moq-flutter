@@ -48,6 +48,7 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   MoQPublisher? _locPublisher;
   MoqMiPublisher? _moqMiPublisher;
   bool _isPublishing = false;
+  bool _isStopping = false;
   bool _isAudioMuted = false;
   bool _isVideoMuted = false;
   int _publishedFrames = 0;
@@ -68,7 +69,8 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   StreamSubscription<OpusFrame>? _opusFrameSubscription;
 
   // Linux preview frame
-  ui.Image? _linuxPreviewImage;
+  final ValueNotifier<ui.Image?> _linuxPreviewImageNotifier =
+      ValueNotifier<ui.Image?>(null);
   StreamSubscription<PreviewFrame>? _previewFrameSubscription;
 
   @override
@@ -79,6 +81,10 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
   @override
   void dispose() {
+    final previewImage = _linuxPreviewImageNotifier.value;
+    _linuxPreviewImageNotifier.value = null;
+    previewImage?.dispose();
+    _linuxPreviewImageNotifier.dispose();
     _stopPublishing();
     super.dispose();
   }
@@ -134,7 +140,9 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
           );
 
           _setStatus('Announcing namespace...');
-          await _cmafPublisher!.announce([widget.namespace], initTrackName: '0.mp4');
+          await _cmafPublisher!.announce([
+            widget.namespace,
+          ], initTrackName: '0.mp4');
           _setStatus('Catalog published, awaiting subscriptions...');
 
           await _cmafPublisher!.addVideoTrack(
@@ -284,7 +292,9 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
       // Subscribe to video frames -> FFmpeg encoder (non-macOS/iOS only)
       if (_h264Encoder != null) {
-        _videoFrameSubscription = _videoCapture!.videoFrames.listen((videoFrame) {
+        _videoFrameSubscription = _videoCapture!.videoFrames.listen((
+          videoFrame,
+        ) {
           _h264Encoder?.addFrame(videoFrame.data, videoFrame.timestampMs);
         });
       }
@@ -317,7 +327,9 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
               // Convert ms to microseconds for moq-mi
               final ptsUs = Int64(h264Frame.timestampMs) * Int64(1000);
               // Build AVC decoder config for keyframes
-              final avcConfig = h264Frame.isKeyframe ? _buildAvcDecoderConfig() : null;
+              final avcConfig = h264Frame.isKeyframe
+                  ? _buildAvcDecoderConfig()
+                  : null;
               await _moqMiPublisher!.publishVideoFrame(
                 payload: h264Frame.data,
                 pts: ptsUs,
@@ -327,9 +339,10 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
           }
 
           _publishedFrames++;
-          if (_publishedFrames % 30 == 0 && mounted) {
+          if (_publishedFrames % 10 == 0 && mounted) {
             setState(() {
-              _statusMessage = 'Publishing... $_publishedFrames video, $_publishedAudioFrames audio';
+              _statusMessage =
+                  'Publishing... $_publishedFrames video, $_publishedAudioFrames audio';
             });
           }
         } catch (e) {
@@ -342,18 +355,18 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
       // Linux preview
       if (_videoCapture is LinuxVideoCapture) {
-        _previewFrameSubscription = (_videoCapture as LinuxVideoCapture).previewFrames.listen(
-          (previewFrame) async {
-            try {
-              final image = await previewFrame.toImage();
-              if (mounted) {
-                setState(() => _linuxPreviewImage = image);
+        _previewFrameSubscription = (_videoCapture as LinuxVideoCapture)
+            .previewFrames
+            .listen((previewFrame) async {
+              try {
+                final image = await previewFrame.toImage();
+                final previousImage = _linuxPreviewImageNotifier.value;
+                _linuxPreviewImageNotifier.value = image;
+                previousImage?.dispose();
+              } catch (e) {
+                debugPrint('Error converting preview frame: $e');
               }
-            } catch (e) {
-              debugPrint('Error converting preview frame: $e');
-            }
-          },
-        );
+            });
       }
 
       if (mounted) setState(() {});
@@ -407,7 +420,10 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
       switch (_packagingFormat) {
         case PackagingFormat.cmaf:
           if (_cmafPublisher == null) return;
-          await _cmafPublisher!.publishAudioFrame(audioTrackName, opusFrame.data);
+          await _cmafPublisher!.publishAudioFrame(
+            audioTrackName,
+            opusFrame.data,
+          );
 
         case PackagingFormat.loc:
           if (_locPublisher == null) return;
@@ -430,9 +446,10 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
       _publishedAudioFrames++;
 
-      if (_publishedAudioFrames % 50 == 0 && mounted) {
+      if (_publishedAudioFrames % 10 == 0 && mounted) {
         setState(() {
-          _statusMessage = 'Publishing... $_publishedFrames video, $_publishedAudioFrames audio';
+          _statusMessage =
+              'Publishing... $_publishedFrames video, $_publishedAudioFrames audio';
         });
       }
     } catch (e) {
@@ -441,9 +458,19 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   }
 
   Future<void> _stopPublishing() async {
+    if (_isStopping) {
+      return;
+    }
+
+    _isStopping = true;
     _isPublishing = false;
     _isAudioMuted = false;
     _isVideoMuted = false;
+    _videoCapture = null;
+    _setStatus('Stopping publisher...');
+    if (mounted) {
+      setState(() {});
+    }
 
     // Stop subscriptions
     await _previewFrameSubscription?.cancel();
@@ -457,7 +484,9 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
     _h264FrameSubscription = null;
     _audioSamplesSubscription = null;
     _opusFrameSubscription = null;
-    _linuxPreviewImage = null;
+    final previewImage = _linuxPreviewImageNotifier.value;
+    _linuxPreviewImageNotifier.value = null;
+    previewImage?.dispose();
 
     // Stop video
     if (_videoCapture != null) {
@@ -504,6 +533,8 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
       await _moqMiPublisher!.stop();
       _moqMiPublisher = null;
     }
+
+    _isStopping = false;
   }
 
   Future<void> _disconnect() async {
@@ -524,20 +555,17 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
   @override
   Widget build(BuildContext context) {
     // Listen for connection loss
-    ref.listen<AsyncValue<bool>>(
-      connectionStateProvider,
-      (_, state) {
-        if (state.hasValue && !state.value! && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Connection lost'),
-              backgroundColor: Colors.red,
-            ),
-          );
-          context.go('/');
-        }
-      },
-    );
+    ref.listen<AsyncValue<bool>>(connectionStateProvider, (_, state) {
+      if (state.hasValue && !state.value! && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Connection lost'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        context.go('/');
+      }
+    });
 
     return Scaffold(
       appBar: AppBar(
@@ -561,17 +589,19 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
                     children: [
                       VideoPreview(
                         videoCapture: _videoCapture,
-                        linuxPreviewImage: _linuxPreviewImage,
+                        linuxPreviewImageListenable: _linuxPreviewImageNotifier,
                         publishedFrames: _publishedFrames,
+                        isStopping: _isStopping,
                       ),
                       PublishingControls(
                         isAudioMuted: _isAudioMuted,
                         isVideoMuted: _isVideoMuted,
                         videoFrames: _publishedFrames,
                         audioFrames: _publishedAudioFrames,
-                        onAudioMuteToggle: () => setState(() => _isAudioMuted = !_isAudioMuted),
-                        onVideoMuteToggle: () => setState(() => _isVideoMuted = !_isVideoMuted),
-                        onStop: _disconnect,
+                        onAudioMuteToggle: () =>
+                            setState(() => _isAudioMuted = !_isAudioMuted),
+                        onVideoMuteToggle: () =>
+                            setState(() => _isVideoMuted = !_isVideoMuted),
                       ),
                     ],
                   ),
@@ -596,14 +626,19 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
                         children: [
                           Text(
                             'Publishing Info',
-                            style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
+                            style: Theme.of(
+                              context,
+                            ).textTheme.titleMedium?.copyWith(fontSize: 16),
                           ),
                           const SizedBox(height: 8),
                           _buildInfoRow('Namespace', widget.namespace),
                           _buildInfoRow('Packaging', _packagingFormat.label),
                           _buildInfoRow('Video Track', _getVideoTrackName()),
                           _buildInfoRow('Audio Track', _getAudioTrackName()),
-                          _buildInfoRow('Resolution', '${_resolution.description} @ 30fps'),
+                          _buildInfoRow(
+                            'Resolution',
+                            '${_resolution.description} @ 30fps',
+                          ),
                           _buildInfoRow('Bitrate', _resolution.bitrateLabel),
                           _buildInfoRow('Audio', '48kHz stereo Opus'),
                         ],

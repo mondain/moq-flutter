@@ -316,7 +316,7 @@ pub extern "C" fn moq_quic_connect(
 
         // Build transport config with standard settings (from moq-native-ietf)
         let mut transport = TransportConfig::default();
-        transport.max_idle_timeout(Some(time::Duration::from_secs(30).try_into().unwrap()));
+        transport.max_idle_timeout(Some(time::Duration::from_secs(10).try_into().unwrap()));
         transport.keep_alive_interval(Some(time::Duration::from_secs(4)));
         transport.max_concurrent_bidi_streams(100u32.into());
         transport.max_concurrent_uni_streams(100u32.into());

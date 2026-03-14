@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
@@ -75,7 +76,7 @@ class AvccFmp4Muxer {
       sampleSizes: [frame.data.length],
       sampleDurations: [durationInTimescale],
       sampleFlags: [
-        frame.isKeyframe ? SampleFlags.keyframe : SampleFlags.nonKeyframe
+        frame.isKeyframe ? SampleFlags.keyframe : SampleFlags.nonKeyframe,
       ],
     );
 
@@ -175,15 +176,9 @@ class AvccFmp4Muxer {
   }
 
   Uint8List _createMdia() {
-    final mdhd = writeMdhd(
-      timescale: timescale,
-      duration: 0,
-    );
+    final mdhd = writeMdhd(timescale: timescale, duration: 0);
 
-    final hdlr = writeHdlr(
-      handlerType: 'vide',
-      name: 'VideoHandler',
-    );
+    final hdlr = writeHdlr(handlerType: 'vide', name: 'VideoHandler');
 
     final minf = _createMinf();
 
@@ -368,7 +363,8 @@ class AvccFmp4Muxer {
     var offset = 8; // Skip moof header
 
     // Skip mfhd
-    final mfhdSize = (result[offset] << 24) |
+    final mfhdSize =
+        (result[offset] << 24) |
         (result[offset + 1] << 16) |
         (result[offset + 2] << 8) |
         result[offset + 3];
@@ -378,14 +374,16 @@ class AvccFmp4Muxer {
     offset += 8;
 
     // Skip tfhd
-    final tfhdSize = (result[offset] << 24) |
+    final tfhdSize =
+        (result[offset] << 24) |
         (result[offset + 1] << 16) |
         (result[offset + 2] << 8) |
         result[offset + 3];
     offset += tfhdSize;
 
     // Skip tfdt
-    final tfdtSize = (result[offset] << 24) |
+    final tfdtSize =
+        (result[offset] << 24) |
         (result[offset + 1] << 16) |
         (result[offset + 2] << 8) |
         result[offset + 3];
@@ -535,15 +533,9 @@ class OpusStreamingMuxer {
   }
 
   Uint8List _createMdia() {
-    final mdhd = writeMdhd(
-      timescale: opusTimescale,
-      duration: 0,
-    );
+    final mdhd = writeMdhd(timescale: opusTimescale, duration: 0);
 
-    final hdlr = writeHdlr(
-      handlerType: 'soun',
-      name: 'SoundHandler',
-    );
+    final hdlr = writeHdlr(handlerType: 'soun', name: 'SoundHandler');
 
     final minf = _createMinf();
 
@@ -718,7 +710,8 @@ class OpusStreamingMuxer {
 
     var offset = 8;
 
-    final mfhdSize = (result[offset] << 24) |
+    final mfhdSize =
+        (result[offset] << 24) |
         (result[offset + 1] << 16) |
         (result[offset + 2] << 8) |
         result[offset + 3];
@@ -726,13 +719,15 @@ class OpusStreamingMuxer {
 
     offset += 8;
 
-    final tfhdSize = (result[offset] << 24) |
+    final tfhdSize =
+        (result[offset] << 24) |
         (result[offset + 1] << 16) |
         (result[offset + 2] << 8) |
         result[offset + 3];
     offset += tfhdSize;
 
-    final tfdtSize = (result[offset] << 24) |
+    final tfdtSize =
+        (result[offset] << 24) |
         (result[offset + 1] << 16) |
         (result[offset + 2] << 8) |
         result[offset + 3];
@@ -799,6 +794,8 @@ class StreamingPlaybackPipeline {
 
   int _videoSegmentsWritten = 0;
   int _audioSegmentsWritten = 0;
+  bool _directCmafMode = false;
+  bool _directCmafHasAudio = false;
 
   StreamingPlaybackPipeline({
     int videoWidth = 1920,
@@ -806,23 +803,23 @@ class StreamingPlaybackPipeline {
     int videoTimescale = 90000,
     int audioSampleRate = 48000,
     int audioChannels = 2,
-  })  : _mediaPipeline = MoqMediaPipeline(),
-        _videoMuxer = AvccFmp4Muxer(
-          width: videoWidth,
-          height: videoHeight,
-          timescale: videoTimescale,
-          trackId: 1,
-        ),
-        _opusMuxer = OpusStreamingMuxer(
-          sampleRate: audioSampleRate,
-          channels: audioChannels,
-          trackId: 2,
-        ),
-        _aacMuxer = AacFmp4Muxer(
-          sampleRate: audioSampleRate,
-          channels: audioChannels,
-          trackId: 2,
-        );
+  }) : _mediaPipeline = MoqMediaPipeline(),
+       _videoMuxer = AvccFmp4Muxer(
+         width: videoWidth,
+         height: videoHeight,
+         timescale: videoTimescale,
+         trackId: 1,
+       ),
+       _opusMuxer = OpusStreamingMuxer(
+         sampleRate: audioSampleRate,
+         channels: audioChannels,
+         trackId: 2,
+       ),
+       _aacMuxer = AacFmp4Muxer(
+         sampleRate: audioSampleRate,
+         channels: audioChannels,
+         trackId: 2,
+       );
 
   /// Stream that emits the combined media URL/path when ready for playback
   Stream<String> get onVideoReady => _readyController.stream;
@@ -832,7 +829,9 @@ class StreamingPlaybackPipeline {
 
   /// Get combined media path (HTTP URL or file path)
   String? get videoFilePath => _useHttp
-      ? (_server != null ? 'http://127.0.0.1:${_server!.port}/stream.mp4' : null)
+      ? (_server != null
+            ? 'http://127.0.0.1:${_server!.port}/stream.mp4'
+            : null)
       : _outputFile?.path;
 
   /// Statistics
@@ -847,8 +846,10 @@ class StreamingPlaybackPipeline {
       _useHttp = true;
 
       _server!.listen((request) {
-        debugPrint('StreamingPlayback: mpv connected to combined HTTP '
-            '(${request.method} ${request.uri})');
+        debugPrint(
+          'StreamingPlayback: mpv connected to combined HTTP '
+          '(${request.method} ${request.uri})',
+        );
         final response = request.response;
         response.headers.contentType = ContentType('video', 'mp4');
         response.headers.set('Transfer-Encoding', 'chunked');
@@ -861,7 +862,9 @@ class StreamingPlaybackPipeline {
         _outputBuffer.clear();
       });
 
-      debugPrint('StreamingPlayback: HTTP server started on port ${_server!.port}');
+      debugPrint(
+        'StreamingPlayback: HTTP server started on port ${_server!.port}',
+      );
 
       // Diagnostic: write a copy to file for ffprobe inspection
       final tempDir = await getTemporaryDirectory();
@@ -876,14 +879,18 @@ class StreamingPlaybackPipeline {
       // If no audio arrives within 3 seconds, proceed with video-only
       _audioWaitTimer = Timer(const Duration(seconds: 3), () {
         if (!_initWritten && _videoConfigReady && _detectedAudioType == null) {
-          debugPrint('StreamingPlayback: No audio detected after 3s, proceeding video-only');
+          debugPrint(
+            'StreamingPlayback: No audio detected after 3s, proceeding video-only',
+          );
           _audioEnabled = false;
           _writeCombinedInit();
           _flushPendingFrames();
         }
       });
     } catch (e) {
-      debugPrint('StreamingPlayback: HTTP setup failed ($e), falling back to file');
+      debugPrint(
+        'StreamingPlayback: HTTP setup failed ($e), falling back to file',
+      );
       _useHttp = false;
       await _server?.close();
       _server = null;
@@ -901,12 +908,171 @@ class StreamingPlaybackPipeline {
     _videoSubscription = _mediaPipeline.videoFrames.listen(_handleVideoFrame);
     _audioSubscription = _mediaPipeline.audioFrames.listen(_handleAudioFrame);
 
-    debugPrint('StreamingPlayback: Initialized (file), path=${_outputFile!.path}');
+    debugPrint(
+      'StreamingPlayback: Initialized (file), path=${_outputFile!.path}',
+    );
   }
 
   /// Process a MoQ object through the pipeline
   void processObject(dynamic object) {
     _mediaPipeline.processObject(object);
+  }
+
+  /// Configure the pipeline to accept raw CMAF objects directly.
+  void configureDirectCmafPlayback(List<CmafTrackInit> tracks) {
+    if (tracks.isEmpty) {
+      throw ArgumentError('At least one CMAF track is required');
+    }
+
+    final initSegment = buildCombinedCmafInitSegment(tracks);
+    _directCmafMode = true;
+    _directCmafHasAudio = tracks.any((track) => track.isAudio);
+    _audioEnabled = _directCmafHasAudio;
+    _initWritten = true;
+    _videoConfigReady = true;
+    _detectedAudioType = _directCmafHasAudio ? MediaFrameType.audioAac : null;
+    _write(initSegment);
+
+    debugPrint(
+      'StreamingPlayback: Direct CMAF init segment written '
+      '(${initSegment.length} bytes, audio=$_directCmafHasAudio)',
+    );
+  }
+
+  /// Process a raw CMAF segment payload from a subscription object.
+  void processCmafObject(
+    Uint8List payload, {
+    required bool isVideo,
+    required bool isAudio,
+  }) {
+    if (!_directCmafMode) {
+      throw StateError('Direct CMAF playback is not configured');
+    }
+    if (!_initWritten) {
+      throw StateError('Direct CMAF init segment must be written first');
+    }
+    if (payload.isEmpty) {
+      return;
+    }
+
+    final segment = Uint8List.fromList(payload);
+    _patchMoofSequence(segment, ++_globalSequenceNumber);
+    _write(segment);
+
+    if (isVideo) {
+      _videoSegmentsWritten++;
+      final readyThreshold = _useHttp ? 2 : 5;
+      if (_videoSegmentsWritten == readyThreshold) {
+        final path = videoFilePath!;
+        _readyController.add(path);
+        debugPrint(
+          'StreamingPlayback: Combined stream ready at $path '
+          '($readyThreshold video segments buffered)',
+        );
+      }
+    }
+
+    if (isAudio) {
+      _audioSegmentsWritten++;
+    }
+
+    if ((_videoSegmentsWritten + _audioSegmentsWritten) % 30 == 0) {
+      debugPrint(
+        'StreamingPlayback: Video=$_videoSegmentsWritten, '
+        'Audio=$_audioSegmentsWritten segments written',
+      );
+    }
+  }
+
+  static Uint8List buildCombinedCmafInitSegment(List<CmafTrackInit> tracks) {
+    if (tracks.isEmpty) {
+      throw ArgumentError('At least one CMAF track is required');
+    }
+
+    Uint8List? ftyp;
+    Uint8List? mvhd;
+    int mvhdTimescale = 1000;
+    final trakBoxes = <Uint8List>[];
+    final trackIds = <int>[];
+
+    for (final track in tracks) {
+      final init = track.initSegment;
+      final rootBoxes = _readMp4Boxes(init);
+
+      ftyp ??= _firstBoxData(rootBoxes, 'ftyp', init);
+      final moov = _firstBox(rootBoxes, 'moov');
+      if (moov == null) {
+        throw StateError('CMAF init segment is missing moov');
+      }
+
+      final moovBoxes = _readMp4Boxes(
+        init,
+        start: moov.contentStart,
+        end: moov.end,
+      );
+      mvhd ??= _firstBoxData(moovBoxes, 'mvhd', init);
+      if (mvhd != null) {
+        mvhdTimescale = _parseMvhdTimescale(mvhd) ?? mvhdTimescale;
+      }
+
+      for (final box in moovBoxes.where(
+        (candidate) => candidate.type == 'trak',
+      )) {
+        final trakData = init.sublist(box.start, box.end);
+        trakBoxes.add(trakData);
+        final trackId = _parseTrakTrackId(trakData);
+        if (trackId != null) {
+          trackIds.add(trackId);
+        }
+      }
+    }
+
+    if (ftyp == null || mvhd == null || trakBoxes.isEmpty) {
+      throw StateError('Unable to build combined CMAF init segment');
+    }
+
+    final uniqueTrackIds = <int>[];
+    for (final trackId in trackIds) {
+      if (!uniqueTrackIds.contains(trackId)) {
+        uniqueTrackIds.add(trackId);
+      }
+    }
+
+    final nextTrackId = uniqueTrackIds.isEmpty
+        ? 2
+        : uniqueTrackIds.reduce(math.max) + 1;
+    final combinedMvhd = writeMvhd(
+      timescale: mvhdTimescale,
+      duration: 0,
+      nextTrackId: nextTrackId,
+    );
+    final mvex = uniqueTrackIds.length <= 1
+        ? writeMvex(trackId: uniqueTrackIds.isEmpty ? 1 : uniqueTrackIds.first)
+        : writeMvexMultiTrack(uniqueTrackIds);
+
+    final moovSize =
+        8 +
+        combinedMvhd.length +
+        trakBoxes.fold<int>(0, (sum, box) => sum + box.length) +
+        mvex.length;
+    final moov = Uint8List(moovSize);
+    final header = writeBoxHeader(moovSize, 'moov');
+
+    var offset = 0;
+    moov.setAll(offset, Uint8List.view(header.buffer));
+    offset += 8;
+    moov.setAll(offset, combinedMvhd);
+    offset += combinedMvhd.length;
+    for (final trak in trakBoxes) {
+      moov.setAll(offset, trak);
+      offset += trak.length;
+    }
+    moov.setAll(offset, mvex);
+
+    final result = Uint8List(ftyp.length + moov.length);
+    result.setAll(0, ftyp);
+    result.setAll(ftyp.length, moov);
+    return result;
   }
 
   /// Write data to the single combined output stream
@@ -928,8 +1094,10 @@ class StreamingPlaybackPipeline {
     // Extract AVC decoder config when available
     if (!_videoConfigReady && frame.codecConfig != null) {
       final config = frame.codecConfig!;
-      debugPrint('StreamingPlayback: AVC config ${config.length} bytes: '
-          '${config.take(20).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
+      debugPrint(
+        'StreamingPlayback: AVC config ${config.length} bytes: '
+        '${config.take(20).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}',
+      );
       _videoMuxer.setAvcDecoderConfig(config);
       _videoConfigReady = true;
     }
@@ -1007,18 +1175,22 @@ class StreamingPlaybackPipeline {
     );
 
     // Assemble moov box
-    final moovContentSize = mvhd.length + videoTrak.length +
-        (audioTrak?.length ?? 0) + mvex.length;
+    final moovContentSize =
+        mvhd.length + videoTrak.length + (audioTrak?.length ?? 0) + mvex.length;
     final moovSize = 8 + moovContentSize;
     final moov = Uint8List(moovSize);
     final moovHeader = writeBoxHeader(moovSize, 'moov');
 
     var offset = 0;
-    moov.setAll(offset, Uint8List.view(moovHeader.buffer)); offset += 8;
-    moov.setAll(offset, mvhd); offset += mvhd.length;
-    moov.setAll(offset, videoTrak); offset += videoTrak.length;
+    moov.setAll(offset, Uint8List.view(moovHeader.buffer));
+    offset += 8;
+    moov.setAll(offset, mvhd);
+    offset += mvhd.length;
+    moov.setAll(offset, videoTrak);
+    offset += videoTrak.length;
     if (audioTrak != null) {
-      moov.setAll(offset, audioTrak); offset += audioTrak.length;
+      moov.setAll(offset, audioTrak);
+      offset += audioTrak.length;
     }
     moov.setAll(offset, mvex);
 
@@ -1030,9 +1202,11 @@ class StreamingPlaybackPipeline {
     _write(initSegment);
     _initWritten = true;
 
-    debugPrint('StreamingPlayback: Combined init segment written '
-        '(${initSegment.length} bytes, audio=$hasAudio, '
-        'audioType=$_detectedAudioType)');
+    debugPrint(
+      'StreamingPlayback: Combined init segment written '
+      '(${initSegment.length} bytes, audio=$hasAudio, '
+      'audioType=$_detectedAudioType)',
+    );
   }
 
   /// Flush buffered frames after init segment is written
@@ -1054,10 +1228,15 @@ class StreamingPlaybackPipeline {
     if (!_initWritten || !_videoConfigReady) return;
 
     if (_videoSegmentsWritten == 0) {
-      final dataPreview = frame.data.take(16).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
-      debugPrint('StreamingPlayback: First video frame: ${frame.data.length} bytes, '
-          'keyframe=${frame.isKeyframe}, duration=${frame.duration}, '
-          'timebase=${frame.timebase}, data: $dataPreview');
+      final dataPreview = frame.data
+          .take(16)
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join(' ');
+      debugPrint(
+        'StreamingPlayback: First video frame: ${frame.data.length} bytes, '
+        'keyframe=${frame.isKeyframe}, duration=${frame.duration}, '
+        'timebase=${frame.timebase}, data: $dataPreview',
+      );
     }
 
     final segment = _videoMuxer.createMediaSegment(frame);
@@ -1069,13 +1248,17 @@ class StreamingPlaybackPipeline {
     if (_videoSegmentsWritten == readyThreshold) {
       final path = videoFilePath!;
       _readyController.add(path);
-      debugPrint('StreamingPlayback: Combined stream ready at $path '
-          '($readyThreshold video segments buffered)');
+      debugPrint(
+        'StreamingPlayback: Combined stream ready at $path '
+        '($readyThreshold video segments buffered)',
+      );
     }
 
     if (_videoSegmentsWritten % 30 == 0) {
-      debugPrint('StreamingPlayback: Video=$_videoSegmentsWritten, '
-          'Audio=$_audioSegmentsWritten segments written');
+      debugPrint(
+        'StreamingPlayback: Video=$_videoSegmentsWritten, '
+        'Audio=$_audioSegmentsWritten segments written',
+      );
     }
   }
 
@@ -1115,8 +1298,12 @@ class StreamingPlaybackPipeline {
     _audioWaitTimer?.cancel();
     _audioWaitTimer = null;
 
-    try { await _response?.close(); } catch (_) {}
-    try { await _server?.close(); } catch (_) {}
+    try {
+      await _response?.close();
+    } catch (_) {}
+    try {
+      await _server?.close();
+    } catch (_) {}
     _response = null;
     _server = null;
     _clientReady = false;
@@ -1152,6 +1339,8 @@ class StreamingPlaybackPipeline {
     _aacMuxer.reset();
 
     _initWritten = false;
+    _directCmafMode = false;
+    _directCmafHasAudio = false;
     _videoConfigReady = false;
     _detectedAudioType = null;
     _audioEnabled = true;
@@ -1174,4 +1363,106 @@ class StreamingPlaybackPipeline {
     _readyController.close();
     _mediaPipeline.dispose();
   }
+}
+
+class CmafTrackInit {
+  final String trackName;
+  final Uint8List initSegment;
+  final bool isVideo;
+  final bool isAudio;
+
+  const CmafTrackInit({
+    required this.trackName,
+    required this.initSegment,
+    this.isVideo = false,
+    this.isAudio = false,
+  });
+}
+
+class _Mp4Box {
+  final String type;
+  final int start;
+  final int size;
+
+  const _Mp4Box({required this.type, required this.start, required this.size});
+
+  int get contentStart => start + 8;
+  int get end => start + size;
+}
+
+List<_Mp4Box> _readMp4Boxes(Uint8List data, {int start = 0, int? end}) {
+  final limit = end ?? data.length;
+  final boxes = <_Mp4Box>[];
+  var offset = start;
+
+  while (offset + 8 <= limit) {
+    final size =
+        (data[offset] << 24) |
+        (data[offset + 1] << 16) |
+        (data[offset + 2] << 8) |
+        data[offset + 3];
+    if (size < 8 || offset + size > limit) {
+      break;
+    }
+    final type = String.fromCharCodes(data.sublist(offset + 4, offset + 8));
+    boxes.add(_Mp4Box(type: type, start: offset, size: size));
+    offset += size;
+  }
+
+  return boxes;
+}
+
+_Mp4Box? _firstBox(List<_Mp4Box> boxes, String type) {
+  for (final box in boxes) {
+    if (box.type == type) {
+      return box;
+    }
+  }
+  return null;
+}
+
+Uint8List? _firstBoxData(List<_Mp4Box> boxes, String type, Uint8List source) {
+  final box = _firstBox(boxes, type);
+  if (box == null) {
+    return null;
+  }
+  return source.sublist(box.start, box.end);
+}
+
+int? _parseMvhdTimescale(Uint8List mvhd) {
+  if (mvhd.length < 24) {
+    return null;
+  }
+  final version = mvhd[8];
+  if (version == 0 && mvhd.length >= 24) {
+    return (mvhd[20] << 24) | (mvhd[21] << 16) | (mvhd[22] << 8) | mvhd[23];
+  }
+  if (version == 1 && mvhd.length >= 32) {
+    return (mvhd[28] << 24) | (mvhd[29] << 16) | (mvhd[30] << 8) | mvhd[31];
+  }
+  return null;
+}
+
+int? _parseTrakTrackId(Uint8List trak) {
+  final children = _readMp4Boxes(trak, start: 8);
+  final tkhd = _firstBox(children, 'tkhd');
+  if (tkhd == null) {
+    return null;
+  }
+  final version = trak[tkhd.start + 8];
+  if (version == 0 && tkhd.size >= 24) {
+    final offset = tkhd.start + 20;
+    return (trak[offset] << 24) |
+        (trak[offset + 1] << 16) |
+        (trak[offset + 2] << 8) |
+        trak[offset + 3];
+  }
+  if (version == 1 && tkhd.size >= 36) {
+    final offset = tkhd.start + 28;
+    return (trak[offset] << 24) |
+        (trak[offset + 1] << 16) |
+        (trak[offset + 2] << 8) |
+        trak[offset + 3];
+  }
+  return null;
 }

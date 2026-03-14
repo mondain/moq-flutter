@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:ffi';
-import 'dart:io';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 import 'package:logger/logger.dart';
 import 'package:opus_dart/opus_dart.dart' as opus_dart;
@@ -27,11 +27,9 @@ class NativeOpusEncoder {
 
   static bool _opusInitialized = false;
 
-  NativeOpusEncoder({
-    OpusEncoderConfig? config,
-    Logger? logger,
-  })  : config = config ?? const OpusEncoderConfig(),
-        _logger = logger ?? Logger();
+  NativeOpusEncoder({OpusEncoderConfig? config, Logger? logger})
+    : config = config ?? const OpusEncoderConfig(),
+      _logger = logger ?? Logger();
 
   /// Stream of encoded Opus frames
   Stream<OpusFrame> get frames => _frameController.stream;
@@ -70,8 +68,13 @@ class NativeOpusEncoder {
       ]);
     } else {
       paths.addAll([
+        '/lib/x86_64-linux-gnu/libopus.so',
+        '/usr/lib/x86_64-linux-gnu/libopus.so',
+        '/usr/local/lib/libopus.so',
         'libopus.so.0', // Linux system
         'libopus.so', // Linux fallback
+        '/lib/x86_64-linux-gnu/libopus.so.0',
+        '/usr/lib/x86_64-linux-gnu/libopus.so.0',
       ]);
     }
 
@@ -108,8 +111,10 @@ class NativeOpusEncoder {
     _currentTimestampMs = 0;
     _pcmBuffer.clear();
 
-    _logger.i('Native Opus encoder started '
-        '(${config.sampleRate}Hz, ${config.channels}ch, libopus ${opus_dart.getOpusVersion()})');
+    _logger.i(
+      'Native Opus encoder started '
+      '(${config.sampleRate}Hz, ${config.channels}ch, libopus ${opus_dart.getOpusVersion()})',
+    );
   }
 
   /// Add raw PCM audio samples to encode
@@ -143,12 +148,14 @@ class NativeOpusEncoder {
       try {
         final encoded = _encoder!.encode(input: int16Data);
 
-        _frameController.add(OpusFrame(
-          data: encoded,
-          timestampMs: _currentTimestampMs,
-          durationMs: config.frameDurationMs,
-          sequenceNumber: _sequenceNumber++,
-        ));
+        _frameController.add(
+          OpusFrame(
+            data: encoded,
+            timestampMs: _currentTimestampMs,
+            durationMs: config.frameDurationMs,
+            sequenceNumber: _sequenceNumber++,
+          ),
+        );
 
         _currentTimestampMs += config.frameDurationMs;
       } catch (e) {
