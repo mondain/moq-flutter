@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:ffi';
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
 import 'dart:typed_data';
 import 'package:logger/logger.dart';
 import 'package:opus_dart/opus_dart.dart' as opus_dart;
