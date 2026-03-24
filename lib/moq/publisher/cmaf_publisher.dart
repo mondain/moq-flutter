@@ -61,9 +61,19 @@ class CmafPublisher {
   StreamSubscription<MoQSubscribeRequest>? _subscribeSubscription;
   final _pendingSubscribes = <Int64, MoQSubscribeRequest>{};
 
-  CmafPublisher({required MoQClient client, Logger? logger})
-    : _client = client,
-      _logger = logger ?? Logger();
+  // Auto-forward mode: send PUBLISH messages instead of waiting for SUBSCRIBE
+  final bool _autoForward;
+
+  CmafPublisher({
+    required MoQClient client,
+    Logger? logger,
+    bool autoForward = false,
+  }) : _client = client,
+       _autoForward = autoForward,
+       _logger = logger ?? Logger();
+
+  /// Get whether auto-forward mode is enabled
+  bool get autoForward => _autoForward;
 
   /// Get whether namespace is announced
   bool get isAnnounced => _isAnnounced;
@@ -185,10 +195,15 @@ class CmafPublisher {
       // Publish catalog immediately after PUBLISH_NAMESPACE_OK
       await _publishCatalog();
 
-      // Start handling incoming SUBSCRIBE requests
-      _startSubscribeHandler();
-
-      _logger.i('Publisher ready - catalog published, awaiting subscriptions');
+      if (_autoForward) {
+        // Auto-forward mode: proactively send PUBLISH for each track
+        await _forwardPublishedTracks();
+        _logger.i('Publisher ready - catalog published, PUBLISH sent for tracks');
+      } else {
+        // Default mode: wait for incoming SUBSCRIBE requests
+        _startSubscribeHandler();
+        _logger.i('Publisher ready - catalog published, awaiting subscriptions');
+      }
     } catch (e) {
       _logger.e('Failed to announce namespace: $e');
       rethrow;
@@ -246,6 +261,76 @@ class CmafPublisher {
           ),
         );
       }
+    }
+  }
+
+  /// Send PUBLISH messages for all configured tracks (auto-forward mode)
+  ///
+  /// Sends PUBLISH for the catalog track and each configured media track,
+  /// then waits for PUBLISH_OK from the relay before objects can be published.
+  Future<void> _forwardPublishedTracks() async {
+    // Send PUBLISH for catalog track
+    const catalogName = MoQCatalog.catalogTrackName;
+    if (!_tracks.containsKey(catalogName)) {
+      _tracks[catalogName] = CmafTrack(
+        name: catalogName,
+        alias: _allocateTrackAlias(),
+        priority: 255,
+      );
+    }
+    final catalogTrack = _tracks[catalogName]!;
+
+    _logger.i('Sending PUBLISH for catalog track: $catalogName');
+    // Fire-and-forget: we do not block on PUBLISH_OK for each track
+    // but we do send them all and let the relay respond asynchronously
+    unawaited(
+      _client.sendPublish(
+        trackNamespace: _namespace!,
+        trackName: Uint8List.fromList(catalogName.codeUnits),
+        trackAlias: catalogTrack.alias,
+        groupOrder: GroupOrder.ascending,
+        contentExists: _catalogPublished,
+        forward: 1,
+      ),
+    );
+
+    // Send PUBLISH for each configured media track
+    for (final config in _trackConfigs.values) {
+      final track =
+          _tracks[config.name] ??
+          CmafTrack(
+            name: config.name,
+            alias: _allocateTrackAlias(),
+            priority: config.priority,
+          );
+      _tracks[config.name] = track;
+
+      _logger.i('Sending PUBLISH for track: ${config.name}');
+      unawaited(
+        _client.sendPublish(
+          trackNamespace: _namespace!,
+          trackName: Uint8List.fromList(config.name.codeUnits),
+          trackAlias: track.alias,
+          groupOrder: GroupOrder.ascending,
+          contentExists: false,
+          forward: 1,
+        ),
+      );
+    }
+
+    // Send PUBLISH for timeline tracks
+    for (final entry in _timelineTracks.entries) {
+      _logger.i('Sending PUBLISH for timeline track: ${entry.key}');
+      unawaited(
+        _client.sendPublish(
+          trackNamespace: _namespace!,
+          trackName: Uint8List.fromList(entry.key.codeUnits),
+          trackAlias: entry.value.alias,
+          groupOrder: GroupOrder.ascending,
+          contentExists: false,
+          forward: 1,
+        ),
+      );
     }
   }
 

@@ -45,6 +45,9 @@ class MoQClient {
   // Active fetches
   final _activeFetches = <Int64, MoQFetch>{};
 
+  // Pending outgoing PUBLISH requests (publisher mode - waiting for PUBLISH_OK)
+  final _pendingOutgoingPublishes = <Int64, Completer<PublishOkMessage>>{};
+
   // Incoming publish requests (server mode)
   final _incomingPublishController =
       StreamController<MoQPublishRequest>.broadcast();
@@ -545,6 +548,54 @@ class MoQClient {
       }
       return true;
     });
+  }
+
+  /// Send a PUBLISH message to proactively offer a track to the relay
+  ///
+  /// This sends PUBLISH and waits for PUBLISH_OK from the relay/subscriber.
+  /// Used in auto-forward mode where the publisher pushes tracks rather than
+  /// waiting for incoming SUBSCRIBE requests.
+  Future<PublishOkMessage> sendPublish({
+    required List<Uint8List> trackNamespace,
+    required Uint8List trackName,
+    required Int64 trackAlias,
+    GroupOrder groupOrder = GroupOrder.ascending,
+    bool contentExists = false,
+    Location? largestLocation,
+    int forward = 1,
+    List<KeyValuePair> parameters = const [],
+  }) async {
+    if (!_isConnected) {
+      throw StateError('Not connected');
+    }
+
+    final requestId = _getNextRequestId();
+
+    _logger.i(
+      'Sending PUBLISH for track: '
+      '${trackNamespace.map((n) => String.fromCharCodes(n)).join("/")}/'
+      '${String.fromCharCodes(trackName)}',
+    );
+
+    final message = PublishMessage(
+      requestId: requestId,
+      trackNamespace: trackNamespace,
+      trackName: trackName,
+      trackAlias: trackAlias,
+      groupOrder: groupOrder,
+      contentExists: contentExists,
+      largestLocation: largestLocation,
+      forward: forward,
+      parameters: parameters,
+    );
+
+    await _transport.send(message.serialize(version: _selectedVersion));
+
+    // Store completer to wait for PUBLISH_OK
+    final completer = Completer<PublishOkMessage>();
+    _pendingOutgoingPublishes[requestId] = completer;
+
+    return completer.future;
   }
 
   /// Fetch past objects from a track (standalone fetch)
@@ -1322,6 +1373,9 @@ class MoQClient {
       case MoQMessageType.publish:
         _handlePublish(message as PublishMessage);
         break;
+      case MoQMessageType.publishOk:
+        _handlePublishOkResponse(message as PublishOkMessage);
+        break;
       case MoQMessageType.subscribe:
         _handleSubscribeRequest(message as SubscribeMessage);
         break;
@@ -1756,6 +1810,21 @@ class MoQClient {
 
     _pendingPublishRequests[message.requestId] = request;
     _incomingPublishController.add(request);
+  }
+
+  /// Handle PUBLISH_OK response for outgoing PUBLISH requests
+  void _handlePublishOkResponse(PublishOkMessage message) {
+    final completer = _pendingOutgoingPublishes.remove(message.requestId);
+    if (completer != null) {
+      completer.complete(message);
+      _logger.i(
+        'PUBLISH_OK received for request: ${message.requestId}',
+      );
+    } else {
+      _logger.w(
+        'Received PUBLISH_OK for unknown request: ${message.requestId}',
+      );
+    }
   }
 
   /// Accept a PUBLISH request (server mode)

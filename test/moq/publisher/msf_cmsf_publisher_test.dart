@@ -200,6 +200,100 @@ void main() {
     });
   });
 
+  group('Auto-forward publishing mode', () {
+    test('sends PUBLISH messages for tracks when autoForward is true',
+        () async {
+      // Track request IDs from PUBLISH_NAMESPACE and PUBLISH messages
+      int publishNamespaceRequestId = -1;
+      final publishRequestIds = <int>[];
+
+      transport.onControlMessageSent = (data) {
+        if (data.isNotEmpty && data[0] == 0x20) {
+          // CLIENT_SETUP -> respond with SERVER_SETUP
+          Future.microtask(() {
+            transport.simulateIncomingControlData(
+              ServerSetupMessage(selectedVersion: MoQVersion.draft14).serialize(),
+            );
+          });
+        } else if (data.isNotEmpty && data[0] == 0x06) {
+          // PUBLISH_NAMESPACE -> respond with PUBLISH_NAMESPACE_OK
+          // Parse request ID from the message (after type byte + 2-byte length)
+          final payload = data.sublist(3);
+          final (reqId, _) = MoQWireFormat.decodeVarint(payload, 0);
+          publishNamespaceRequestId = reqId;
+          Future.microtask(() {
+            transport.simulateIncomingControlData(
+              PublishNamespaceOkMessage(requestId: Int64(reqId)).serialize(),
+            );
+          });
+        } else if (data.isNotEmpty && data[0] == 0x1D) {
+          // PUBLISH -> respond with PUBLISH_OK
+          final payload = data.sublist(3);
+          final (reqId, _) = MoQWireFormat.decodeVarint(payload, 0);
+          publishRequestIds.add(reqId);
+          Future.microtask(() {
+            transport.simulateIncomingControlData(
+              PublishOkMessage(
+                requestId: Int64(reqId),
+                forward: 1,
+                subscriberPriority: 128,
+                groupOrder: GroupOrder.ascending,
+                filterType: FilterType.largestObject,
+              ).serialize(),
+            );
+          });
+        }
+      };
+
+      await client.connect('localhost', 4443);
+      final publisher = CmafPublisher(
+        client: client,
+        autoForward: true,
+      );
+
+      publisher.configureVideoTrack('video0', width: 640, height: 480);
+      publisher.configureAudioTrack('audio0');
+      await publisher.announce(['live']);
+
+      // Allow microtasks to process PUBLISH_OK responses
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      // Verify PUBLISH_NAMESPACE was sent
+      expect(publishNamespaceRequestId, greaterThanOrEqualTo(0),
+          reason: 'Expected PUBLISH_NAMESPACE to have been sent');
+
+      // Verify PUBLISH messages were sent (catalog + video + audio + timelines)
+      final publishMessages = transport.sentControlMessages.where(
+        (msg) => msg.isNotEmpty && msg[0] == 0x1D,
+      ).toList();
+      // Expect at least 3: catalog, video0, audio0
+      expect(publishMessages.length, greaterThanOrEqualTo(3),
+          reason: 'Expected PUBLISH messages for catalog and media tracks');
+
+      // Verify auto-forward flag
+      expect(publisher.autoForward, isTrue);
+    });
+
+    test('does not send PUBLISH messages when autoForward is false', () async {
+      await client.connect('localhost', 4443);
+      final publisher = CmafPublisher(client: client);
+
+      publisher.configureAudioTrack('audio0');
+      await publisher.announce(['live']);
+
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      // No PUBLISH messages should be sent (only CLIENT_SETUP and PUBLISH_NAMESPACE)
+      final publishMessages = transport.sentControlMessages.where(
+        (msg) => msg.isNotEmpty && msg[0] == 0x1D,
+      ).toList();
+      expect(publishMessages, isEmpty,
+          reason: 'No PUBLISH messages should be sent in default mode');
+
+      expect(publisher.autoForward, isFalse);
+    });
+  });
+
   group('CMSF catalog', () {
     test(
       'publishes per-track initData instead of relying on initTrack',
