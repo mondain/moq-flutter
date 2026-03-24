@@ -95,5 +95,46 @@ void main() {
         expect(timelineTrack.parentName, equals('audio0'));
       },
     );
+
+    test(
+      'publishes init segment on media tracks at group 0 object 0',
+      () async {
+        await client.connect('localhost', 4443);
+        final publisher = CmafPublisher(client: client);
+
+        publisher.configureAudioTrack('audio0');
+        await publisher.announce(['live']);
+
+        // Clear messages from announce/catalog so we only see init publish
+        transport.clearSentMessages();
+
+        await publisher.addAudioTrack('audio0');
+        await publisher.setAudioReady('audio0');
+
+        // After setAudioReady, init segments should be published on media
+        // tracks plus the catalog is re-published. Find the streams that
+        // carry the init segment (group 0, subgroup 0, object 0).
+        //
+        // sentStreamData should contain:
+        //   - 1 stream for the audio init segment on the media track
+        //   - 1 stream for the re-published catalog
+        // Each stream has 2 writes: subgroup header + object.
+        expect(transport.sentStreamData.length, greaterThanOrEqualTo(2));
+
+        // Verify at least one stream wrote exactly 2 chunks (header + object)
+        // and the object payload is non-empty (init segment bytes)
+        bool foundInitStream = false;
+        for (final writes in transport.sentStreamData.values) {
+          if (writes.length == 2) {
+            // The second write is the object; check it has content
+            if (writes[1].isNotEmpty) {
+              foundInitStream = true;
+            }
+          }
+        }
+        expect(foundInitStream, isTrue,
+            reason: 'Expected at least one stream with init segment data');
+      },
+    );
   });
 }

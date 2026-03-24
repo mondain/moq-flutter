@@ -503,10 +503,48 @@ class CmafPublisher {
     if (!allReady) return;
 
     _refreshCatalogInitData();
+    await _publishInitOnMediaTracks();
     _initPublished = true;
 
     // Re-publish catalog with updated codec info
     await _publishCatalog();
+  }
+
+  /// Publish init segment (ftyp+moov) as group 0, object 0 on each media track
+  Future<void> _publishInitOnMediaTracks() async {
+    for (final entry in _tracks.entries) {
+      final track = entry.value;
+      Uint8List? initSegment;
+
+      if (track is CmafVideoTrack) {
+        if (!track.muxer.isInitReady) continue;
+        initSegment = track.muxer.initSegment;
+      } else if (track is CmafAudioTrack) {
+        initSegment = track.muxer.initSegment;
+      }
+
+      if (initSegment == null) continue;
+
+      final streamId = await _client.openDataStream();
+      await _client.writeSubgroupHeader(
+        streamId,
+        trackAlias: track.alias,
+        groupId: Int64.ZERO,
+        subgroupId: Int64.ZERO,
+        publisherPriority: track.priority,
+      );
+      await _client.writeObject(
+        streamId,
+        objectId: Int64.ZERO,
+        payload: initSegment,
+        status: ObjectStatus.endOfGroup,
+      );
+      await _client.finishDataStream(streamId);
+      _logger.i(
+        'Published init segment on track ${entry.key} '
+        '(${initSegment.length} bytes)',
+      );
+    }
   }
 
   void _refreshCatalogInitData() {
