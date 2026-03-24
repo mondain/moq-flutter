@@ -31,6 +31,9 @@ class MockMoQTransport implements MoQTransport {
   bool get isConnected => _isConnected;
 
   @override
+  int get maxDatagramSize => 65536; // Mock supports datagrams
+
+  @override
   Stream<bool> get connectionStateStream => _connectionStateController.stream;
 
   @override

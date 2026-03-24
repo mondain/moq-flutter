@@ -478,6 +478,14 @@ pub extern "C" fn moq_webtransport_connect(
         }
     });
 
+    // Log datagram capability after H3 SETTINGS exchange
+    let wt_max_dgram = session_arc.max_datagram_size();
+    if wt_max_dgram > 0 {
+        log::info!("WebTransport datagrams supported, max payload: {} bytes (after H3 framing overhead)", wt_max_dgram);
+    } else {
+        log::warn!("WebTransport datagrams NOT supported (H3 SETTINGS_H3_DATAGRAM not negotiated or max_datagram_frame_size=0)");
+    }
+
     // Initialize datagram buffer for this session
     let datagram_buffers = WT_DATAGRAM_BUFFERS.get().expect("Datagram buffers not initialized");
     datagram_buffers.insert(session_id, Arc::new(tokio::sync::Mutex::new(VecDeque::new())));
@@ -1138,4 +1146,29 @@ pub extern "C" fn moq_webtransport_get_last_error(
     } else {
         0
     }
+}
+
+/// Query the maximum WebTransport datagram payload size.
+///
+/// This reflects the H3-level datagram size after SETTINGS_H3_DATAGRAM negotiation
+/// and H3 framing overhead subtracted from the QUIC max_datagram_frame_size.
+///
+/// # Returns
+/// * Max datagram payload size in bytes if datagrams are supported, 0 if not supported,
+///   negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_webtransport_max_datagram_size(
+    session_id: u64,
+) -> i64 {
+    let sessions = WT_SESSIONS.get().expect("Sessions not initialized");
+
+    let session = match sessions.get(&session_id) {
+        Some(s) => s.clone(),
+        None => {
+            log::error!("Session {} not found for max_datagram_size", session_id);
+            return -1;
+        }
+    };
+
+    session.max_datagram_size() as i64
 }

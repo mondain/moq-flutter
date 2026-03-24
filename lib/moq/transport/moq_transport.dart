@@ -64,6 +64,10 @@ abstract class MoQTransport {
   /// Each datagram contains a complete OBJECT_DATAGRAM message
   Stream<Uint8List> get incomingDatagrams;
 
+  /// Get the max datagram payload size negotiated with the peer.
+  /// Returns 0 if the peer does not support datagrams, -1 if not connected.
+  int get maxDatagramSize;
+
   /// Get the underlying transport statistics
   MoQTransportStats get stats;
 

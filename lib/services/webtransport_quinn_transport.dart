@@ -52,9 +52,13 @@ class WebTransportQuinnTransport extends MoQTransport {
   _StreamFinishFunc? _moqWtStreamFinish;
   _SendDatagramFunc? _moqWtSendDatagram;
   _RecvDatagramFunc? _moqWtRecvDatagram;
+  _MaxDatagramSizeFunc? _moqWtMaxDatagramSize;
 
   Timer? _pollTimer;
   bool _nativeLibraryLoaded = false;
+
+  /// Whether the native WebTransport library was loaded successfully.
+  bool get isNativeLibraryLoaded => _nativeLibraryLoaded;
 
   WebTransportQuinnTransport({Logger? logger, String path = '/moq'})
     : _logger = logger ?? Logger(),
@@ -161,6 +165,11 @@ class WebTransportQuinnTransport extends MoQTransport {
               NativeInt64 Function(NativeUint64, Pointer<Uint8>, NativeIntPtr)
             >
           >('moq_webtransport_recv_datagram')
+          .asFunction();
+      _moqWtMaxDatagramSize = _nativeLib!
+          .lookup<NativeFunction<NativeInt64 Function(NativeUint64)>>(
+            'moq_webtransport_max_datagram_size',
+          )
           .asFunction();
 
       // Initialize the native library
@@ -270,6 +279,14 @@ class WebTransportQuinnTransport extends MoQTransport {
   bool get isConnected => _isConnected && _sessionId >= 0;
 
   @override
+  int get maxDatagramSize {
+    if (!_isConnected || _sessionId < 0) return -1;
+    if (_moqWtMaxDatagramSize == null) return -1;
+    final size = _moqWtMaxDatagramSize!(_sessionId);
+    return size > 0 ? size : 0;
+  }
+
+  @override
   Stream<bool> get connectionStateStream => _connectionStateController.stream;
 
   @override
@@ -348,6 +365,14 @@ class WebTransportQuinnTransport extends MoQTransport {
       _isConnected = true;
       _connectionStateController.add(true);
       _logger.i('WebTransport session established (ID: $_sessionId)');
+
+      // Check datagram capability (H3 SETTINGS_H3_DATAGRAM negotiation)
+      final maxDgramSize = maxDatagramSize;
+      if (maxDgramSize > 0) {
+        _logger.i('WebTransport datagrams supported, max payload: $maxDgramSize bytes');
+      } else {
+        _logger.w('WebTransport datagrams NOT supported (SETTINGS_H3_DATAGRAM not negotiated)');
+      }
 
       // Start polling for incoming data
       _startReceiving();
@@ -792,3 +817,4 @@ typedef _SendDatagramFunc =
     int Function(int sessionId, Pointer<Uint8> data, int len);
 typedef _RecvDatagramFunc =
     int Function(int sessionId, Pointer<Uint8> buffer, int bufferLen);
+typedef _MaxDatagramSizeFunc = int Function(int sessionId);

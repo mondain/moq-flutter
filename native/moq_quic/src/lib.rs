@@ -175,6 +175,9 @@ fn get_runtime() -> &'static Runtime {
 /// IMPORTANT: Call this once before any other functions
 #[no_mangle]
 pub extern "C" fn moq_quic_init() {
+    // Initialize logging (respects RUST_LOG env var)
+    let _ = env_logger::try_init();
+
     // Install default CryptoProvider for rustls (required for rustls 0.23+)
     #[cfg(feature = "aws-lc-rs")]
     let provider = rustls::crypto::aws_lc_rs::default_provider();
@@ -438,6 +441,12 @@ pub extern "C" fn moq_quic_connect(
     control_streams.insert(connection_id, Arc::new(tokio::sync::Mutex::new(None)));
     recv_buffers.insert(connection_id, recv_buffer.clone());
     active_data_streams.insert(connection_id, Arc::new(tokio::sync::Mutex::new(Vec::new())));
+
+    // Log datagram capability negotiated with peer
+    match connection_arc.max_datagram_size() {
+        Some(size) => log::info!("Datagrams supported by peer, max size: {} bytes", size),
+        None => log::warn!("Datagrams NOT supported by peer (max_datagram_frame_size transport param not received)"),
+    }
 
     // Initialize datagram buffer for this connection
     let datagram_buffers = DATAGRAM_BUFFERS.get().expect("Datagram buffers not initialized");
@@ -1302,4 +1311,29 @@ pub extern "C" fn moq_quic_recv_datagram(
     });
 
     result
+}
+
+/// Query the maximum datagram size negotiated with the peer.
+///
+/// # Returns
+/// * Max datagram payload size in bytes if datagrams are supported, 0 if not supported,
+///   negative error code on failure
+#[no_mangle]
+pub extern "C" fn moq_quic_max_datagram_size(
+    connection_id: u64,
+) -> i64 {
+    let connections = CONNECTIONS.get().expect("Connection registry not initialized");
+
+    let connection = match connections.get(&connection_id) {
+        Some(conn) => conn.clone(),
+        None => {
+            log::error!("Connection {} not found for max_datagram_size", connection_id);
+            return -1;
+        }
+    };
+
+    match connection.max_datagram_size() {
+        Some(size) => size as i64,
+        None => 0,
+    }
 }

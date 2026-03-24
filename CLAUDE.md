@@ -106,11 +106,15 @@ The `native/moq_quic/` directory contains a Rust library using Quinn for QUIC tr
 
 ### Test Infrastructure
 
-Tests use `MockMoQTransport` (in `test/moq/client/client_integration_test.dart`):
+**Unit tests** use `MockMoQTransport` (in `test/moq/client/client_integration_test.dart`):
 - Captures sent messages in `sentControlMessages` and `sentStreamData`
 - `onControlMessageSent` callback injects server responses via `Future.microtask()` to simulate async network behavior
 - `simulateIncomingControlData` / `simulateIncomingDataStream` trigger receive paths
 - Message type matching is done by inspecting the first byte of serialized data (e.g., `data[0] == 0x20` for CLIENT_SETUP)
+
+**Live interop tests** (`test/moq/client/live_interop_test.dart`): Connect to real relays for draft-14/16 interop validation. Gated by `MOQ_LIVE_INTEROP=1` env var. Configurable via `MOQ_LIVE_HOST`, `MOQ_LIVE_PORT`, `MOQ_LIVE_VERSION`, `MOQ_LIVE_ALPN`, `MOQ_LIVE_INSECURE`.
+
+**Relay datagram tests** (`test/moq/client/relay_datagram_test.dart`): Validate datagram support at both QUIC transport (`max_datagram_frame_size`) and WebTransport/H3 (`SETTINGS_H3_DATAGRAM`) levels. Gated by `MOQ_DATAGRAM_TEST=1`. Configurable via `MOQ_RELAY_HOST`, `MOQ_RELAY_PORT`, `MOQ_RELAY_PATH`, `MOQ_RELAY_VERSION`, `MOQ_RELAY_INSECURE`, `MOQ_RELAY_ALPN`. Requires native Rust library. The QUIC test connects with `h3` ALPN to check the transport parameter; the WebTransport test performs the full H3 session setup including `WT-Available-Protocols` negotiation and `SETTINGS_H3_DATAGRAM` exchange.
 
 ### Reference Specifications
 

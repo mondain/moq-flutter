@@ -52,9 +52,13 @@ class QuicTransport extends MoQTransport {
   _CloseDataStreamFunc? _moqQuicCloseDataStream;
   _SendDatagramFunc? _moqQuicSendDatagram;
   _RecvDatagramFunc? _moqQuicRecvDatagram;
+  _MaxDatagramSizeFunc? _moqQuicMaxDatagramSize;
 
   Timer? _pollTimer;
   bool _nativeLibraryLoaded = false;
+
+  /// Whether the native QUIC library was loaded successfully.
+  bool get isNativeLibraryLoaded => _nativeLibraryLoaded;
 
   QuicTransport({Logger? logger}) : _logger = logger ?? Logger() {
     _loadNativeLibrary();
@@ -175,6 +179,11 @@ class QuicTransport extends MoQTransport {
             >
           >('moq_quic_recv_datagram')
           .asFunction();
+      _moqQuicMaxDatagramSize = _nativeLib!
+          .lookup<NativeFunction<NativeInt64 Function(NativeUint64)>>(
+            'moq_quic_max_datagram_size',
+          )
+          .asFunction();
 
       // Initialize the native library
       _moqQuicInit!();
@@ -285,6 +294,14 @@ class QuicTransport extends MoQTransport {
   bool get isConnected => _isConnected && _connectionId >= 0;
 
   @override
+  int get maxDatagramSize {
+    if (!_isConnected || _connectionId < 0) return -1;
+    if (_moqQuicMaxDatagramSize == null) return -1;
+    final size = _moqQuicMaxDatagramSize!(_connectionId);
+    return size > 0 ? size : 0;
+  }
+
+  @override
   Stream<bool> get connectionStateStream => _connectionStateController.stream;
 
   @override
@@ -353,6 +370,14 @@ class QuicTransport extends MoQTransport {
       _isConnected = true;
       _connectionStateController.add(true);
       _logger.i('QUIC connection established (ID: $_connectionId)');
+
+      // Check datagram capability negotiated with peer
+      final maxDatagramSize = _moqQuicMaxDatagramSize!(_connectionId);
+      if (maxDatagramSize > 0) {
+        _logger.i('Peer supports datagrams, max size: $maxDatagramSize bytes');
+      } else {
+        _logger.w('Peer does NOT support datagrams (max_datagram_frame_size transport param not received)');
+      }
 
       // Start polling for incoming data
       _startReceiving();
@@ -849,3 +874,4 @@ typedef _SendDatagramFunc =
     int Function(int connectionId, Pointer<Uint8> data, int len);
 typedef _RecvDatagramFunc =
     int Function(int connectionId, Pointer<Uint8> buffer, int bufferLen);
+typedef _MaxDatagramSizeFunc = int Function(int connectionId);
