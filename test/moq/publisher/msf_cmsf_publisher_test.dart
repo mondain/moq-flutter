@@ -68,6 +68,55 @@ void main() {
     });
   });
 
+  group('PUBLISH_DONE on stop', () {
+    test('sends PUBLISH_DONE to active subscribers when stop is called',
+        () async {
+      await client.connect('localhost', 4443);
+      final publisher = CmafPublisher(client: client);
+
+      publisher.configureAudioTrack('audio0');
+      await publisher.announce(['live']);
+
+      // Wait for subscribe handler to start
+      await Future.delayed(Duration.zero);
+
+      // Simulate an incoming SUBSCRIBE from a relay for the audio track
+      final subscribe = SubscribeMessage(
+        requestId: Int64(1), // Odd = from server/relay
+        trackNamespace: [Uint8List.fromList('live'.codeUnits)],
+        trackName: Uint8List.fromList('audio0'.codeUnits),
+        subscriberPriority: 128,
+        groupOrder: GroupOrder.ascending,
+        forward: 1,
+        filterType: FilterType.largestObject,
+      );
+      transport.simulateIncomingControlData(subscribe.serialize());
+
+      // Wait for the subscribe handler to process and accept
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      // Verify SUBSCRIBE_OK was sent (byte 0x04)
+      final subscribeOkSent = transport.sentControlMessages.any(
+        (msg) => msg.isNotEmpty && msg[0] == 0x04,
+      );
+      expect(subscribeOkSent, isTrue,
+          reason: 'Expected SUBSCRIBE_OK to have been sent');
+
+      // Clear messages so we can isolate what stop() sends
+      transport.clearSentMessages();
+
+      // Stop the publisher
+      await publisher.stop();
+
+      // Verify PUBLISH_DONE was sent (byte 0x0B)
+      final publishDoneSent = transport.sentControlMessages.any(
+        (msg) => msg.isNotEmpty && msg[0] == 0x0B,
+      );
+      expect(publishDoneSent, isTrue,
+          reason: 'Expected PUBLISH_DONE to be sent on stop');
+    });
+  });
+
   group('CMSF catalog', () {
     test(
       'publishes per-track initData instead of relying on initTrack',

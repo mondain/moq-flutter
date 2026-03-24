@@ -54,6 +54,9 @@ class CmafPublisher {
   // Active streams (streamId -> track)
   final _activeStreams = <int, CmafTrack>{};
 
+  // Published stream count (for PUBLISH_DONE)
+  int _publishedStreamCount = 0;
+
   // Subscribe handling
   StreamSubscription<MoQSubscribeRequest>? _subscribeSubscription;
   final _pendingSubscribes = <Int64, MoQSubscribeRequest>{};
@@ -702,6 +705,7 @@ class CmafPublisher {
 
     final streamId = await _client.openDataStream();
     _activeStreams[streamId] = track;
+    _publishedStreamCount++;
 
     await _client.writeSubgroupHeader(
       streamId,
@@ -760,6 +764,20 @@ class CmafPublisher {
     await _subscribeSubscription?.cancel();
     _subscribeSubscription = null;
 
+    // Send PUBLISH_DONE to all active subscribers
+    for (final entry in _pendingSubscribes.entries) {
+      try {
+        await _client.sendPublishDone(
+          entry.key,
+          statusCode: 0, // TRACK_ENDED
+          streamCount: Int64(_publishedStreamCount),
+          reason: reason,
+        );
+      } catch (e) {
+        _logger.w('Error sending PUBLISH_DONE for ${entry.key}: $e');
+      }
+    }
+
     // Close all active streams
     for (final streamId in _activeStreams.keys.toList()) {
       await _closeStream(streamId);
@@ -784,6 +802,7 @@ class CmafPublisher {
     _trackConfigs.clear();
     _pendingSubscribes.clear();
     _nextTrackAlias = 0;
+    _publishedStreamCount = 0;
     _logger.i('CMAF Publisher stopped');
   }
 
