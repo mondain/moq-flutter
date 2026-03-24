@@ -48,6 +48,60 @@ void main() {
       expect(track.containsKey('selectionParams'), isFalse);
     });
 
+    test('cmaf catalog JSON includes format cmsf', () {
+      final catalog = MoQCatalog.cmaf(
+        namespace: 'live/demo',
+        tracks: [CatalogTrack(name: 'video')],
+      );
+
+      final json = jsonDecode(catalog.toJson()) as Map<String, dynamic>;
+      expect(json['format'], equals('cmsf'));
+    });
+
+    test('loc catalog JSON includes format loc', () {
+      final catalog = MoQCatalog.loc(
+        namespace: 'live/demo',
+        tracks: [CatalogTrack(name: 'audio')],
+      );
+
+      final json = jsonDecode(catalog.toJson()) as Map<String, dynamic>;
+      expect(json['format'], equals('loc'));
+    });
+
+    test('default catalog omits format when not set', () {
+      final catalog = MoQCatalog(
+        tracks: [CatalogTrack(name: 'data')],
+      );
+
+      final json = jsonDecode(catalog.toJson()) as Map<String, dynamic>;
+      expect(json.containsKey('format'), isFalse);
+    });
+
+    test('fromJson parses format field correctly', () {
+      const input = '''
+      {
+        "version": 1,
+        "format": "cmsf",
+        "tracks": [{"name": "video"}]
+      }
+      ''';
+
+      final catalog = MoQCatalog.fromJson(input);
+      expect(catalog.format, equals('cmsf'));
+    });
+
+    test('fromJson handles missing format field', () {
+      const input = '''
+      {
+        "version": 1,
+        "tracks": [{"name": "video"}]
+      }
+      ''';
+
+      final catalog = MoQCatalog.fromJson(input);
+      expect(catalog.format, isNull);
+    });
+
     test('parses legacy commonTrackFields and nested selectionParams', () {
       const legacyJson = '''
       {

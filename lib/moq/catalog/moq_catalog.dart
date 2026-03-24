@@ -7,6 +7,7 @@ import 'dart:typed_data';
 /// remaining tolerant of older catalogformat/WARP-style input.
 class MoQCatalog {
   final int version;
+  final String? format;
   final int generatedAt;
   final bool isComplete;
   final List<CatalogTrack> tracks;
@@ -19,6 +20,7 @@ class MoQCatalog {
 
   MoQCatalog({
     this.version = 1,
+    this.format,
     int? generatedAt,
     this.isComplete = false,
     required this.tracks,
@@ -31,6 +33,7 @@ class MoQCatalog {
   }) {
     final catalogTracks = tracks ?? <CatalogTrack>[];
     return MoQCatalog(
+      format: 'loc',
       isComplete: isComplete,
       tracks: catalogTracks
           .map(
@@ -50,6 +53,7 @@ class MoQCatalog {
   }) {
     final catalogTracks = tracks ?? <CatalogTrack>[];
     return MoQCatalog(
+      format: 'cmsf',
       isComplete: isComplete,
       tracks: catalogTracks
           .map(
@@ -67,8 +71,9 @@ class MoQCatalog {
       'version': version,
       'generatedAt': generatedAt,
       'isComplete': isComplete,
-      'tracks': tracks.map((t) => t.toJson()).toList(),
     };
+    if (format != null) json['format'] = format;
+    json['tracks'] = tracks.map((t) => t.toJson()).toList();
 
     return const JsonEncoder.withIndent('  ').convert(json);
   }
@@ -97,6 +102,7 @@ class MoQCatalog {
 
     return MoQCatalog(
       version: json['version'] as int? ?? 1,
+      format: json['format'] as String?,
       generatedAt: json['generatedAt'] as int?,
       isComplete: json['isComplete'] as bool? ?? false,
       tracks: tracks,
