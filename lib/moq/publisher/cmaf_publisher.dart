@@ -306,8 +306,11 @@ class CmafPublisher {
     }
 
     try {
-      final contentExists = _contentExistsForTrack(trackName, track);
-      final largestLocation = _largestPublishedLocation(trackName, track);
+      final (contentExists, largestLocation) = _computeSubscriptionState(
+        request,
+        trackName,
+        track,
+      );
 
       await _client.acceptSubscribe(
         request.requestId,
@@ -896,6 +899,39 @@ class CmafPublisher {
     );
     _tracks[trackName] = track;
     return track;
+  }
+
+  /// Compute contentExists and largestLocation based on the subscribe filter.
+  ///
+  /// contentExists is only true when a non-null largestLocation can be
+  /// provided, which avoids serialization mismatches in SUBSCRIBE_OK.
+  (bool, Location?) _computeSubscriptionState(
+    MoQSubscribeRequest request,
+    String trackName,
+    CmafTrack track,
+  ) {
+    final (rawExists, location) = switch (request.filterType) {
+      FilterType.absoluteStart => (
+        track.currentGroupId > (request.startLocation?.group ?? Int64.ZERO),
+        _largestPublishedLocation(trackName, track),
+      ),
+      FilterType.absoluteRange => () {
+        final startGroup = request.startLocation?.group ?? Int64.ZERO;
+        final contentExists = track.currentGroupId >= startGroup;
+        final largest = _largestPublishedLocation(trackName, track);
+        final endGroup = request.endGroup;
+        final capped =
+            (largest != null && endGroup != null && largest.group > endGroup)
+                ? Location(group: endGroup, object: largest.object)
+                : largest;
+        return (contentExists, capped);
+      }(),
+      _ => (
+        _contentExistsForTrack(trackName, track),
+        _largestPublishedLocation(trackName, track),
+      ),
+    };
+    return (rawExists && location != null, location);
   }
 
   bool _contentExistsForTrack(String trackName, CmafTrack track) {

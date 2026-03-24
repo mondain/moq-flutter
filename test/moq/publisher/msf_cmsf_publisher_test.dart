@@ -117,6 +117,89 @@ void main() {
     });
   });
 
+  group('Subscribe filter types', () {
+    /// Extract the SUBSCRIBE_OK payload from sent control messages.
+    SubscribeOkMessage? findSubscribeOk(List<Uint8List> messages) {
+      for (final msg in messages) {
+        if (msg.isNotEmpty && msg[0] == 0x04) {
+          // type(1 byte) + length(2 bytes) + payload
+          final payload = msg.sublist(3);
+          return SubscribeOkMessage.deserialize(payload);
+        }
+      }
+      return null;
+    }
+
+    test('absoluteStart with future group yields contentExists=false',
+        () async {
+      await client.connect('localhost', 4443);
+      final publisher = CmafPublisher(client: client);
+
+      publisher.configureAudioTrack('audio0');
+      await publisher.announce(['live']);
+      await publisher.addAudioTrack('audio0');
+      await publisher.setAudioReady('audio0');
+
+      await Future.delayed(Duration.zero);
+      transport.clearSentMessages();
+
+      // Subscribe with absoluteStart pointing to a group far in the future
+      final subscribe = SubscribeMessage(
+        requestId: Int64(1),
+        trackNamespace: [Uint8List.fromList('live'.codeUnits)],
+        trackName: Uint8List.fromList('audio0'.codeUnits),
+        subscriberPriority: 128,
+        groupOrder: GroupOrder.ascending,
+        forward: 1,
+        filterType: FilterType.absoluteStart,
+        startLocation: Location(group: Int64(9999), object: Int64(0)),
+      );
+      transport.simulateIncomingControlData(subscribe.serialize());
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      final ok = findSubscribeOk(transport.sentControlMessages);
+      expect(ok, isNotNull, reason: 'Expected SUBSCRIBE_OK to be sent');
+      expect(ok!.contentExists, equals(0),
+          reason:
+              'absoluteStart with future group should have contentExists=0');
+      expect(ok.largestLocation, isNull);
+    });
+
+    test('default filter (largestObject) works correctly', () async {
+      await client.connect('localhost', 4443);
+      final publisher = CmafPublisher(client: client);
+
+      publisher.configureAudioTrack('audio0');
+      await publisher.announce(['live']);
+      await publisher.addAudioTrack('audio0');
+      await publisher.setAudioReady('audio0');
+
+      await Future.delayed(Duration.zero);
+      transport.clearSentMessages();
+
+      // Subscribe with largestObject filter (the default path)
+      final subscribe = SubscribeMessage(
+        requestId: Int64(1),
+        trackNamespace: [Uint8List.fromList('live'.codeUnits)],
+        trackName: Uint8List.fromList('audio0'.codeUnits),
+        subscriberPriority: 128,
+        groupOrder: GroupOrder.ascending,
+        forward: 1,
+        filterType: FilterType.largestObject,
+      );
+      transport.simulateIncomingControlData(subscribe.serialize());
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      final ok = findSubscribeOk(transport.sentControlMessages);
+      expect(ok, isNotNull, reason: 'Expected SUBSCRIBE_OK to be sent');
+      // Only init was published (no media frames yet), so no trackable
+      // largest location exists and contentExists should be 0
+      expect(ok!.contentExists, equals(0),
+          reason:
+              'largestObject with no media frames should have contentExists=0');
+    });
+  });
+
   group('CMSF catalog', () {
     test(
       'publishes per-track initData instead of relying on initTrack',
