@@ -191,9 +191,9 @@ class MoQVideoPlayer {
 
     await initialize(session.mediaSubscriptions);
 
-    // Pre-seed AVC decoder config from catalog initData if available (LOC/MSF).
-    // This avoids waiting for the first keyframe to extract SPS/PPS inline.
+    // Pass catalog hints to the decoder for LOC tracks
     for (final track in session.mediaTracks) {
+      // Pre-seed AVC decoder config from catalog initData if available
       if (track.initData != null &&
           track.initData!.isNotEmpty &&
           (track.role == 'video' || track.name.contains('video'))) {
@@ -207,7 +207,12 @@ class MoQVideoPlayer {
         } catch (e) {
           _logger.w('Failed to decode initData for ${track.name}: $e');
         }
-        break;
+      }
+      // Set audio codec hint from catalog so LOC decoder uses correct type
+      if ((track.role == 'audio' || track.name.contains('audio')) &&
+          track.codec != null) {
+        _playbackPipeline!.mediaPipeline.locAudioCodec = track.codec;
+        _logger.i('Audio codec hint from catalog: ${track.codec}');
       }
     }
   }

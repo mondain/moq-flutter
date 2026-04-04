@@ -60,12 +60,20 @@ enum MediaFrameType {
   audioAac,
 }
 
-/// Decodes MoQ objects into media frames using moq-mi format
+/// Decodes MoQ objects into media frames.
+///
+/// Supports moq-mi (extension headers) and raw LOC (no headers).
+/// For LOC, the audio codec can be hinted via [locAudioCodec] to
+/// avoid defaulting to Opus when the catalog says otherwise.
 class MoqMediaDecoder {
   Uint8List? _lastVideoCodecConfig;
   bool _hasReceivedKeyframe = false;
   Int64 _locVideoSeqId = Int64(0);
   Int64 _locAudioSeqId = Int64(0);
+
+  /// Audio codec hint for LOC decode (e.g. "opus", "aac", "mp4a.40.2").
+  /// When null, defaults to Opus.
+  String? locAudioCodec;
 
   /// Decode a MoQ object into a media frame
   ///
@@ -327,16 +335,24 @@ class MoqMediaDecoder {
 
   MediaFrame? _decodeLocAudio(MoQObject object, Int64 wallclock) {
     _locAudioSeqId += Int64.ONE;
+
+    final isAac = locAudioCodec != null &&
+        (locAudioCodec!.startsWith('mp4a') ||
+         locAudioCodec!.toLowerCase().contains('aac'));
+    final type = isAac ? MediaFrameType.audioAac : MediaFrameType.audioOpus;
+    final timebase = isAac ? Int64(44100) : Int64(48000);
+    final duration = isAac ? Int64(1024) : Int64(960); // ~23ms AAC / 20ms Opus
+
     return MediaFrame(
-      type: MediaFrameType.audioOpus,
+      type: type,
       seqId: _locAudioSeqId,
       pts: object.objectId,
       dts: object.objectId,
-      timebase: Int64(48000),
-      duration: Int64(960), // 20ms at 48kHz
+      timebase: timebase,
+      duration: duration,
       wallclock: wallclock,
       data: object.payload!,
-      sampleRate: Int64(48000),
+      sampleRate: timebase,
       channels: 2,
     );
   }
@@ -684,6 +700,9 @@ class MoqMediaPipeline {
       }
     }
   }
+
+  /// Set the audio codec hint for LOC decode (e.g. "opus", "mp4a.40.2").
+  set locAudioCodec(String? codec) => _decoder.locAudioCodec = codec;
 
   /// Get video codec configuration (AVC decoder config)
   Uint8List? get videoCodecConfig => _decoder.videoCodecConfig;
