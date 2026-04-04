@@ -212,27 +212,38 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   }
 
   Future<void> _disconnect() async {
-    try {
-      _statsTimer?.cancel();
-      await _streamPlayer?.dispose();
-      _streamPlayer = null;
-      await _videoPlayer?.dispose();
-      _videoPlayer = null;
-      await _nativePlayer?.dispose();
-      _nativePlayer = null;
+    _statsTimer?.cancel();
 
+    try {
+      await _streamPlayer?.dispose();
+    } catch (e) {
+      debugPrint('Error disposing stream player: $e');
+    }
+    _streamPlayer = null;
+
+    try {
+      await _videoPlayer?.dispose();
+    } catch (e) {
+      debugPrint('Error disposing video player: $e');
+    }
+    _videoPlayer = null;
+
+    try {
+      await _nativePlayer?.dispose();
+    } catch (e) {
+      debugPrint('Error disposing native player: $e');
+    }
+    _nativePlayer = null;
+
+    try {
       final client = ref.read(moqClientProvider);
       await client.disconnect();
-
-      if (mounted) {
-        context.go('/');
-      }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Disconnect failed: $e')));
-      }
+      debugPrint('Error disconnecting client: $e');
+    }
+
+    if (mounted) {
+      context.go('/');
     }
   }
 
