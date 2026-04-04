@@ -1298,12 +1298,63 @@ class StreamingPlaybackPipeline {
         segment = _aacMuxer.createSingleFrameSegment(frame.data);
       }
     } else {
-      segment = _opusMuxer.createMediaSegment(frame);
+      // Strip invalid prefix bytes from Opus packets.
+      // Some publishers prepend a non-Opus byte (e.g. media type indicator)
+      // before the raw Opus bitstream. Detect this by validating the TOC byte:
+      // for code=1 (two equal-size frames), (packet_size - 1) must be even.
+      final audioData = _stripOpusPrefix(frame.data);
+      final muxFrame = audioData == frame.data
+          ? frame
+          : MediaFrame(
+              type: frame.type,
+              seqId: frame.seqId,
+              pts: frame.pts,
+              dts: frame.dts,
+              timebase: frame.timebase,
+              duration: frame.duration,
+              wallclock: frame.wallclock,
+              data: audioData,
+              sampleRate: frame.sampleRate,
+              channels: frame.channels,
+            );
+      segment = _opusMuxer.createMediaSegment(muxFrame);
     }
 
     _patchMoofSequence(segment, ++_globalSequenceNumber);
     _write(segment);
     _audioSegmentsWritten++;
+  }
+
+  /// Strip non-Opus prefix bytes from a packet.
+  ///
+  /// Some moq-mi publishers prepend a byte (e.g. media type indicator) before
+  /// the raw Opus bitstream.  Detect this by checking whether the first byte
+  /// is a plausible Opus TOC for the given packet length.  If not, try the
+  /// byte at offset 1.  Returns the original data if no prefix is detected.
+  static Uint8List _stripOpusPrefix(Uint8List data) {
+    if (data.length < 2) return data;
+
+    if (_isValidOpusToc(data[0], data.length)) return data;
+
+    // First byte is not a valid TOC — check if stripping it helps
+    if (_isValidOpusToc(data[1], data.length - 1)) {
+      return Uint8List.sublistView(data, 1);
+    }
+
+    // Can't determine — return as-is and let the decoder deal with it
+    return data;
+  }
+
+  /// Check whether [toc] is a plausible Opus TOC byte for a packet of [size].
+  static bool _isValidOpusToc(int toc, int size) {
+    final code = toc & 3;
+    if (code == 0) return true; // Single frame — any size is valid
+    if (code == 1) {
+      // Two equal-size frames: (size - 1) must be even
+      return (size - 1) % 2 == 0;
+    }
+    // code 2/3: variable frame count — hard to validate without deeper parsing
+    return true;
   }
 
   /// Patch the mfhd sequence number in a moof+mdat segment.
