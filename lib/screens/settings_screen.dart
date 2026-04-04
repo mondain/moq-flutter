@@ -156,6 +156,66 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           }),
           const Divider(),
 
+          // Protocol section
+          _buildSectionHeader(context, 'Protocol'),
+          ...[14, 16].map((draft) {
+            final currentDraft = ref.watch(draftVersionProvider);
+            final isSelected = currentDraft == draft;
+            return RadioListTile<int>(
+              value: draft,
+              groupValue: currentDraft,
+              onChanged: (value) {
+                if (value != null) {
+                  ref.read(draftVersionProvider.notifier).setDraftVersion(value);
+                }
+              },
+              title: Text('Draft-$draft'),
+              subtitle: Text(
+                draft == 14
+                    ? 'MoQ Transport draft-14 (0xff00000e)'
+                    : 'MoQ Transport draft-16 (0xff000010)',
+              ),
+              secondary: Icon(
+                isSelected ? Icons.check_circle : Icons.circle_outlined,
+                color: isSelected
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
+              ),
+            );
+          }),
+          const Divider(),
+
+          // Forward Preference section
+          _buildSectionHeader(context, 'Forward Preference'),
+          ...[1, 0].map((forward) {
+            final currentForward = ref.watch(forwardPreferenceProvider);
+            final isSelected = currentForward == forward;
+            return RadioListTile<int>(
+              value: forward,
+              groupValue: currentForward,
+              onChanged: (value) {
+                if (value != null) {
+                  ref
+                      .read(forwardPreferenceProvider.notifier)
+                      .setForwardPreference(value);
+                }
+              },
+              title: Text(forward == 1 ? 'Auto-Forward (1)' : 'On-Demand (0)'),
+              subtitle: Text(
+                forward == 1
+                    ? 'Send PUBLISH to relay, forward objects to subscribers'
+                    : 'Wait for incoming SUBSCRIBE requests from relay',
+              ),
+              secondary: Icon(
+                isSelected ? Icons.check_circle : Icons.circle_outlined,
+                color: isSelected
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
+              ),
+            );
+          }),
+          const Divider(),
+
           // Track names section
           _buildSectionHeader(context, 'Track Names'),
           Padding(

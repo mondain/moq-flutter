@@ -13,6 +13,8 @@ class SettingsService {
   static const _keyVideoResolution = 'video_resolution';
   static const _keyPackagingFormat = 'packaging_format';
   static const _keyTransportType = 'transport_type';
+  static const _keyDraftVersion = 'draft_version';
+  static const _keyForwardPreference = 'forward_preference';
 
   // Theme mode
   ThemeMode get themeMode {
@@ -64,6 +66,20 @@ class SettingsService {
 
   Future<void> setTransportType(TransportType type) async {
     await _prefs.setString(_keyTransportType, type.name);
+  }
+
+  // Draft version (defaults to draft-14)
+  int get draftVersion => _prefs.getInt(_keyDraftVersion) ?? 14;
+
+  Future<void> setDraftVersion(int version) async {
+    await _prefs.setInt(_keyDraftVersion, version);
+  }
+
+  // Forward preference (0 = don't forward / wait for SUBSCRIBE, 1 = auto-forward via PUBLISH)
+  int get forwardPreference => _prefs.getInt(_keyForwardPreference) ?? 1;
+
+  Future<void> setForwardPreference(int forward) async {
+    await _prefs.setInt(_keyForwardPreference, forward);
   }
 
   // Connection settings keys

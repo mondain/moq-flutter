@@ -62,20 +62,29 @@ This is a Media over QUIC (MoQ) Flutter client implementing [draft-ietf-moq-tran
 
 4. **Publisher Layer** (`lib/moq/publisher/`) - Three publishers with distinct packaging:
    - `MoQPublisher`: Base publisher, raw LOC format, manual group/subgroup management
-   - `CmafPublisher`: fMP4/CMAF packaging via `H264Fmp4Muxer`/`OpusFmp4Muxer`, groups on video keyframes, publishes init segment on dedicated track, handles incoming SUBSCRIBE from relay (per draft-law-moq-carp-00)
+   - `CmafPublisher`: fMP4/CMAF packaging via `H264Fmp4Muxer`/`OpusFmp4Muxer`, groups on video keyframes, publishes init segment as group 0 object 0 on each media track, handles incoming SUBSCRIBE from relay (per draft-law-moq-carp-00); supports auto-forward publishing mode via PUBLISH messages, honors subscribe filter types (LatestObject, NextGroupStart, AbsoluteStart, AbsoluteRange), sends PUBLISH_DONE to subscribers on stop
    - `MoqMiPublisher`: moq-mi format (draft-cenzano-moq-media-interop-03), raw codec bitstreams with metadata in extension headers, one QUIC stream per video GOP but one stream per audio frame, track naming `{prefix}audio0`/`{prefix}video0`
 
-5. **Packager Layer** (`lib/moq/packager/moq_mi_packager.dart`)
+5. **Catalog Layer** (`lib/moq/catalog/`)
+   - `moq_catalog.dart`: JSON-based catalog with tracks, packaging info, and `format` field for CMSF/LOC interop
+   - `moq_catalog_subscriber.dart`: Subscribes to catalog objects and manages track subscriptions
+   - `moq_timeline.dart`: Timeline management for playback and seeking
+
+6. **Packager Layer** (`lib/moq/packager/moq_mi_packager.dart`)
    - Generates/parses moq-mi extension headers with codec-specific type codes (0x0A media type, 0x0D AVC extradata, 0x0F Opus metadata, etc.)
    - Tracks sequence IDs and only sends AVC decoder config when it changes
 
-6. **Media Layer** (`lib/moq/media/`, `lib/media/`)
-   - Camera/audio capture with platform-specific implementations (Linux: FFmpeg+V4L2/PulseAudio, Android: camera plugin, iOS/macOS: AVFoundation)
+7. **Media Layer** (`lib/moq/media/`, `lib/media/`)
+   - Camera/audio capture with platform-specific implementations (Linux: FFmpeg+V4L2/PulseAudio, Android: native MediaCodec via `native_capture_channel.dart`/`MainActivity.kt`, iOS/macOS: AVFoundation)
+   - `native_opus_encoder.dart`: Native Opus encoding via opus_dart/opus_flutter FFI (all platforms)
+   - `native_h264_encoder.dart`: VideoToolbox H.264 encoding for macOS/iOS
    - fMP4 muxing for H.264 (baseline, ultrafast) and Opus (48kHz, 128kbps)
+   - `streaming_playback.dart`: Media decode/playback pipeline routing CMAF/moq-mi streams to players
+   - `moq_media_decoder.dart`: Decodes CMAF/moq-mi streams to PCM/H.264
    - Video player integration with media_kit
-   - `lib/moq/media/fmp4/`: CMAF/fMP4 segment packaging
+   - `lib/moq/media/fmp4/`: CMAF/fMP4 segment packaging (H.264, Opus, AAC muxers)
 
-7. **State Management** (`lib/providers/moq_providers.dart`)
+8. **State Management** (`lib/providers/moq_providers.dart`)
    - Riverpod providers for MoQ client state
 
 ### Native Rust Library
@@ -86,7 +95,7 @@ The `native/moq_quic/` directory contains a Rust library using Quinn for QUIC tr
 - Two transport stacks in one library: raw QUIC (`lib.rs`) and WebTransport (`webtransport.rs`)
 - `stream_writer.rs`: Non-blocking write queue via mpsc channel per stream
 - `media_player.rs`: Embedded mpv player with custom `moqbuffer://` stream protocol and 16MB ring buffer
-- Key Cargo deps: `quinn 0.11.9`, `web-transport-quinn 0.10.1`, `libmpv2-sys`, `dashmap`, `parking_lot`
+- Key Cargo deps: `quinn 0.11.9`, `web-transport-quinn 0.11.6`, `libmpv2-sys`, `dashmap`, `parking_lot`
 - QUIC transport uses 2MB receive buffer, datagrams enabled (RFC 9221), 30s idle timeout, 4s keepalive
 - Datagram buffer capped at 1000 entries before dropping
 
@@ -106,11 +115,21 @@ The `native/moq_quic/` directory contains a Rust library using Quinn for QUIC tr
 
 ### Test Infrastructure
 
-**Unit tests** use `MockMoQTransport` (in `test/moq/client/client_integration_test.dart`):
+**Unit tests** use `MockMoQTransport` (in `test/moq/client/mock_transport.dart`):
 - Captures sent messages in `sentControlMessages` and `sentStreamData`
 - `onControlMessageSent` callback injects server responses via `Future.microtask()` to simulate async network behavior
 - `simulateIncomingControlData` / `simulateIncomingDataStream` trigger receive paths
 - Message type matching is done by inspecting the first byte of serialized data (e.g., `data[0] == 0x20` for CLIENT_SETUP)
+
+**Protocol tests**: `wire_format_test.dart`, `control_messages_test.dart`, `control_messages_v16_test.dart`, `data_messages_test.dart`, `data_parser_test.dart`
+
+**Catalog tests**: `moq_catalog_test.dart` (JSON parsing, format field), `moq_catalog_subscriber_test.dart` (subscription flow), `moq_timeline_test.dart` (seeking/playback)
+
+**Publisher tests**: `msf_cmsf_publisher_test.dart` (CMAF publisher behavior, init segments, PUBLISH_DONE)
+
+**Media tests**: `streaming_playback_test.dart` (decode/playback pipeline)
+
+**Client integration tests**: `client_integration_test.dart` (full client lifecycle with MockMoQTransport)
 
 **Live interop tests** (`test/moq/client/live_interop_test.dart`): Connect to real relays for draft-14/16 interop validation. Gated by `MOQ_LIVE_INTEROP=1` env var. Configurable via `MOQ_LIVE_HOST`, `MOQ_LIVE_PORT`, `MOQ_LIVE_VERSION`, `MOQ_LIVE_ALPN`, `MOQ_LIVE_INSECURE`.
 

@@ -123,6 +123,12 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
     try {
       final client = ref.read(moqClientProvider);
 
+      // Resolve draft version from settings
+      final draftNumber = ref.read(draftVersionProvider);
+      final targetVersion = draftNumber == 16
+          ? MoQVersion.draft16
+          : MoQVersion.draft14;
+
       // Connect based on transport type
       if (_transportType == TransportType.webtransport) {
         final urlStr = _urlController.text;
@@ -131,20 +137,22 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
         final port = uri.port;
         final path = uri.path;
 
-        _setStatus('Connecting to $host:$port via WebTransport...');
+        _setStatus('Connecting to $host:$port via WebTransport (draft-$draftNumber)...');
         await client.connect(
           host,
           port,
+          targetVersion: targetVersion,
           options: {'insecure': _insecureMode.toString(), 'path': path},
         );
       } else {
         final host = _hostController.text;
         final port = int.tryParse(_portController.text) ?? 8443;
 
-        _setStatus('Connecting to $host:$port via QUIC...');
+        _setStatus('Connecting to $host:$port via QUIC (draft-$draftNumber)...');
         await client.connect(
           host,
           port,
+          targetVersion: targetVersion,
           options: {'insecure': _insecureMode.toString()},
         );
       }
@@ -237,6 +245,9 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
 
     return Scaffold(
       appBar: AppBar(
+        automaticallyImplyLeading: false,
+        titleSpacing: 8,
+        clipBehavior: Clip.hardEdge,
         title: const Text(
           'MoQ Client',
           style: TextStyle(fontSize: 18),

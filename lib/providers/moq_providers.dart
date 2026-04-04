@@ -174,6 +174,42 @@ final audioTrackNameProvider = NotifierProvider<AudioTrackNameNotifier, String>(
   AudioTrackNameNotifier.new,
 );
 
+/// Draft version provider (defaults to draft-14)
+class DraftVersionNotifier extends Notifier<int> {
+  @override
+  int build() {
+    final settings = ref.watch(settingsServiceProvider);
+    return settings.draftVersion;
+  }
+
+  void setDraftVersion(int version) {
+    state = version;
+    ref.read(settingsServiceProvider).setDraftVersion(version);
+  }
+}
+
+final draftVersionProvider = NotifierProvider<DraftVersionNotifier, int>(
+  DraftVersionNotifier.new,
+);
+
+/// Forward preference provider (0 = wait for SUBSCRIBE, 1 = auto-forward via PUBLISH)
+class ForwardPreferenceNotifier extends Notifier<int> {
+  @override
+  int build() {
+    final settings = ref.watch(settingsServiceProvider);
+    return settings.forwardPreference;
+  }
+
+  void setForwardPreference(int forward) {
+    state = forward;
+    ref.read(settingsServiceProvider).setForwardPreference(forward);
+  }
+}
+
+final forwardPreferenceProvider = NotifierProvider<ForwardPreferenceNotifier, int>(
+  ForwardPreferenceNotifier.new,
+);
+
 /// QUIC Transport provider
 final quicTransportProvider = Provider<MoQTransport>((ref) {
   final logger = ref.watch(loggerProvider);

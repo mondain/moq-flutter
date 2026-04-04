@@ -116,8 +116,13 @@ class _PublisherScreenState extends ConsumerState<PublisherScreen> {
 
       switch (_packagingFormat) {
         case PackagingFormat.cmaf:
-          // Create CMAF publisher
-          _cmafPublisher = CmafPublisher(client: client, logger: _logger);
+          // Create CMAF publisher with forward preference from settings
+          final autoForward = ref.read(forwardPreferenceProvider) == 1;
+          _cmafPublisher = CmafPublisher(
+            client: client,
+            logger: _logger,
+            autoForward: autoForward,
+          );
           videoTrackName = '1.m4s';
           audioTrackName = '2.m4s';
 

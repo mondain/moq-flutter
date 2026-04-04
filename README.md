@@ -7,9 +7,15 @@ Media over QUIC (MoQ) Flutter client implementation supporting [draft-ietf-moq-t
 ```
 lib/
 ├── main.dart                     # Application entry point
+├── router.dart                   # GoRouter multi-screen navigation
 ├── moq/                          # MoQ protocol implementation
 │   ├── client/                   # MoQ client
-│   │   └── moq_client.dart        # Main client with subscription handling
+│   │   ├── moq_client.dart        # Main client with subscription handling
+│   │   └── replay_stream.dart     # ReplayStreamController for late-joiners
+│   ├── catalog/                  # Catalog and timeline management
+│   │   ├── moq_catalog.dart       # JSON-based catalog with format field
+│   │   ├── moq_catalog_subscriber.dart  # Catalog subscription and track management
+│   │   └── moq_timeline.dart      # Timeline management for playback/seeking
 │   ├── media/                    # Media capture and encoding
 │   │   ├── audio_capture.dart     # Platform-specific audio capture
 │   │   ├── audio_encoder.dart     # Opus audio encoder (FFmpeg)
@@ -17,12 +23,16 @@ lib/
 │   │   ├── linux_capture.dart     # Linux V4L2/FFmpeg video capture
 │   │   ├── video_encoder.dart     # H.264 video encoder (FFmpeg)
 │   │   ├── media_encoder.dart     # Combined audio/video encoder
-│   │   ├── native_capture_channel.dart  # Platform channel for native capture
+│   │   ├── native_capture_channel.dart  # Platform channel for native capture (Android)
+│   │   ├── native_opus_encoder.dart     # Native Opus encoder (opus_dart/opus_flutter)
+│   │   ├── native_h264_encoder.dart     # VideoToolbox H.264 encoder (macOS/iOS)
+│   │   ├── moq_media_decoder.dart       # CMAF/moq-mi stream decoder
+│   │   ├── streaming_playback.dart      # Media decode/playback pipeline
 │   │   └── fmp4/                  # CMAF/fMP4 packaging
 │   ├── packager/                 # Media packaging formats
 │   │   └── moq_mi_packager.dart   # MoQ Media Interop (moq-mi) packager
 │   ├── publisher/                # Publishing support
-│   │   ├── cmaf_publisher.dart    # CMAF/fMP4 publisher
+│   │   ├── cmaf_publisher.dart    # CMAF/fMP4 publisher (auto-forward, filter types)
 │   │   ├── moq_publisher.dart     # LOC publisher
 │   │   └── moq_mi_publisher.dart  # MoQ-MI publisher (LOC with extension headers)
 │   ├── protocol/                 # Protocol messages and types
@@ -47,21 +57,44 @@ lib/
 │   ├── viewer_screen.dart        # Media playback UI
 │   └── settings_screen.dart      # Application settings
 ├── services/                     # Platform-specific services
-│   └── quic_transport.dart       # QUIC transport via FFI
-├── transport/                    # Transport layer abstraction
-│   └── moq_transport.dart
+│   ├── quic_transport.dart       # QUIC transport via FFI
+│   ├── webtransport_quinn_transport.dart  # WebTransport via FFI
+│   ├── settings_service.dart     # Connection presets persistence
+│   └── native_media_player.dart  # Embedded mpv player via FFI
 ├── utils/                        # Utility functions
 └── widgets/                      # Reusable widgets
 
 native/moq_quic/                  # Rust QUIC library (FFI)
 ├── Cargo.toml
 └── src/
+    ├── lib.rs                    # Quinn QUIC transport
+    ├── webtransport.rs           # WebTransport adapter
+    ├── stream_writer.rs          # Non-blocking write queue
+    └── media_player.rs           # Embedded mpv player
+
+android/app/src/main/kotlin/
+└── MainActivity.kt               # Native camera/audio capture via MediaCodec
 
 test/
-└── moq/protocol/                 # Protocol serialization tests
-    ├── wire_format_test.dart     # Varint/tuple/location tests
-    ├── control_messages_test.dart # Control message tests
-    └── data_messages_test.dart    # Data message tests
+├── moq/protocol/                 # Protocol serialization tests
+│   ├── wire_format_test.dart
+│   ├── control_messages_test.dart
+│   ├── control_messages_v16_test.dart
+│   ├── data_messages_test.dart
+│   └── data_parser_test.dart
+├── moq/catalog/                  # Catalog and timeline tests
+│   ├── moq_catalog_test.dart
+│   ├── moq_catalog_subscriber_test.dart
+│   └── moq_timeline_test.dart
+├── moq/client/                   # Client tests
+│   ├── client_integration_test.dart
+│   ├── mock_transport.dart
+│   ├── live_interop_test.dart     # Gated: MOQ_LIVE_INTEROP=1
+│   └── relay_datagram_test.dart   # Gated: MOQ_DATAGRAM_TEST=1
+├── moq/publisher/                # Publisher tests
+│   └── msf_cmsf_publisher_test.dart
+└── moq/media/                    # Media pipeline tests
+    └── streaming_playback_test.dart
 ```
 
 ## Native QUIC Library
@@ -205,6 +238,11 @@ This ensures clean playback startup even when relays don't properly implement `n
 - **media_kit**: Video/audio playback
 - **media_kit_video**: Video widget
 - **media_kit_libs_video**: Native video libraries
+- **opus_dart** / **opus_flutter**: Native Opus codec via FFI
+- **go_router**: Multi-screen navigation
+- **shared_preferences**: Settings persistence
+- **camera**: Camera access (Flutter plugin)
+- **audio_streamer**: Mobile audio capture
 - **logger**: Logging
 - **fixnum**: 64-bit integer support
 - **async**: Async utilities
@@ -328,7 +366,7 @@ The application supports publishing live audio and video with platform-specific 
 | Platform | Implementation | Details |
 |----------|---------------|---------|
 | **Linux** | FFmpeg + V4L2 | Captures from `/dev/video*` devices, outputs YUV420P |
-| **Android** | camera package | Uses Flutter's camera plugin |
+| **Android** | Native MediaCodec | H.264 via platform channel (`MainActivity.kt`) |
 | **iOS/macOS** | AVFoundation | Native capture via Platform Channels |
 | **Windows** | Media Foundation | Native capture via Platform Channels |
 
@@ -337,14 +375,15 @@ The application supports publishing live audio and video with platform-specific 
 | Platform | Implementation | Details |
 |----------|---------------|---------|
 | **Linux** | PulseAudio (parec) | Captures via `parec` command |
-| **Android** | audio_streamer | Flutter plugin for microphone access |
+| **Android** | Native AudioRecord | PCM capture via platform channel (`MainActivity.kt`) |
 | **iOS/macOS** | AVFoundation | Native capture via Platform Channels |
 | **Windows** | Media Foundation | Native capture via Platform Channels |
 
 ### Encoding
 
-- **Video**: H.264 encoding via FFmpeg (baseline profile, ultrafast preset)
-- **Audio**: Opus encoding via FFmpeg (48kHz stereo, 128kbps)
+- **Video**: H.264 encoding via FFmpeg (baseline profile, ultrafast preset) or native VideoToolbox (macOS/iOS)
+- **Audio**: Opus encoding via native opus_dart/opus_flutter FFI (all platforms), with FFmpeg fallback on Linux
+- **Android**: Native MediaCodec H.264 encoding + AudioRecord capture via platform channel
 
 ### Packaging Formats
 
@@ -378,6 +417,13 @@ Draft-14 and draft-16 dual-version implementation with:
 - State management with Riverpod
 - Platform-specific media capture (Linux, Android, iOS, macOS, Windows)
 - CMAF/fMP4 and MoQ-MI packaging for MoQ publishing
+- CMAF publisher with auto-forward publishing mode, subscribe filter enforcement, and PUBLISH_DONE lifecycle
+- Init segment published as group 0 object 0 on each media track
+- JSON-based catalog with format field for CMSF/LOC interop, catalog subscriber, and timeline management
+- Native Opus encoder (opus_dart/opus_flutter) and VideoToolbox H.264 encoder (macOS/iOS)
+- Android native capture pipeline via MediaCodec/AudioRecord platform channel
+- Datagram capability detection for QUIC and WebTransport transports
+- Media streaming playback pipeline with CMAF/moq-mi decode routing
 - Server-side PUBLISH/PUBLISH_OK/PUBLISH_ERROR handling for receiving publish requests
 - Publisher-side SUBSCRIBE/SUBSCRIBE_OK/SUBSCRIBE_ERROR handling for relay subscriptions
 - GOAWAY message handling with migration URI support
@@ -391,14 +437,14 @@ Draft-14 and draft-16 dual-version implementation with:
 
 ### Test Coverage
 
-- **Wire Format Tests**
-  - Varint encoding/decoding (32-bit and 64-bit)
-  - Tuple encoding/decoding
-  - Location encoding/decoding
-  - Message parser
-
-- **Control Message Tests**: Round-trip serialization for all control messages
+- **Wire Format Tests**: Varint encoding/decoding (32/64-bit), tuple, location, message parser
+- **Control Message Tests**: Round-trip serialization for all draft-14 control messages
+- **Draft-16 Control Message Tests**: Version-aware message dispatch, new message types
 - **Data Message Tests**: Object datagram, subgroup header, subgroup object
+- **Data Parser Tests**: Incremental parser edge cases, delta-plus-one encoding
+- **Catalog Tests**: JSON parsing, format field (CMSF/LOC), catalog subscription flow, timeline seeking
+- **Publisher Tests**: CMAF publisher behavior, init segment publishing, PUBLISH_DONE lifecycle
+- **Media Tests**: Streaming playback pipeline, decode/playback routing
 - **Client Integration Tests**
   - Connection flow (CLIENT_SETUP/SERVER_SETUP handshake, timeout, disconnect)
   - Subscription flow (SUBSCRIBE/SUBSCRIBE_OK/SUBSCRIBE_ERROR, unsubscribe)
@@ -407,6 +453,8 @@ Draft-14 and draft-16 dual-version implementation with:
   - GOAWAY handling (with and without migration URI)
   - Publisher mode (incoming SUBSCRIBE requests, acceptSubscribe, rejectSubscribe, PUBLISH_DONE)
   - Data stream handling (openDataStream, writeSubgroupHeader)
+- **Live Interop Tests** (gated: `MOQ_LIVE_INTEROP=1`): Draft-14/16 real relay validation
+- **Relay Datagram Tests** (gated: `MOQ_DATAGRAM_TEST=1`): QUIC and WebTransport datagram capability
 
 ## Saved Preferences
 
