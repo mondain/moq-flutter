@@ -214,15 +214,12 @@ class MoQPublisher {
         packaging: 'loc',
         isLive: true,
         targetLatency: 2000,
-        timescale: 1000000,
         role: 'video',
-        selectionParams: SelectionParams(
-          codec: codec,
-          width: width,
-          height: height,
-          framerate: framerate,
-          bitrate: bitrate,
-        ),
+        codec: codec,
+        width: width,
+        height: height,
+        framerate: framerate,
+        bitrate: bitrate,
       ),
     );
     _ensureTimelineTrack(trackName);
@@ -257,14 +254,11 @@ class MoQPublisher {
         packaging: 'loc',
         isLive: true,
         targetLatency: 2000,
-        timescale: 1000000,
         role: 'audio',
-        selectionParams: SelectionParams(
-          codec: codec,
-          samplerate: samplerate,
-          channelConfig: channelConfig,
-          bitrate: bitrate,
-        ),
+        codec: codec,
+        samplerate: samplerate,
+        channelConfig: channelConfig,
+        bitrate: bitrate,
       ),
     );
     _ensureTimelineTrack(trackName);
@@ -458,11 +452,10 @@ class MoQPublisher {
       namespace: _namespaceStr,
       packaging: 'mediatimeline',
       role: 'timeline',
-      parentName: parentName,
       depends: [parentName],
       isLive: true,
       targetLatency: 2000,
-      selectionParams: SelectionParams(mimeType: 'application/json'),
+      mimeType: 'application/json',
     );
   }
 

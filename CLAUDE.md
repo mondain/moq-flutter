@@ -65,8 +65,8 @@ This is a Media over QUIC (MoQ) Flutter client implementing [draft-ietf-moq-tran
    - `CmafPublisher`: fMP4/CMAF packaging via `H264Fmp4Muxer`/`OpusFmp4Muxer`, groups on video keyframes, publishes init segment as group 0 object 0 on each media track, handles incoming SUBSCRIBE from relay (per draft-law-moq-carp-00); supports auto-forward publishing mode via PUBLISH messages, honors subscribe filter types (LatestObject, NextGroupStart, AbsoluteStart, AbsoluteRange), sends PUBLISH_DONE to subscribers on stop
    - `MoqMiPublisher`: moq-mi format (draft-cenzano-moq-media-interop-03), raw codec bitstreams with metadata in extension headers, one QUIC stream per video GOP but one stream per audio frame, track naming `{prefix}audio0`/`{prefix}video0`
 
-5. **Catalog Layer** (`lib/moq/catalog/`)
-   - `moq_catalog.dart`: JSON-based catalog with tracks, packaging info, and `format` field for CMSF/LOC interop
+5. **Catalog Layer** (`lib/moq/catalog/`) per draft-ietf-moq-msf-00 / draft-ietf-moq-cmsf-00
+   - `moq_catalog.dart`: MSF/CMSF catalog with flattened track selection params, `deltaUpdate`/`addTracks`/`removeTracks`/`cloneTracks` delta operations, `trackDuration` (VOD), `maxGrpSapStartingType`/`maxObjSapStartingType` (CMSF); backward-compatible parsing of legacy `commonTrackFields` and nested `selectionParams`
    - `moq_catalog_subscriber.dart`: Subscribes to catalog objects and manages track subscriptions
    - `moq_timeline.dart`: Timeline management for playback and seeking
 
@@ -80,7 +80,7 @@ This is a Media over QUIC (MoQ) Flutter client implementing [draft-ietf-moq-tran
    - `native_h264_encoder.dart`: VideoToolbox H.264 encoding for macOS/iOS
    - fMP4 muxing for H.264 (baseline, ultrafast) and Opus (48kHz, 128kbps)
    - `streaming_playback.dart`: Media decode/playback pipeline routing CMAF/moq-mi streams to players
-   - `moq_media_decoder.dart`: Decodes CMAF/moq-mi streams to PCM/H.264
+   - `moq_media_decoder.dart`: Decodes moq-mi (extension headers) and raw LOC (no headers, infers type from track name) to MediaFrames
    - Video player integration with media_kit
    - `lib/moq/media/fmp4/`: CMAF/fMP4 segment packaging (H.264, Opus, AAC muxers)
 
@@ -141,7 +141,9 @@ Draft specs and RFCs are stored as `.txt` files in `docs/` for easy parsing. Key
 - `draft-ietf-moq-transport-14.txt`: Primary spec (draft-14)
 - `draft-ietf-moq-transport-16.txt`: Primary spec (draft-16)
 - `draft-cenzano-moq-media-interop-03.txt`: moq-mi packaging spec
-- `draft-law-moq-carp-00.txt`: CARP streaming (used by CmafPublisher)
+- `draft-ietf-moq-msf-00.txt`: MSF - MOQT Streaming Format (supersedes WARP/CARP/catalogformat)
+- `draft-ietf-moq-cmsf-00.txt`: CMSF - CMAF Streaming Format (extends MSF)
 - `draft-ietf-moq-loc-01.txt`: LOC container spec
 - `rfc9221.txt`: QUIC Datagrams (implemented)
-- `draft-ietf-moq-catalogformat-01.txt` / `draft-wilaw-moq-catalogformat-02.txt`: Catalog format
+- `draft-ietf-moq-catalogformat-01.txt` / `draft-wilaw-moq-catalogformat-02.txt`: Legacy catalog format (superseded by MSF/CMSF)
+- `draft-law-moq-carp-00.txt`: Legacy CARP streaming (superseded by CMSF)

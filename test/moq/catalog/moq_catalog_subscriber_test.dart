@@ -87,7 +87,6 @@ void main() {
                 namespace: 'live',
                 packaging: 'mediatimeline',
                 role: 'timeline',
-                parentName: 'video0',
                 depends: const ['video0'],
               ),
             ],

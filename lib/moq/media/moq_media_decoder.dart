@@ -64,12 +64,16 @@ enum MediaFrameType {
 class MoqMediaDecoder {
   Uint8List? _lastVideoCodecConfig;
   bool _hasReceivedKeyframe = false;
+  Int64 _locVideoSeqId = Int64(0);
+  Int64 _locAudioSeqId = Int64(0);
 
   /// Decode a MoQ object into a media frame
   ///
+  /// Supports both moq-mi format (with extension headers carrying metadata)
+  /// and raw LOC format (no extension headers, raw codec data).
+  ///
   /// Returns null if:
   /// - Object has no payload
-  /// - Extension headers are missing or invalid
   /// - Waiting for keyframe (video)
   MediaFrame? decode(MoQObject object) {
     if (object.payload == null || object.payload!.isEmpty) {
@@ -79,12 +83,12 @@ class MoqMediaDecoder {
 
     // Convert extension headers from the object
     final extensionHeaders = object.extensionHeaders
-        .map((h) => KeyValuePair(type: h.type, value: h.value))
+        .map((h) => KeyValuePair(type: h.type, value: h.value, intValue: h.intValue))
         .toList();
 
     if (extensionHeaders.isEmpty) {
-      debugPrint('MoqMediaDecoder: No extension headers');
-      return null;
+      // No extension headers -> LOC format: raw codec data
+      return _decodeLoc(object);
     }
 
     // Parse moq-mi extension headers
@@ -94,11 +98,11 @@ class MoqMediaDecoder {
     );
 
     if (moqMiData == null) {
-      // Log more details about what we received
+      // Extension headers present but not valid moq-mi; try LOC fallback
       final headerTypes = extensionHeaders.map((h) => '0x${h.type.toRadixString(16)}').join(', ');
-      debugPrint('MoqMediaDecoder: Failed to parse moq-mi headers. '
+      debugPrint('MoqMediaDecoder: moq-mi parse failed, falling back to LOC. '
           'Headers: [$headerTypes], payload size: ${object.payload!.length}');
-      return null;
+      return _decodeLoc(object);
     }
 
     if (moqMiData.isVideo) {
@@ -108,6 +112,72 @@ class MoqMediaDecoder {
     }
 
     return null;
+  }
+
+  /// Decode a raw LOC object (no moq-mi extension headers)
+  ///
+  /// Infers media type from the track name (video/audio) and treats
+  /// the payload as raw codec data (H.264 NALUs or Opus/AAC frames).
+  MediaFrame? _decodeLoc(MoQObject object) {
+    final trackName = String.fromCharCodes(object.trackName);
+    final isVideo = trackName.contains('video') ||
+        trackName.endsWith('.m4s') && !trackName.contains('audio');
+    final isAudio = trackName.contains('audio');
+
+    final now = Int64(DateTime.now().millisecondsSinceEpoch);
+
+    if (isVideo) {
+      return _decodeLocVideo(object, now);
+    } else if (isAudio) {
+      return _decodeLocAudio(object, now);
+    }
+
+    debugPrint('MoqMediaDecoder: LOC object on unknown track "$trackName"');
+    return null;
+  }
+
+  MediaFrame? _decodeLocVideo(MoQObject object, Int64 wallclock) {
+    final data = object.payload!;
+    final isKeyframe = _isH264Keyframe(data);
+
+    if (isKeyframe) {
+      _hasReceivedKeyframe = true;
+    }
+
+    if (!_hasReceivedKeyframe) {
+      debugPrint('MoqMediaDecoder: LOC video waiting for keyframe '
+          '(${data.length} bytes)');
+      return null;
+    }
+
+    _locVideoSeqId += Int64.ONE;
+    return MediaFrame(
+      type: MediaFrameType.videoH264,
+      seqId: _locVideoSeqId,
+      pts: object.objectId,
+      dts: object.objectId,
+      timebase: Int64(90000),
+      duration: Int64(3000), // ~33ms at 90kHz
+      wallclock: wallclock,
+      data: data,
+      isKeyframe: isKeyframe,
+    );
+  }
+
+  MediaFrame? _decodeLocAudio(MoQObject object, Int64 wallclock) {
+    _locAudioSeqId += Int64.ONE;
+    return MediaFrame(
+      type: MediaFrameType.audioOpus,
+      seqId: _locAudioSeqId,
+      pts: object.objectId,
+      dts: object.objectId,
+      timebase: Int64(48000),
+      duration: Int64(960), // 20ms at 48kHz
+      wallclock: wallclock,
+      data: object.payload!,
+      sampleRate: Int64(48000),
+      channels: 2,
+    );
   }
 
   MediaFrame? _decodeVideoFrame(MoqMiData data) {
@@ -246,6 +316,8 @@ class MoqMediaDecoder {
   void reset() {
     _lastVideoCodecConfig = null;
     _hasReceivedKeyframe = false;
+    _locVideoSeqId = Int64(0);
+    _locAudioSeqId = Int64(0);
   }
 
   /// Get last received video codec config

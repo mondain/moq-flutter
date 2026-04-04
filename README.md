@@ -13,7 +13,7 @@ lib/
 │   │   ├── moq_client.dart        # Main client with subscription handling
 │   │   └── replay_stream.dart     # ReplayStreamController for late-joiners
 │   ├── catalog/                  # Catalog and timeline management
-│   │   ├── moq_catalog.dart       # JSON-based catalog with format field
+│   │   ├── moq_catalog.dart       # JSON catalog (streamingFormat, commonTrackFields)
 │   │   ├── moq_catalog_subscriber.dart  # Catalog subscription and track management
 │   │   └── moq_timeline.dart      # Timeline management for playback/seeking
 │   ├── media/                    # Media capture and encoding
@@ -387,8 +387,10 @@ The application supports publishing live audio and video with platform-specific 
 
 ### Packaging Formats
 
-- **CMAF/fMP4**: CARP-compliant fragmented MP4 packaging
-- **LOC**: Raw codec data packaging (H.264 NALUs, Opus frames)
+Catalogs follow [MSF](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/) (LOC tracks) and [CMSF](https://datatracker.ietf.org/doc/draft-ietf-moq-cmsf/) (CMAF tracks) with per-track `packaging` and flattened selection parameters.
+
+- **CMAF/fMP4** (`packaging: "cmaf"`): CMSF-compliant fragmented MP4 packaging with Base64 `initData`
+- **LOC** (`packaging: "loc"`): Raw codec data packaging (H.264 NALUs, Opus frames)
 - **MoQ-MI**: Media Interop format per [draft-cenzano-moq-media-interop-03](https://datatracker.ietf.org/doc/draft-cenzano-moq-media-interop/)
   - LOC-based packaging with extension headers for metadata
   - Video: H.264 AVCC format with PTS/DTS/duration/wallclock metadata
@@ -419,7 +421,7 @@ Draft-14 and draft-16 dual-version implementation with:
 - CMAF/fMP4 and MoQ-MI packaging for MoQ publishing
 - CMAF publisher with auto-forward publishing mode, subscribe filter enforcement, and PUBLISH_DONE lifecycle
 - Init segment published as group 0 object 0 on each media track
-- JSON-based catalog with format field for CMSF/LOC interop, catalog subscriber, and timeline management
+- MSF/CMSF catalog (draft-ietf-moq-msf-00 / draft-ietf-moq-cmsf-00) with flattened track params, delta updates (addTracks/removeTracks/cloneTracks), VOD trackDuration, and backward-compatible parsing of legacy catalogformat
 - Native Opus encoder (opus_dart/opus_flutter) and VideoToolbox H.264 encoder (macOS/iOS)
 - Android native capture pipeline via MediaCodec/AudioRecord platform channel
 - Datagram capability detection for QUIC and WebTransport transports
@@ -472,6 +474,8 @@ The application saves user preferences using Flutter's shared_preferences packag
 
 - [draft-ietf-moq-transport-16](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/16/)
 - [draft-ietf-moq-transport-14](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/14/)
+- [draft-ietf-moq-msf-00](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/) (MSF - MOQT Streaming Format)
+- [draft-ietf-moq-cmsf-00](https://datatracker.ietf.org/doc/draft-ietf-moq-cmsf/) (CMSF - CMAF Streaming Format)
 - [MoQ Working Group](https://datatracker.ietf.org/wg/moq/about/)
 - [Dart Language Documentation](https://dart.dev/guides)
 - [Flutter Documentation](https://flutter.dev/docs)

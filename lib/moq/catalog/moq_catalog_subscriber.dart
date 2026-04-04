@@ -252,7 +252,7 @@ class MoQCatalogSubscriber {
       if (!_isTimelineTrack(track)) {
         return false;
       }
-      if (track.parentName != null && mediaNames.contains(track.parentName)) {
+      if (track.depends?.first != null && mediaNames.contains(track.depends?.first)) {
         return true;
       }
       return track.depends?.any(mediaNames.contains) ?? false;
@@ -312,7 +312,7 @@ class MoQCatalogSubscriber {
             _timelineController.add(
               TimelineUpdate(
                 track: track,
-                parentTrackName: track.parentName ?? track.name,
+                parentTrackName: track.depends?.first ?? track.name,
                 mediaEntries: decodeMediaTimeline(object.payload!),
               ),
             );
@@ -320,7 +320,7 @@ class MoQCatalogSubscriber {
             _timelineController.add(
               TimelineUpdate(
                 track: track,
-                parentTrackName: track.parentName ?? track.name,
+                parentTrackName: track.depends?.first ?? track.name,
                 eventEntries: decodeEventTimeline(object.payload!),
               ),
             );

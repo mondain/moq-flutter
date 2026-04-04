@@ -51,7 +51,7 @@ void main() {
         (track) => track.name == 'video0.timeline',
       );
       expect(timelineTrack.packaging, equals('mediatimeline'));
-      expect(timelineTrack.parentName, equals('video0'));
+      expect(timelineTrack.depends, contains('video0'));
       transport.clearSentMessages();
 
       await publisher.publishFrame(
@@ -318,7 +318,7 @@ void main() {
         );
         expect(timelineTrack.packaging, equals('eventtimeline'));
         expect(timelineTrack.eventType, equals('urn:ietf:params:moq:cmsf:sap'));
-        expect(timelineTrack.parentName, equals('audio0'));
+        expect(timelineTrack.depends, contains('audio0'));
       },
     );
 

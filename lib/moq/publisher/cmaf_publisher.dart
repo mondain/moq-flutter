@@ -225,17 +225,13 @@ class CmafPublisher {
             role: 'video',
             isLive: true,
             targetLatency: 2000,
-            timescale: config.timescale,
-            maxGroupSapStartingType: 1,
-            maxObjectSapStartingType: 1,
-            selectionParams: SelectionParams(
-              codec:
-                  config.codec ?? 'avc1.64001f', // Default H.264 High Profile
-              mimeType: 'video/mp4',
-              width: config.width,
-              height: config.height,
-              framerate: config.frameRate,
-            ),
+            maxGrpSapStartingType: 1,
+            maxObjSapStartingType: 1,
+            codec: config.codec ?? 'avc1.64001f', // Default H.264 High Profile
+            mimeType: 'video/mp4',
+            width: config.width,
+            height: config.height,
+            framerate: config.frameRate,
           ),
         );
       } else if (config is AudioTrackConfig) {
@@ -248,16 +244,13 @@ class CmafPublisher {
             role: 'audio',
             isLive: true,
             targetLatency: 2000,
-            timescale: 48000,
-            maxGroupSapStartingType: 1,
-            maxObjectSapStartingType: 1,
-            selectionParams: SelectionParams(
-              codec: config.codec ?? 'opus', // Default Opus
-              mimeType: 'audio/mp4',
-              samplerate: config.sampleRate,
-              channelConfig: config.channels.toString(),
-              bitrate: config.bitrate,
-            ),
+            maxGrpSapStartingType: 1,
+            maxObjSapStartingType: 1,
+            codec: config.codec ?? 'opus', // Default Opus
+            mimeType: 'audio/mp4',
+            samplerate: config.sampleRate,
+            channelConfig: config.channels.toString(),
+            bitrate: config.bitrate,
           ),
         );
       }
@@ -541,38 +534,7 @@ class CmafPublisher {
   void _updateCatalogCodec(String trackName, String codec) {
     for (int i = 0; i < _catalogTracks.length; i++) {
       if (_catalogTracks[i].name == trackName) {
-        final oldTrack = _catalogTracks[i];
-        _catalogTracks[i] = CatalogTrack(
-          name: oldTrack.name,
-          namespace: oldTrack.namespace,
-          packaging: oldTrack.packaging,
-          label: oldTrack.label,
-          role: oldTrack.role,
-          parentName: oldTrack.parentName,
-          initData: oldTrack.initData,
-          initTrack: oldTrack.initTrack,
-          eventType: oldTrack.eventType,
-          renderGroup: oldTrack.renderGroup,
-          altGroup: oldTrack.altGroup,
-          temporalId: oldTrack.temporalId,
-          spatialId: oldTrack.spatialId,
-          targetLatency: oldTrack.targetLatency,
-          timescale: oldTrack.timescale,
-          maxGroupSapStartingType: oldTrack.maxGroupSapStartingType,
-          maxObjectSapStartingType: oldTrack.maxObjectSapStartingType,
-          isLive: oldTrack.isLive,
-          depends: oldTrack.depends,
-          selectionParams: SelectionParams(
-            codec: codec,
-            mimeType: oldTrack.selectionParams?.mimeType,
-            width: oldTrack.selectionParams?.width,
-            height: oldTrack.selectionParams?.height,
-            framerate: oldTrack.selectionParams?.framerate,
-            samplerate: oldTrack.selectionParams?.samplerate,
-            channelConfig: oldTrack.selectionParams?.channelConfig,
-            bitrate: oldTrack.selectionParams?.bitrate,
-          ),
-        );
+        _catalogTracks[i] = _catalogTracks[i].copyWith(codec: codec);
         break;
       }
     }
@@ -920,12 +882,11 @@ class CmafPublisher {
       namespace: _namespaceStr,
       packaging: 'eventtimeline',
       role: 'timeline',
-      parentName: parentName,
       eventType: 'urn:ietf:params:moq:cmsf:sap',
       depends: [parentName],
       isLive: true,
       targetLatency: 2000,
-      selectionParams: SelectionParams(mimeType: 'application/json'),
+      mimeType: 'application/json',
     );
   }
 
