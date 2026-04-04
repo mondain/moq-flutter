@@ -371,47 +371,90 @@ class MoQVideoPlayer {
     }
 
     _logger.i(
-      'Initializing player with ${session.mediaSubscriptions.length} CMSF subscriptions',
+      'Initializing CMSF player with ${session.mediaSubscriptions.length} subscriptions',
     );
 
-    _playbackPipeline = StreamingPlaybackPipeline();
-    await _playbackPipeline!.initialize();
-    _videoReadySubscription = _playbackPipeline!.onVideoReady.listen(
-      _handleVideoReady,
-    );
-
+    // Derive pipeline configuration from catalog tracks
+    CatalogTrack? videoTrack;
+    CatalogTrack? audioTrack;
     final cmafTracks = <CmafTrackInit>[];
     final trackByName = <String, CatalogTrack>{};
+
     for (final track in session.mediaTracks) {
-      if (track.packaging != 'cmaf') {
+      if (track.packaging != 'cmaf') continue;
+
+      final isVideo = track.role == 'video' || track.name.contains('video');
+      final isAudio = track.role == 'audio' || track.name.contains('audio');
+
+      if (isVideo) videoTrack ??= track;
+      if (isAudio) audioTrack ??= track;
+
+      trackByName[track.name] = track;
+
+      _logger.i(
+        'CMSF track "${track.name}": '
+        'codec=${track.codec}, role=${track.role}'
+        '${track.width != null ? ", ${track.width}x${track.height}" : ""}'
+        '${track.samplerate != null ? ", ${track.samplerate}Hz" : ""}'
+        '${track.initData != null ? ", initData=${track.initData!.length}chars" : ", no initData"}',
+      );
+
+      if (track.initData == null || track.initData!.isEmpty) {
+        _logger.w('CMSF track ${track.name} is missing initData, skipping');
         continue;
       }
-      if (track.initData == null || track.initData!.isEmpty) {
-        throw StateError('CMSF track ${track.name} is missing initData');
-      }
-      trackByName[track.name] = track;
+
       cmafTracks.add(
         CmafTrackInit(
           trackName: track.name,
           initSegment: Uint8List.fromList(base64.decode(track.initData!)),
-          isVideo: track.role == 'video',
-          isAudio: track.role == 'audio',
+          isVideo: isVideo,
+          isAudio: isAudio,
         ),
       );
     }
 
     if (cmafTracks.isEmpty) {
-      throw StateError('Catalog session does not contain playable CMSF tracks');
+      throw StateError('Catalog session has no playable CMSF tracks with initData');
     }
 
-    _playbackPipeline!.configureDirectCmafPlayback(cmafTracks);
+    // Build pipeline with catalog-derived dimensions and sample rates
+    final audioChannels = audioTrack?.channelConfig != null
+        ? (int.tryParse(audioTrack!.channelConfig!) ?? 2)
+        : 2;
+
+    _playbackPipeline = StreamingPlaybackPipeline(
+      videoWidth: videoTrack?.width ?? 1920,
+      videoHeight: videoTrack?.height ?? 1080,
+      videoTimescale: 90000,
+      audioSampleRate: audioTrack?.samplerate ?? 48000,
+      audioChannels: audioChannels,
+    );
+    await _playbackPipeline!.initialize();
+    _videoReadySubscription = _playbackPipeline!.onVideoReady.listen(
+      _handleVideoReady,
+    );
+
+    // Determine audio type from catalog codec
+    MediaFrameType? audioType;
+    if (audioTrack?.codec != null) {
+      final codec = audioTrack!.codec!.toLowerCase();
+      if (codec.contains('opus')) {
+        audioType = MediaFrameType.audioOpus;
+      } else {
+        audioType = MediaFrameType.audioAac;
+      }
+    }
+
+    _playbackPipeline!.configureDirectCmafPlayback(
+      cmafTracks,
+      audioType: audioType,
+    );
 
     for (final subscription in session.mediaSubscriptions) {
       final trackName = String.fromCharCodes(subscription.trackName);
       final track = trackByName[trackName];
-      if (track == null) {
-        continue;
-      }
+      if (track == null) continue;
       final sub = subscription.objectStream.listen(
         (object) => _handleCmafObject(object, track),
         onError: (error) => _logger.e('Object stream error: $error'),
@@ -421,7 +464,7 @@ class MoQVideoPlayer {
     }
 
     _isInitialized = true;
-    _logger.i('Player initialized with direct CMSF pipeline');
+    _logger.i('Player initialized with CMSF pipeline');
   }
 
   /// Handle video group tracking for mid-stream join detection

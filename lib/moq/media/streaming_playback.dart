@@ -939,7 +939,13 @@ class StreamingPlaybackPipeline {
   }
 
   /// Configure the pipeline to accept raw CMAF objects directly.
-  void configureDirectCmafPlayback(List<CmafTrackInit> tracks) {
+  ///
+  /// [audioType] overrides the default audio codec detection. When null and
+  /// audio tracks are present, defaults to AAC for CMAF compatibility.
+  void configureDirectCmafPlayback(
+    List<CmafTrackInit> tracks, {
+    MediaFrameType? audioType,
+  }) {
     if (tracks.isEmpty) {
       throw ArgumentError('At least one CMAF track is required');
     }
@@ -950,12 +956,15 @@ class StreamingPlaybackPipeline {
     _audioEnabled = _directCmafHasAudio;
     _initWritten = true;
     _videoConfigReady = true;
-    _detectedAudioType = _directCmafHasAudio ? MediaFrameType.audioAac : null;
+    _detectedAudioType = _directCmafHasAudio
+        ? (audioType ?? MediaFrameType.audioAac)
+        : null;
     _write(initSegment);
 
     debugPrint(
       'StreamingPlayback: Direct CMAF init segment written '
-      '(${initSegment.length} bytes, audio=$_directCmafHasAudio)',
+      '(${initSegment.length} bytes, audio=$_directCmafHasAudio, '
+      'audioType=$_detectedAudioType)',
     );
   }
 
