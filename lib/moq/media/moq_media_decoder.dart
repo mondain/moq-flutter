@@ -91,27 +91,31 @@ class MoqMediaDecoder {
       return _decodeLoc(object);
     }
 
-    // Parse moq-mi extension headers
-    final moqMiData = MoqMiPackager.parseExtensionHeaders(
-      extensionHeaders,
-      object.payload!,
+    // Check for moq-mi media type header (0x0A) before attempting parse.
+    // MSF/LOC objects may carry transport-level extension headers (e.g. 0x2,
+    // 0x6) that are not moq-mi; skip the moq-mi path entirely for those.
+    final hasMoqMiMediaType = extensionHeaders.any(
+      (h) => h.type == MoqMiExtensionHeaders.mediaType,
     );
 
-    if (moqMiData == null) {
-      // Extension headers present but not valid moq-mi; try LOC fallback
-      final headerTypes = extensionHeaders.map((h) => '0x${h.type.toRadixString(16)}').join(', ');
-      debugPrint('MoqMediaDecoder: moq-mi parse failed, falling back to LOC. '
-          'Headers: [$headerTypes], payload size: ${object.payload!.length}');
-      return _decodeLoc(object);
+    if (hasMoqMiMediaType) {
+      final moqMiData = MoqMiPackager.parseExtensionHeaders(
+        extensionHeaders,
+        object.payload!,
+      );
+
+      if (moqMiData != null) {
+        if (moqMiData.isVideo) {
+          return _decodeVideoFrame(moqMiData);
+        } else if (moqMiData.isAudio) {
+          return _decodeAudioFrame(moqMiData);
+        }
+        return null;
+      }
     }
 
-    if (moqMiData.isVideo) {
-      return _decodeVideoFrame(moqMiData);
-    } else if (moqMiData.isAudio) {
-      return _decodeAudioFrame(moqMiData);
-    }
-
-    return null;
+    // No moq-mi media type or parse failed -> LOC decode
+    return _decodeLoc(object);
   }
 
   /// Decode a raw LOC object (no moq-mi extension headers)
