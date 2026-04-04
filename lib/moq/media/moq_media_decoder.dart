@@ -161,6 +161,10 @@ class MoqMediaDecoder {
       return null;
     }
 
+    // fMP4 mdat requires AVCC format (4-byte length-prefixed NALUs).
+    // LOC relays typically send Annex-B (start codes). Convert if needed.
+    final avccData = _hasAnnexBStartCodes(data) ? _annexBToAvcc(data) : data;
+
     _locVideoSeqId += Int64.ONE;
     return MediaFrame(
       type: MediaFrameType.videoH264,
@@ -170,10 +174,50 @@ class MoqMediaDecoder {
       timebase: Int64(90000),
       duration: Int64(3000), // ~33ms at 90kHz
       wallclock: wallclock,
-      data: data,
+      data: avccData,
       codecConfig: isKeyframe ? _lastVideoCodecConfig : null,
       isKeyframe: isKeyframe,
     );
+  }
+
+  /// Convert Annex-B H.264 (start code delimited) to AVCC (4-byte length prefixed).
+  Uint8List _annexBToAvcc(Uint8List data) {
+    final nals = _extractNalUnits(data);
+    if (nals.isEmpty) return data;
+
+    // Filter out SPS/PPS NALs from the frame data -- they belong in the
+    // AVCDecoderConfigurationRecord (init segment), not in mdat samples.
+    // Keeping them in the sample confuses some hardware decoders.
+    final frameNals = nals.where((nal) {
+      if (nal.isEmpty) return false;
+      final type = nal[0] & 0x1F;
+      return type != 7 && type != 8; // exclude SPS(7) and PPS(8)
+    }).toList();
+
+    if (frameNals.isEmpty) {
+      // Only had SPS/PPS, no actual frame data
+      return data;
+    }
+
+    // Calculate total size: 4 bytes length prefix per NAL + NAL data
+    int totalSize = 0;
+    for (final nal in frameNals) {
+      totalSize += 4 + nal.length;
+    }
+
+    final result = Uint8List(totalSize);
+    int offset = 0;
+    for (final nal in frameNals) {
+      // Write 4-byte big-endian length
+      result[offset++] = (nal.length >> 24) & 0xFF;
+      result[offset++] = (nal.length >> 16) & 0xFF;
+      result[offset++] = (nal.length >> 8) & 0xFF;
+      result[offset++] = nal.length & 0xFF;
+      result.setAll(offset, nal);
+      offset += nal.length;
+    }
+
+    return result;
   }
 
   /// Extract SPS and PPS NAL units from H.264 data and build an
