@@ -60,20 +60,73 @@ enum MediaFrameType {
   audioAac,
 }
 
+/// Catalog-derived codec configuration for a track.
+///
+/// When a catalog is available, this eliminates guessing about codec type,
+/// sample rate, resolution, and other parameters in the LOC decoder.
+class LocTrackConfig {
+  final String trackName;
+  final String? codec;
+  final String? mimeType;
+  final int? width;
+  final int? height;
+  final int? framerate;
+  final int? bitrate;
+  final int? samplerate;
+  final int? channels;
+  final Uint8List? initData;
+
+  LocTrackConfig({
+    required this.trackName,
+    this.codec,
+    this.mimeType,
+    this.width,
+    this.height,
+    this.framerate,
+    this.bitrate,
+    this.samplerate,
+    this.channels,
+    this.initData,
+  });
+
+  bool get isAac =>
+      codec != null &&
+      (codec!.startsWith('mp4a') || codec!.toLowerCase().contains('aac'));
+
+  bool get isOpus =>
+      codec == null || codec!.toLowerCase().contains('opus');
+
+  MediaFrameType get audioType =>
+      isAac ? MediaFrameType.audioAac : MediaFrameType.audioOpus;
+
+  int get audioTimebase => isAac ? (samplerate ?? 44100) : (samplerate ?? 48000);
+
+  int get audioFrameDuration => isAac ? 1024 : 960;
+
+  int get videoTimebase => 90000;
+
+  int get videoFrameDuration {
+    if (framerate != null && framerate! > 0) {
+      return videoTimebase ~/ framerate!;
+    }
+    return 3000; // ~33ms at 90kHz (30fps default)
+  }
+}
+
 /// Decodes MoQ objects into media frames.
 ///
 /// Supports moq-mi (extension headers) and raw LOC (no headers).
-/// For LOC, the audio codec can be hinted via [locAudioCodec] to
-/// avoid defaulting to Opus when the catalog says otherwise.
+/// When [trackConfigs] are provided from the catalog, codec type, sample rate,
+/// resolution, and frame timing are determined from catalog metadata rather
+/// than guessed.
 class MoqMediaDecoder {
   Uint8List? _lastVideoCodecConfig;
   bool _hasReceivedKeyframe = false;
   Int64 _locVideoSeqId = Int64(0);
   Int64 _locAudioSeqId = Int64(0);
 
-  /// Audio codec hint for LOC decode (e.g. "opus", "aac", "mp4a.40.2").
-  /// When null, defaults to Opus.
-  String? locAudioCodec;
+  /// Catalog-derived configuration per track name.
+  final Map<String, LocTrackConfig> trackConfigs = {};
 
   /// Decode a MoQ object into a media frame
   ///
@@ -128,27 +181,52 @@ class MoqMediaDecoder {
 
   /// Decode a raw LOC object (no moq-mi extension headers)
   ///
-  /// Infers media type from the track name (video/audio) and treats
-  /// the payload as raw codec data (H.264 NALUs or Opus/AAC frames).
+  /// Uses catalog-derived [trackConfigs] when available to determine codec
+  /// type and parameters. Falls back to track name heuristics only when
+  /// no catalog config exists.
   MediaFrame? _decodeLoc(MoQObject object) {
     final trackName = String.fromCharCodes(object.trackName);
-    final isVideo = trackName.contains('video') ||
-        trackName.endsWith('.m4s') && !trackName.contains('audio');
-    final isAudio = trackName.contains('audio');
+    final config = _findTrackConfig(trackName);
+
+    final isVideo = config?.codec?.startsWith('avc') == true ||
+        config?.codec?.startsWith('av0') == true ||
+        config?.codec?.startsWith('hvc') == true ||
+        config?.mimeType?.contains('video') == true ||
+        (config == null &&
+            (trackName.contains('video') ||
+                trackName.endsWith('.m4s') && !trackName.contains('audio')));
+    final isAudio = config?.mimeType?.contains('audio') == true ||
+        config?.isAac == true ||
+        config?.isOpus == true ||
+        (config == null && trackName.contains('audio'));
 
     final now = Int64(DateTime.now().millisecondsSinceEpoch);
 
     if (isVideo) {
-      return _decodeLocVideo(object, now);
+      return _decodeLocVideo(object, now, config);
     } else if (isAudio) {
-      return _decodeLocAudio(object, now);
+      return _decodeLocAudio(object, now, config);
     }
 
     debugPrint('MoqMediaDecoder: LOC object on unknown track "$trackName"');
     return null;
   }
 
-  MediaFrame? _decodeLocVideo(MoQObject object, Int64 wallclock) {
+  /// Find the track config by exact name or substring match.
+  LocTrackConfig? _findTrackConfig(String trackName) {
+    if (trackConfigs.containsKey(trackName)) {
+      return trackConfigs[trackName];
+    }
+    // Substring match for track names like "video-0" matching config "video"
+    for (final entry in trackConfigs.entries) {
+      if (trackName.contains(entry.key) || entry.key.contains(trackName)) {
+        return entry.value;
+      }
+    }
+    return null;
+  }
+
+  MediaFrame? _decodeLocVideo(MoQObject object, Int64 wallclock, LocTrackConfig? config) {
     final data = object.payload!;
     final isKeyframe = _isH264Keyframe(data);
 
@@ -173,14 +251,17 @@ class MoqMediaDecoder {
     // LOC relays typically send Annex-B (start codes). Convert if needed.
     final avccData = _hasAnnexBStartCodes(data) ? _annexBToAvcc(data) : data;
 
+    final timebase = config?.videoTimebase ?? 90000;
+    final duration = config?.videoFrameDuration ?? 3000;
+
     _locVideoSeqId += Int64.ONE;
     return MediaFrame(
       type: MediaFrameType.videoH264,
       seqId: _locVideoSeqId,
       pts: object.objectId,
       dts: object.objectId,
-      timebase: Int64(90000),
-      duration: Int64(3000), // ~33ms at 90kHz
+      timebase: Int64(timebase),
+      duration: Int64(duration),
       wallclock: wallclock,
       data: avccData,
       codecConfig: isKeyframe ? _lastVideoCodecConfig : null,
@@ -333,27 +414,25 @@ class MoqMediaDecoder {
     return false;
   }
 
-  MediaFrame? _decodeLocAudio(MoQObject object, Int64 wallclock) {
+  MediaFrame? _decodeLocAudio(MoQObject object, Int64 wallclock, LocTrackConfig? config) {
     _locAudioSeqId += Int64.ONE;
 
-    final isAac = locAudioCodec != null &&
-        (locAudioCodec!.startsWith('mp4a') ||
-         locAudioCodec!.toLowerCase().contains('aac'));
-    final type = isAac ? MediaFrameType.audioAac : MediaFrameType.audioOpus;
-    final timebase = isAac ? Int64(44100) : Int64(48000);
-    final duration = isAac ? Int64(1024) : Int64(960); // ~23ms AAC / 20ms Opus
+    final type = config?.audioType ?? MediaFrameType.audioOpus;
+    final timebase = config?.audioTimebase ?? 48000;
+    final duration = config?.audioFrameDuration ?? 960;
+    final channels = config?.channels ?? 2;
 
     return MediaFrame(
       type: type,
       seqId: _locAudioSeqId,
       pts: object.objectId,
       dts: object.objectId,
-      timebase: timebase,
-      duration: duration,
+      timebase: Int64(timebase),
+      duration: Int64(duration),
       wallclock: wallclock,
       data: object.payload!,
-      sampleRate: timebase,
-      channels: 2,
+      sampleRate: Int64(timebase),
+      channels: channels,
     );
   }
 
@@ -701,8 +780,12 @@ class MoqMediaPipeline {
     }
   }
 
-  /// Set the audio codec hint for LOC decode (e.g. "opus", "mp4a.40.2").
-  set locAudioCodec(String? codec) => _decoder.locAudioCodec = codec;
+  /// Set catalog-derived track configurations for LOC decode.
+  void setTrackConfigs(List<LocTrackConfig> configs) {
+    for (final config in configs) {
+      _decoder.trackConfigs[config.trackName] = config;
+    }
+  }
 
   /// Get video codec configuration (AVC decoder config)
   Uint8List? get videoCodecConfig => _decoder.videoCodecConfig;

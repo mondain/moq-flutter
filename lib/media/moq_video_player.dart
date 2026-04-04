@@ -10,6 +10,7 @@ import '../moq/catalog/moq_catalog.dart';
 import '../moq/catalog/moq_catalog_subscriber.dart';
 import '../moq/protocol/moq_messages.dart';
 import '../moq/client/moq_client.dart';
+import '../moq/media/moq_media_decoder.dart';
 import '../moq/media/streaming_playback.dart';
 
 /// Video player service for MoQ media streams
@@ -189,32 +190,96 @@ class MoQVideoPlayer {
       return;
     }
 
-    await initialize(session.mediaSubscriptions);
-
-    // Pass catalog hints to the decoder for LOC tracks
+    // Derive pipeline configuration from catalog tracks
+    CatalogTrack? videoTrack;
+    CatalogTrack? audioTrack;
     for (final track in session.mediaTracks) {
-      // Pre-seed AVC decoder config from catalog initData if available
-      if (track.initData != null &&
-          track.initData!.isNotEmpty &&
-          (track.role == 'video' || track.name.contains('video'))) {
+      if (track.role == 'video' || track.name.contains('video')) {
+        videoTrack ??= track;
+      } else if (track.role == 'audio' || track.name.contains('audio')) {
+        audioTrack ??= track;
+      }
+    }
+
+    // Build pipeline with catalog-derived dimensions and sample rates
+    _playbackPipeline = StreamingPlaybackPipeline(
+      videoWidth: videoTrack?.width ?? 1920,
+      videoHeight: videoTrack?.height ?? 1080,
+      videoTimescale: 90000,
+      audioSampleRate: audioTrack?.samplerate ?? 48000,
+      audioChannels: audioTrack?.channelConfig != null
+          ? (int.tryParse(audioTrack!.channelConfig!) ?? 2)
+          : 2,
+    );
+    await _playbackPipeline!.initialize();
+
+    _videoReadySubscription = _playbackPipeline!.onVideoReady.listen(
+      _handleVideoReady,
+    );
+
+    // Build LocTrackConfig from catalog for each media track
+    final trackConfigs = <LocTrackConfig>[];
+    for (final track in session.mediaTracks) {
+      Uint8List? initBytes;
+      if (track.initData != null && track.initData!.isNotEmpty) {
         try {
-          final config = base64.decode(track.initData!);
-          _playbackPipeline!.seedVideoConfig(config);
-          _logger.i(
-            'Pre-seeded AVC config from catalog initData '
-            '(${config.length} bytes) for track ${track.name}',
-          );
+          initBytes = Uint8List.fromList(base64.decode(track.initData!));
         } catch (e) {
           _logger.w('Failed to decode initData for ${track.name}: $e');
         }
       }
-      // Set audio codec hint from catalog so LOC decoder uses correct type
-      if ((track.role == 'audio' || track.name.contains('audio')) &&
-          track.codec != null) {
-        _playbackPipeline!.mediaPipeline.locAudioCodec = track.codec;
-        _logger.i('Audio codec hint from catalog: ${track.codec}');
+      trackConfigs.add(LocTrackConfig(
+        trackName: track.name,
+        codec: track.codec,
+        mimeType: track.mimeType,
+        width: track.width,
+        height: track.height,
+        framerate: track.framerate,
+        bitrate: track.bitrate,
+        samplerate: track.samplerate,
+        channels: track.channelConfig != null
+            ? int.tryParse(track.channelConfig!)
+            : null,
+        initData: initBytes,
+      ));
+
+      _logger.i(
+        'Catalog track "${track.name}": '
+        'codec=${track.codec}, packaging=${track.packaging}, '
+        'role=${track.role}'
+        '${track.width != null ? ", ${track.width}x${track.height}" : ""}'
+        '${track.samplerate != null ? ", ${track.samplerate}Hz" : ""}',
+      );
+    }
+
+    _playbackPipeline!.mediaPipeline.setTrackConfigs(trackConfigs);
+
+    // Pre-seed AVC decoder config from catalog initData
+    if (videoTrack?.initData != null && videoTrack!.initData!.isNotEmpty) {
+      try {
+        final config = base64.decode(videoTrack.initData!);
+        _playbackPipeline!.seedVideoConfig(Uint8List.fromList(config));
+        _logger.i(
+          'Pre-seeded AVC config from catalog initData '
+          '(${config.length} bytes)',
+        );
+      } catch (e) {
+        _logger.w('Failed to decode video initData: $e');
       }
     }
+
+    // Subscribe to incoming objects from all subscriptions
+    for (final subscription in session.mediaSubscriptions) {
+      final sub = subscription.objectStream.listen(
+        _handleMediaObject,
+        onError: (error) => _logger.e('Object stream error: $error'),
+        onDone: () => _logger.i('Object stream closed'),
+      );
+      _objectSubscriptions.add(sub);
+    }
+
+    _isInitialized = true;
+    _logger.i('Player initialized with LOC pipeline from catalog');
   }
 
   /// Initialize the player with a single MoQ subscription (legacy API)
