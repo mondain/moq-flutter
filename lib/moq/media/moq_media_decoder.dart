@@ -547,11 +547,16 @@ class MediaJitterBuffer {
 
 /// Complete media decoder pipeline
 ///
-/// Combines MoqMediaDecoder with jitter buffers for video and audio
+/// Decodes MoQ objects into media frames. When [useJitterBuffer] is true
+/// (default for moq-mi where frames may arrive out of order), frames pass
+/// through jitter buffers for reordering. When false (LOC streams that
+/// arrive in transport order), frames are emitted directly to avoid the
+/// 10ms polling latency that causes audio glitches on 20ms Opus frames.
 class MoqMediaPipeline {
   final MoqMediaDecoder _decoder = MoqMediaDecoder();
-  final MediaJitterBuffer _videoBuffer;
-  final MediaJitterBuffer _audioBuffer;
+  final bool useJitterBuffer;
+  late final MediaJitterBuffer? _videoBuffer;
+  late final MediaJitterBuffer? _audioBuffer;
 
   final _videoFrameController = StreamController<MediaFrame>.broadcast();
   final _audioFrameController = StreamController<MediaFrame>.broadcast();
@@ -562,25 +567,31 @@ class MoqMediaPipeline {
   int _audioFramesDropped = 0;
 
   MoqMediaPipeline({
+    this.useJitterBuffer = false,
     int videoBufferSize = 30,
     Duration videoMaxDelay = const Duration(milliseconds: 200),
     int audioBufferSize = 50,
     Duration audioMaxDelay = const Duration(milliseconds: 100),
-  }) : _videoBuffer = MediaJitterBuffer(
-          maxSize: videoBufferSize,
-          maxDelay: videoMaxDelay,
-        ),
-       _audioBuffer = MediaJitterBuffer(
-          maxSize: audioBufferSize,
-          maxDelay: audioMaxDelay,
-        ) {
-    // Forward frames from jitter buffers
-    _videoBuffer.frameStream.listen((frame) {
-      _videoFrameController.add(frame);
-    });
-    _audioBuffer.frameStream.listen((frame) {
-      _audioFrameController.add(frame);
-    });
+  }) {
+    if (useJitterBuffer) {
+      _videoBuffer = MediaJitterBuffer(
+        maxSize: videoBufferSize,
+        maxDelay: videoMaxDelay,
+      );
+      _audioBuffer = MediaJitterBuffer(
+        maxSize: audioBufferSize,
+        maxDelay: audioMaxDelay,
+      );
+      _videoBuffer!.frameStream.listen((frame) {
+        _videoFrameController.add(frame);
+      });
+      _audioBuffer!.frameStream.listen((frame) {
+        _audioFrameController.add(frame);
+      });
+    } else {
+      _videoBuffer = null;
+      _audioBuffer = null;
+    }
   }
 
   /// Stream of decoded video frames (in order)
@@ -607,14 +618,22 @@ class MoqMediaPipeline {
 
     if (frame.type == MediaFrameType.videoH264) {
       _videoFramesReceived++;
-      _videoBuffer.addFrame(frame);
+      if (useJitterBuffer) {
+        _videoBuffer!.addFrame(frame);
+      } else {
+        _videoFrameController.add(frame);
+      }
       if (_videoFramesReceived % 30 == 1) {
         debugPrint('MoqMediaPipeline: Video frame ${frame.seqId}, keyframe=${frame.isKeyframe}, '
             'size=${frame.data.length}, total=$_videoFramesReceived');
       }
     } else {
       _audioFramesReceived++;
-      _audioBuffer.addFrame(frame);
+      if (useJitterBuffer) {
+        _audioBuffer!.addFrame(frame);
+      } else {
+        _audioFrameController.add(frame);
+      }
       if (_audioFramesReceived % 50 == 1) {
         debugPrint('MoqMediaPipeline: Audio frame ${frame.seqId}, '
             'type=${frame.type}, total=$_audioFramesReceived');
@@ -633,16 +652,16 @@ class MoqMediaPipeline {
   int get audioFramesReceived => _audioFramesReceived;
   int get videoFramesDropped => _videoFramesDropped;
   int get audioFramesDropped => _audioFramesDropped;
-  int get videoBufferSize => _videoBuffer.length;
-  int get audioBufferSize => _audioBuffer.length;
-  int get videoBufferedMs => _videoBuffer.bufferedMs;
-  int get audioBufferedMs => _audioBuffer.bufferedMs;
+  int get videoBufferSize => _videoBuffer?.length ?? 0;
+  int get audioBufferSize => _audioBuffer?.length ?? 0;
+  int get videoBufferedMs => _videoBuffer?.bufferedMs ?? 0;
+  int get audioBufferedMs => _audioBuffer?.bufferedMs ?? 0;
 
   /// Reset the pipeline
   void reset() {
     _decoder.reset();
-    _videoBuffer.clear();
-    _audioBuffer.clear();
+    _videoBuffer?.clear();
+    _audioBuffer?.clear();
     _videoFramesReceived = 0;
     _audioFramesReceived = 0;
     _videoFramesDropped = 0;
@@ -651,8 +670,8 @@ class MoqMediaPipeline {
 
   /// Dispose resources
   void dispose() {
-    _videoBuffer.dispose();
-    _audioBuffer.dispose();
+    _videoBuffer?.dispose();
+    _audioBuffer?.dispose();
     _videoFrameController.close();
     _audioFrameController.close();
   }
