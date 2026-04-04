@@ -538,6 +538,112 @@ void main() {
     });
   });
 
+  group('SubscribeMessage draft-16', () {
+    test('draft-16 round-trip with KVP params', () {
+      final msg = SubscribeMessage(
+        requestId: Int64(2),
+        trackNamespace: [Uint8List.fromList('test-h264'.codeUnits)],
+        trackName: Uint8List.fromList('video0'.codeUnits),
+        subscriberPriority: 128,
+        groupOrder: GroupOrder.ascending,
+        forward: 1,
+        filterType: FilterType.nextGroupStart,
+      );
+
+      final bytes = msg.serialize(version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
+
+      expect(parsed, isA<SubscribeMessage>());
+      final result = parsed as SubscribeMessage;
+      expect(result.requestId, equals(Int64(2)));
+      expect(String.fromCharCodes(result.trackNamespace[0]), equals('test-h264'));
+      expect(String.fromCharCodes(result.trackName), equals('video0'));
+      expect(result.subscriberPriority, equals(128));
+      expect(result.groupOrder, equals(GroupOrder.ascending));
+      expect(result.forward, equals(1));
+      expect(result.filterType, equals(FilterType.nextGroupStart));
+    });
+
+    test('draft-16 with absolute start filter', () {
+      final msg = SubscribeMessage(
+        requestId: Int64(4),
+        trackNamespace: [Uint8List.fromList('ns'.codeUnits)],
+        trackName: Uint8List.fromList('t'.codeUnits),
+        subscriberPriority: 64,
+        groupOrder: GroupOrder.descending,
+        forward: 0,
+        filterType: FilterType.absoluteStart,
+        startLocation: Location(group: Int64(5), object: Int64(3)),
+      );
+
+      final bytes = msg.serialize(version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
+
+      expect(parsed, isA<SubscribeMessage>());
+      final result = parsed as SubscribeMessage;
+      expect(result.forward, equals(0));
+      expect(result.filterType, equals(FilterType.absoluteStart));
+      expect(result.startLocation?.group, equals(Int64(5)));
+      expect(result.startLocation?.object, equals(Int64(3)));
+    });
+  });
+
+  group('SubscribeOkMessage draft-16', () {
+    test('draft-16 round-trip with KVP params and track extensions', () {
+      final msg = SubscribeOkMessage(
+        requestId: Int64(2),
+        trackAlias: Int64(7),
+        expires: Int64(30000),
+        groupOrder: GroupOrder.ascending,
+        contentExists: 1,
+        largestLocation: Location(group: Int64(10), object: Int64(5)),
+      );
+
+      final bytes = msg.serialize(version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
+
+      expect(parsed, isA<SubscribeOkMessage>());
+      final result = parsed as SubscribeOkMessage;
+      expect(result.requestId, equals(Int64(2)));
+      expect(result.trackAlias, equals(Int64(7)));
+      expect(result.expires, equals(Int64(30000)));
+      expect(result.groupOrder, equals(GroupOrder.ascending));
+      expect(result.contentExists, equals(1));
+      expect(result.largestLocation?.group, equals(Int64(10)));
+      expect(result.largestLocation?.object, equals(Int64(5)));
+    });
+
+    test('draft-16 without content exists', () {
+      final msg = SubscribeOkMessage(
+        requestId: Int64(4),
+        trackAlias: Int64(1),
+        expires: Int64(0),
+        groupOrder: GroupOrder.none,
+        contentExists: 0,
+      );
+
+      final bytes = msg.serialize(version: MoQVersion.draft16);
+      final (parsed, _) = MoQControlMessageParser.parse(
+        bytes,
+        version: MoQVersion.draft16,
+      );
+
+      expect(parsed, isA<SubscribeOkMessage>());
+      final result = parsed as SubscribeOkMessage;
+      expect(result.contentExists, equals(0));
+      expect(result.largestLocation, isNull);
+    });
+  });
+
   group('ServerSetupMessage draft-16', () {
     test('draft-16 serializes without selected version', () {
       final msg = ServerSetupMessage(

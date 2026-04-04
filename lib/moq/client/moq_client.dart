@@ -1668,7 +1668,13 @@ class MoQClient {
   }
 
   /// Handle REQUEST_OK (draft-16) - consolidated OK for namespace announcements,
-  /// namespace subscriptions, and track status requests
+  /// namespace subscriptions, track status requests, subscriptions, fetches,
+  /// and outgoing publishes.
+  ///
+  /// Per spec Section 9.7, REQUEST_OK is the response to REQUEST_UPDATE,
+  /// TRACK_STATUS, SUBSCRIBE_NAMESPACE, and PUBLISH_NAMESPACE. However, some
+  /// relay implementations may also use it for SUBSCRIBE, FETCH, or PUBLISH
+  /// responses, so we check all pending request maps.
   void _handleRequestOk(RequestOkMessage message) {
     // Try namespace announcement first
     final announcement = _namespaceAnnouncements[message.requestId];
@@ -1686,6 +1692,72 @@ class MoQClient {
       nsSub.complete();
       _logger.i(
         'REQUEST_OK: namespace subscription successful: ${nsSub.namespacePrefixPath}',
+      );
+      return;
+    }
+
+    // Try track subscription (some relays send REQUEST_OK instead of SUBSCRIBE_OK)
+    final subscription = _subscriptions[message.requestId];
+    if (subscription != null) {
+      // Extract track alias and other fields from parameters if present
+      Int64 trackAlias = message.requestId; // fallback: use request ID
+      var expires = Int64(0);
+      var groupOrder = GroupOrder.none;
+      int contentExists = 0;
+      Location? largestLocation;
+
+      for (final param in message.parameters) {
+        switch (param.type) {
+          case TrackPropertyType.expires:
+            expires = Int64(param.intValue ?? 0);
+            break;
+          case SubscribeParameterType.groupOrder:
+            groupOrder =
+                GroupOrder.fromValue(param.intValue ?? 0) ?? GroupOrder.none;
+            break;
+          case TrackPropertyType.largestObject:
+            if (param.value != null && param.value!.isNotEmpty) {
+              final (loc, _) = MoQWireFormat.decodeLocation(param.value!, 0);
+              largestLocation = loc;
+              contentExists = 1;
+            }
+            break;
+        }
+      }
+
+      final trackNameStr = String.fromCharCodes(subscription.trackName);
+      _logger.i(
+        'REQUEST_OK (subscription): requestId=${message.requestId}, trackName=$trackNameStr',
+      );
+
+      subscription.complete(
+        trackAlias: trackAlias,
+        expires: expires,
+        groupOrder: groupOrder,
+        contentExists: contentExists == 1,
+        largestLocation: largestLocation,
+      );
+      subscription.assignedTrackAlias = trackAlias;
+
+      _trackAliases[trackAlias] = TrackInfo(
+        namespace: subscription.trackNamespace,
+        name: subscription.trackName,
+      );
+      return;
+    }
+
+    // Try outgoing publish
+    final publishCompleter = _pendingOutgoingPublishes.remove(message.requestId);
+    if (publishCompleter != null) {
+      _logger.i('REQUEST_OK (publish): requestId=${message.requestId}');
+      publishCompleter.complete(
+        PublishOkMessage(
+          requestId: message.requestId,
+          forward: 1,
+          subscriberPriority: 128,
+          groupOrder: GroupOrder.none,
+          filterType: FilterType.largestObject,
+        ),
       );
       return;
     }

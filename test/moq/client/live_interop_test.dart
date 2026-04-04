@@ -4,20 +4,38 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:moq_flutter/moq/client/moq_client.dart';
 import 'package:moq_flutter/moq/protocol/moq_messages.dart';
+import 'package:moq_flutter/moq/transport/moq_transport.dart';
 import 'package:moq_flutter/services/quic_transport.dart';
+import 'package:moq_flutter/services/webtransport_quinn_transport.dart';
 
 void main() {
   final config = _LiveInteropConfig.fromEnvironment();
 
+  MoQTransport _createTransport() {
+    if (config.useWebTransport) {
+      return WebTransportQuinnTransport();
+    }
+    return QuicTransport();
+  }
+
+  Map<String, String> _connectOptions() {
+    final opts = <String, String>{
+      'insecure': '${config.insecure}',
+    };
+    if (config.alpn != null) opts['moq_alpn'] = config.alpn!;
+    if (config.path != null) opts['path'] = config.path!;
+    return opts;
+  }
+
   group('Live draft-16 interop', () {
     test(
-      'connects to ${config.host}:${config.port} with ${config.versionLabel}',
+      'connects to ${config.host}:${config.port} with ${config.versionLabel} via ${config.transportLabel}',
       () async {
         if (!config.enabled) {
           return;
         }
 
-        final transport = QuicTransport();
+        final transport = _createTransport();
         final client = MoQClient(transport: transport);
 
         try {
@@ -25,10 +43,7 @@ void main() {
             config.host,
             config.port,
             targetVersion: config.targetVersion,
-            options: {
-              'insecure': '${config.insecure}',
-              if (config.alpn != null) 'moq_alpn': config.alpn!,
-            },
+            options: _connectOptions(),
           );
 
           expect(client.isConnected, isTrue);
@@ -56,7 +71,7 @@ void main() {
           return;
         }
 
-        final transport = QuicTransport();
+        final transport = _createTransport();
         final client = MoQClient(transport: transport);
 
         try {
@@ -64,10 +79,7 @@ void main() {
             config.host,
             config.port,
             targetVersion: config.targetVersion,
-            options: {
-              'insecure': '${config.insecure}',
-              if (config.alpn != null) 'moq_alpn': config.alpn!,
-            },
+            options: _connectOptions(),
           );
 
           final result = await client.subscribe(
@@ -98,7 +110,7 @@ void main() {
           return;
         }
 
-        final transport = QuicTransport();
+        final transport = _createTransport();
         final client = MoQClient(transport: transport);
 
         try {
@@ -106,10 +118,7 @@ void main() {
             config.host,
             config.port,
             targetVersion: config.targetVersion,
-            options: {
-              'insecure': '${config.insecure}',
-              if (config.alpn != null) 'moq_alpn': config.alpn!,
-            },
+            options: _connectOptions(),
           );
 
           final requestId = await client.announceNamespace(
@@ -137,6 +146,8 @@ class _LiveInteropConfig {
   final int port;
   final bool insecure;
   final String? alpn;
+  final String? path;
+  final bool useWebTransport;
   final int targetVersion;
   final List<String>? namespaceParts;
   final String? trackName;
@@ -148,6 +159,8 @@ class _LiveInteropConfig {
     required this.port,
     required this.insecure,
     required this.alpn,
+    required this.path,
+    required this.useWebTransport,
     required this.targetVersion,
     required this.namespaceParts,
     required this.trackName,
@@ -159,6 +172,7 @@ class _LiveInteropConfig {
     final host = env['MOQ_LIVE_HOST'] ?? 'fb.mvfst.net';
     final insecureEnv = env['MOQ_LIVE_INSECURE'];
     final targetVersion = _parseVersion(env['MOQ_LIVE_VERSION']);
+    final transport = env['MOQ_LIVE_TRANSPORT']?.toLowerCase();
     return _LiveInteropConfig(
       enabled: env['MOQ_LIVE_INTEROP'] == '1',
       host: host,
@@ -167,6 +181,8 @@ class _LiveInteropConfig {
           ? host == 'fb.mvfst.net'
           : insecureEnv == '1',
       alpn: _optionalEnv(env['MOQ_LIVE_ALPN']),
+      path: _optionalEnv(env['MOQ_LIVE_PATH']),
+      useWebTransport: transport == 'webtransport' || transport == 'wt',
       targetVersion: targetVersion,
       namespaceParts: _splitPath(env['MOQ_LIVE_NAMESPACE']),
       trackName: env['MOQ_LIVE_TRACK'],
@@ -177,17 +193,24 @@ class _LiveInteropConfig {
   String get versionLabel =>
       targetVersion == MoQVersion.draft16 ? 'draft-16' : 'draft-14';
 
+  String get transportLabel =>
+      useWebTransport ? 'WebTransport' : 'QUIC';
+
   int get expectedSelectedVersion => targetVersion;
 
   String? get skipReason => enabled
       ? null
-      : 'Set MOQ_LIVE_INTEROP=1 to enable live interop tests against fb.mvfst.net:9448.';
+      : 'Set MOQ_LIVE_INTEROP=1 to enable live interop tests.';
 
   String? get subscribeSkipReason =>
-      'Set MOQ_LIVE_NAMESPACE and MOQ_LIVE_TRACK to enable the live subscribe test.';
+      (namespaceParts != null && trackName != null)
+          ? null
+          : 'Set MOQ_LIVE_NAMESPACE and MOQ_LIVE_TRACK to enable the live subscribe test.';
 
   String? get publishSkipReason =>
-      'Set MOQ_LIVE_PUBLISH_NAMESPACE to enable the live publish namespace test.';
+      publishNamespaceParts != null
+          ? null
+          : 'Set MOQ_LIVE_PUBLISH_NAMESPACE to enable the live publish namespace test.';
 
   static List<String>? _splitPath(String? value) {
     if (value == null || value.trim().isEmpty) {
