@@ -6,6 +6,7 @@ use web_transport_quinn::proto::ConnectRequest;
 use quinn::{Endpoint, ClientConfig, TokioRuntime, EndpointConfig, TransportConfig};
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{ServerName, CertificateDer, UnixTime};
+use rustls::crypto::CryptoProvider;
 use dashmap::DashMap;
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
@@ -194,6 +195,22 @@ fn get_runtime() -> &'static Runtime {
 /// * `runtime_ptr` - Pointer to the Tokio runtime (from main module)
 #[no_mangle]
 pub extern "C" fn moq_webtransport_init() {
+    // Initialize logging (respects RUST_LOG env var) - may already be initialized by QUIC module
+    let _ = env_logger::try_init();
+
+    // Install default CryptoProvider for rustls (required for rustls 0.23+)
+    // This may already be installed by the QUIC module; install_default returns Err if so.
+    #[cfg(feature = "aws-lc-rs")]
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    #[cfg(not(feature = "aws-lc-rs"))]
+    let provider = rustls::crypto::ring::default_provider();
+    let _ = CryptoProvider::install_default(provider);
+
+    // Initialize Tokio runtime (separate from the QUIC module's runtime)
+    if WT_RUNTIME.set(Runtime::new().expect("Failed to create Tokio runtime")).is_err() {
+        log::warn!("WebTransport runtime already initialized");
+    }
+
     if WT_SESSIONS.set(DashMap::new()).is_err() {
         log::warn!("WebTransport sessions registry already initialized");
     }
@@ -292,12 +309,6 @@ pub extern "C" fn moq_webtransport_connect(
             Err(_) => return -2,
         }
     };
-
-    // Create runtime if not exists
-    if WT_RUNTIME.get().is_none() {
-        WT_RUNTIME.set(Runtime::new().expect("Failed to create Tokio runtime"))
-            .expect("Failed to set runtime");
-    }
 
     let runtime = get_runtime();
 
@@ -424,7 +435,7 @@ pub extern "C" fn moq_webtransport_connect(
     let session_arc = Arc::new(session);
     let endpoint_arc = Arc::new(endpoint);
     let recv_buffer = Arc::new(tokio::sync::Mutex::new(ReceiveBuffer::new(MAX_RECV_BUFFER_SIZE)));
-    let data_queue = Arc::new(tokio::sync::Mutex::new(DataStreamQueue::new(1024)));  // Queue up to 1024 chunks
+    let data_queue = Arc::new(tokio::sync::Mutex::new(DataStreamQueue::new(8192)));  // Queue up to 8192 chunks for concurrent streams
 
     sessions.insert(session_id, session_arc.clone());
     endpoints.insert(session_id, endpoint_arc);
@@ -520,6 +531,8 @@ pub extern "C" fn moq_webtransport_connect(
     });
 
     // Start background task to accept incoming unidirectional streams (data streams)
+    // Each accepted stream is spawned into its own task for concurrent reading,
+    // matching the QUIC transport's parallel stream handling.
     let session_for_task = session_arc.clone();
     let data_queue_for_task = data_queue.clone();
     runtime.spawn(async move {
@@ -531,51 +544,37 @@ pub extern "C" fn moq_webtransport_connect(
                     let stream_id = WT_NEXT_INCOMING_STREAM_ID.fetch_add(1, Ordering::SeqCst);
                     log::debug!("Accepted incoming unidirectional stream {} on session {}", stream_id, session_id);
 
-                    // Collect all data from this stream, then push as a complete chunk
-                    let mut stream_data = Vec::new();
-                    let mut buffer = vec![0u8; 8192];  // Larger buffer for data streams
-                    let mut is_complete = false;
-
-                    loop {
-                        match recv_stream.read(&mut buffer).await {
-                            Ok(None) => {
-                                // Stream closed - mark as complete
-                                is_complete = true;
-                                log::debug!("Incoming stream {} closed on session {} ({} bytes total)",
-                                    stream_id, session_id, stream_data.len());
-                                break;
-                            }
-                            Ok(Some(n)) => {
-                                // Accumulate data from this stream
-                                stream_data.extend_from_slice(&buffer[..n]);
-                                log::trace!("Received {} bytes on stream {} session {} (total: {})",
-                                    n, stream_id, session_id, stream_data.len());
-
-                                // Push intermediate chunks if we have enough data
-                                // This allows processing to start while stream is still open
-                                if stream_data.len() >= 4096 {
-                                    let mut queue = data_queue_for_task.lock().await;
-                                    let chunk = std::mem::take(&mut stream_data);
-                                    if !queue.push(stream_id, chunk, false) {
+                    // Spawn a task per stream so the accept loop isn't blocked
+                    let queue = data_queue_for_task.clone();
+                    tokio::spawn(async move {
+                        let mut buffer = vec![0u8; 64 * 1024]; // 64KB read buffer
+                        loop {
+                            match recv_stream.read(&mut buffer).await {
+                                Ok(None) => {
+                                    // Stream closed — push empty final chunk with is_complete
+                                    log::debug!("Incoming stream {} closed on session {}", stream_id, session_id);
+                                    let mut q = queue.lock().await;
+                                    if !q.push(stream_id, Vec::new(), true) {
+                                        log::warn!("Data queue full for session {}, dropping completion marker", session_id);
+                                    }
+                                    break;
+                                }
+                                Ok(Some(n)) => {
+                                    log::trace!("Received {} bytes on stream {} session {}", n, stream_id, session_id);
+                                    let mut q = queue.lock().await;
+                                    if !q.push(stream_id, buffer[..n].to_vec(), false) {
                                         log::warn!("Data queue full for session {}, dropping chunk", session_id);
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                log::error!("Error reading from stream {}: {:?}", stream_id, e);
-                                is_complete = true;  // Consider stream done on error
-                                break;
+                                Err(e) => {
+                                    log::error!("Error reading from stream {}: {:?}", stream_id, e);
+                                    let mut q = queue.lock().await;
+                                    let _ = q.push(stream_id, Vec::new(), true);
+                                    break;
+                                }
                             }
                         }
-                    }
-
-                    // Push final chunk with remaining data
-                    if !stream_data.is_empty() || is_complete {
-                        let mut queue = data_queue_for_task.lock().await;
-                        if !queue.push(stream_id, stream_data, is_complete) {
-                            log::warn!("Data queue full for session {}, dropping final chunk", session_id);
-                        }
-                    }
+                    });
                 }
                 Err(e) => {
                     log::error!("Error accepting incoming stream: {:?}", e);

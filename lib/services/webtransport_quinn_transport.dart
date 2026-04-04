@@ -600,8 +600,8 @@ class WebTransportQuinnTransport extends MoQTransport {
   MoQTransportStats get stats => _stats;
 
   void _startReceiving() {
-    // Poll for incoming data every 10ms
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 10), (_) {
+    // Poll for incoming data every 5ms for lower latency (matches QUIC transport)
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 5), (_) {
       if (!isConnected) return;
 
       // Poll control stream (bidirectional)
@@ -655,23 +655,24 @@ class WebTransportQuinnTransport extends MoQTransport {
     }
 
     try {
-      // Keep polling while there is data available
-      while (true) {
-        // Allocate buffers for data stream reception
-        // Use larger buffer for media data
-        final buffer = calloc<Uint8>(65536);
-        final streamIdPtr = calloc<Uint64>();
-        final isCompletePtr = calloc<Int32>();
+      // Allocate buffers once outside the loop to reduce allocation churn
+      final buffer = calloc<Uint8>(65536);
+      final streamIdPtr = calloc<Uint64>();
+      final isCompletePtr = calloc<Int32>();
 
-        final received = _moqWtRecvData!(
-          _sessionId,
-          streamIdPtr,
-          buffer,
-          65536,
-          isCompletePtr,
-        );
+      try {
+        // Keep polling while there is data available
+        while (true) {
+          final received = _moqWtRecvData!(
+            _sessionId,
+            streamIdPtr,
+            buffer,
+            65536,
+            isCompletePtr,
+          );
 
-        if (received > 0) {
+          if (received <= 0) break; // No more data available
+
           final streamId = streamIdPtr.value;
           final isComplete = isCompletePtr.value != 0;
 
@@ -698,21 +699,11 @@ class WebTransportQuinnTransport extends MoQTransport {
               isComplete: isComplete,
             ),
           );
-
-          calloc.free(buffer);
-          calloc.free(streamIdPtr);
-          calloc.free(isCompletePtr);
-
-          // Continue polling if we got data
-          continue;
         }
-
+      } finally {
         calloc.free(buffer);
         calloc.free(streamIdPtr);
         calloc.free(isCompletePtr);
-
-        // No more data available, exit loop
-        break;
       }
     } catch (e) {
       _logger.e('Data stream receive error: $e');

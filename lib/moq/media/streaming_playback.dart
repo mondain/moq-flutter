@@ -868,6 +868,9 @@ class StreamingPlaybackPipeline {
 
       // Diagnostic: write a copy to file for ffprobe inspection
       final tempDir = await getTemporaryDirectory();
+      if (!tempDir.existsSync()) {
+        tempDir.createSync(recursive: true);
+      }
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final diagFile = File('${tempDir.path}/moq_diag_combined_$timestamp.mp4');
       _diagSink = diagFile.openWrite();
@@ -901,6 +904,9 @@ class StreamingPlaybackPipeline {
   /// Fallback file-based initialization
   Future<void> _initializeWithFile() async {
     final tempDir = await getTemporaryDirectory();
+    if (!tempDir.existsSync()) {
+      tempDir.createSync(recursive: true);
+    }
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     _outputFile = File('${tempDir.path}/moq_combined_$timestamp.mp4');
     _outputSink = _outputFile!.openWrite();
@@ -1091,7 +1097,12 @@ class StreamingPlaybackPipeline {
 
   /// Write data to the single combined output stream
   void _write(Uint8List data) {
-    _diagSink?.add(data);
+    try {
+      _diagSink?.add(data);
+    } catch (_) {
+      // Diagnostic file write failure is non-fatal
+      _diagSink = null;
+    }
 
     if (_useHttp) {
       if (_clientReady) {
