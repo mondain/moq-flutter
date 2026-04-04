@@ -913,6 +913,20 @@ class StreamingPlaybackPipeline {
     );
   }
 
+  /// Pre-seed AVC decoder config from catalog initData.
+  ///
+  /// Call this before any objects arrive to allow the pipeline to write
+  /// the fMP4 init segment as soon as the first frame arrives, rather
+  /// than waiting for a keyframe with inline SPS/PPS.
+  void seedVideoConfig(Uint8List avcDecoderConfig) {
+    _videoMuxer.setAvcDecoderConfig(avcDecoderConfig);
+    _videoConfigReady = true;
+    debugPrint(
+      'StreamingPlayback: Video config seeded from catalog '
+      '(${avcDecoderConfig.length} bytes)',
+    );
+  }
+
   /// Process a MoQ object through the pipeline
   void processObject(dynamic object) {
     _mediaPipeline.processObject(object);

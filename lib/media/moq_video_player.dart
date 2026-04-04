@@ -190,6 +190,26 @@ class MoQVideoPlayer {
     }
 
     await initialize(session.mediaSubscriptions);
+
+    // Pre-seed AVC decoder config from catalog initData if available (LOC/MSF).
+    // This avoids waiting for the first keyframe to extract SPS/PPS inline.
+    for (final track in session.mediaTracks) {
+      if (track.initData != null &&
+          track.initData!.isNotEmpty &&
+          (track.role == 'video' || track.name.contains('video'))) {
+        try {
+          final config = base64.decode(track.initData!);
+          _playbackPipeline!.seedVideoConfig(config);
+          _logger.i(
+            'Pre-seeded AVC config from catalog initData '
+            '(${config.length} bytes) for track ${track.name}',
+          );
+        } catch (e) {
+          _logger.w('Failed to decode initData for ${track.name}: $e');
+        }
+        break;
+      }
+    }
   }
 
   /// Initialize the player with a single MoQ subscription (legacy API)
