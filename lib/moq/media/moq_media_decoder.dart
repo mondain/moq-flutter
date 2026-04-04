@@ -146,6 +146,13 @@ class MoqMediaDecoder {
 
     if (isKeyframe) {
       _hasReceivedKeyframe = true;
+      // Extract SPS/PPS from keyframe NALs to build AVC decoder config
+      final config = _extractAvcDecoderConfig(data);
+      if (config != null) {
+        _lastVideoCodecConfig = config;
+        debugPrint('MoqMediaDecoder: LOC extracted AVC config '
+            '(${config.length} bytes) from keyframe');
+      }
     }
 
     if (!_hasReceivedKeyframe) {
@@ -164,8 +171,114 @@ class MoqMediaDecoder {
       duration: Int64(3000), // ~33ms at 90kHz
       wallclock: wallclock,
       data: data,
+      codecConfig: isKeyframe ? _lastVideoCodecConfig : null,
       isKeyframe: isKeyframe,
     );
+  }
+
+  /// Extract SPS and PPS NAL units from H.264 data and build an
+  /// AVCDecoderConfigurationRecord for the fMP4 init segment.
+  /// Handles both Annex-B (start codes) and AVCC (length-prefixed) formats.
+  Uint8List? _extractAvcDecoderConfig(Uint8List data) {
+    final nalUnits = _extractNalUnits(data);
+    Uint8List? sps;
+    Uint8List? pps;
+
+    for (final nal in nalUnits) {
+      if (nal.isEmpty) continue;
+      final nalType = nal[0] & 0x1F;
+      if (nalType == 7 && sps == null) sps = nal; // SPS
+      if (nalType == 8 && pps == null) pps = nal; // PPS
+    }
+
+    if (sps == null || pps == null) return null;
+
+    // Build AVCDecoderConfigurationRecord
+    // configurationVersion(1) + AVCProfileIndication(1) +
+    // profile_compatibility(1) + AVCLevelIndication(1) +
+    // lengthSizeMinusOne(1) + numSPS(1) + spsLength(2) + sps +
+    // numPPS(1) + ppsLength(2) + pps
+    final config = Uint8List(11 + sps.length + pps.length);
+    int off = 0;
+    config[off++] = 1; // configurationVersion
+    config[off++] = sps.length > 1 ? sps[1] : 0x42; // profile
+    config[off++] = sps.length > 2 ? sps[2] : 0x00; // compatibility
+    config[off++] = sps.length > 3 ? sps[3] : 0x1E; // level
+    config[off++] = 0xFF; // 6 bits reserved (111111) + 2 bits NALU length size - 1 (11 = 4 bytes)
+    config[off++] = 0xE1; // 3 bits reserved (111) + 5 bits number of SPS (1)
+    config[off++] = (sps.length >> 8) & 0xFF;
+    config[off++] = sps.length & 0xFF;
+    config.setAll(off, sps);
+    off += sps.length;
+    config[off++] = 1; // number of PPS
+    config[off++] = (pps.length >> 8) & 0xFF;
+    config[off++] = pps.length & 0xFF;
+    config.setAll(off, pps);
+
+    return config;
+  }
+
+  /// Extract individual NAL units from H.264 data in either Annex-B or AVCC format.
+  List<Uint8List> _extractNalUnits(Uint8List data) {
+    final nals = <Uint8List>[];
+
+    // Try Annex-B first (start codes)
+    if (_hasAnnexBStartCodes(data)) {
+      int i = 0;
+      while (i < data.length) {
+        // Find start code
+        int startCodeLen = 0;
+        if (i + 3 < data.length &&
+            data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1) {
+          startCodeLen = 4;
+        } else if (i + 2 < data.length &&
+            data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
+          startCodeLen = 3;
+        }
+
+        if (startCodeLen > 0) {
+          final nalStart = i + startCodeLen;
+          // Find next start code or end
+          int nalEnd = data.length;
+          for (int j = nalStart; j < data.length - 2; j++) {
+            if (data[j] == 0 && data[j + 1] == 0 &&
+                (data[j + 2] == 1 || (j + 3 < data.length && data[j + 2] == 0 && data[j + 3] == 1))) {
+              nalEnd = j;
+              break;
+            }
+          }
+          if (nalStart < nalEnd) {
+            nals.add(data.sublist(nalStart, nalEnd));
+          }
+          i = nalEnd;
+        } else {
+          i++;
+        }
+      }
+    } else {
+      // AVCC format (4-byte length prefix)
+      int offset = 0;
+      while (offset + 4 < data.length) {
+        final nalLength = (data[offset] << 24) | (data[offset + 1] << 16) |
+            (data[offset + 2] << 8) | data[offset + 3];
+        if (nalLength <= 0 || nalLength > data.length - offset - 4) break;
+        nals.add(data.sublist(offset + 4, offset + 4 + nalLength));
+        offset += 4 + nalLength;
+      }
+    }
+
+    return nals;
+  }
+
+  bool _hasAnnexBStartCodes(Uint8List data) {
+    for (int i = 0; i < data.length - 3; i++) {
+      if (data[i] == 0 && data[i + 1] == 0) {
+        if (data[i + 2] == 1 || (i + 3 < data.length && data[i + 2] == 0 && data[i + 3] == 1)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   MediaFrame? _decodeLocAudio(MoQObject object, Int64 wallclock) {
